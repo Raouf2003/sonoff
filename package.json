@@ -1,0 +1,17 @@
+{
+  "name": "sonoff-smart-home",
+  "version": "1.0.0",
+  "description": "Smart home backend for Sonoff 4CH Pro R3 (Tasmota)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "virtual": "node virtual_mqtt_device.js",
+    "dev": "node server.js & node virtual_mqtt_device.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "mqtt": "^5.10.0",
+    "socket.io": "^4.7.5"
+  }
+}
