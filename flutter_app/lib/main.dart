@@ -89,7 +89,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   void _connectSocket() {
     _socket = IO.io('$kProtocol://$kServerIp', <String, dynamic>{
-      'transports': ['websocket'],
+      'secure': true,
       'autoConnect': false,
     });
 
@@ -101,8 +101,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => _connected = false);
     });
 
-    _socket?.onConnectError((_) {
+    _socket?.onConnectError((data) {
+      print('Socket connection error: $data');
       if (mounted) setState(() => _connected = false);
+    });
+
+    _socket?.onError((data) {
+      print('Socket error: $data');
     });
 
     _socket?.on('device_update', (data) {
