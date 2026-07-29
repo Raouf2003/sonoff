@@ -6,7 +6,7 @@ const mqtt = require('mqtt');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
+const BROKER_URL = process.env.MQTT_BROKER_URL;
 const DEVICE_NAME = process.env.DEVICE_NAME || 'smarthome';
 
 const server = http.createServer(app);
@@ -18,36 +18,46 @@ app.use(cors());
 app.use(express.json());
 
 const deviceState = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
+let mqttClient = null;
 
-const mqttClient = mqtt.connect(BROKER_URL);
-
-mqttClient.on('connect', () => {
-  console.log(`Backend connected to MQTT broker at ${BROKER_URL}`);
-  mqttClient.subscribe(`stat/${DEVICE_NAME}/+/RESULT`);
-  mqttClient.subscribe(`tele/${DEVICE_NAME}/+/STATE`);
-});
-
-mqttClient.on('error', (err) => {
-  console.error('MQTT error:', err.message);
-});
-
-mqttClient.on('message', (topic, message) => {
-  const topicStr = topic.toString();
-  const payload = message.toString();
-
-  try {
-    const data = JSON.parse(payload);
-    for (let i = 1; i <= 4; i++) {
-      const key = `POWER${i}`;
-      if (data[key]) {
-        deviceState[i] = data[key];
-        io.emit('device_update', { channel: i, state: data[key] });
-      }
-    }
-  } catch {
-    // Ignore non-JSON payloads
+function connectMQTT() {
+  if (!BROKER_URL || !BROKER_URL.startsWith('mqtt')) {
+    console.log(`MQTT broker not configured. Set MQTT_BROKER_URL env var. API will work but no device control.`);
+    return;
   }
-});
+
+  mqttClient = mqtt.connect(BROKER_URL);
+
+  mqttClient.on('connect', () => {
+    console.log(`Backend connected to MQTT broker at ${BROKER_URL}`);
+    mqttClient.subscribe(`stat/${DEVICE_NAME}/+/RESULT`);
+    mqttClient.subscribe(`tele/${DEVICE_NAME}/+/STATE`);
+  });
+
+  mqttClient.on('error', (err) => {
+    console.error('MQTT error:', err.message);
+  });
+
+  mqttClient.on('message', (topic, message) => {
+    const topicStr = topic.toString();
+    const payload = message.toString();
+
+    try {
+      const data = JSON.parse(payload);
+      for (let i = 1; i <= 4; i++) {
+        const key = `POWER${i}`;
+        if (data[key]) {
+          deviceState[i] = data[key];
+          io.emit('device_update', { channel: i, state: data[key] });
+        }
+      }
+    } catch {
+      // Ignore non-JSON payloads
+    }
+  });
+}
+
+connectMQTT();
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -70,6 +80,10 @@ app.post('/api/control', (req, res) => {
   const validStates = ['ON', 'OFF', 'TOGGLE'];
   if (!validStates.includes(state.toUpperCase())) {
     return res.status(400).json({ error: 'state must be ON, OFF, or TOGGLE' });
+  }
+
+  if (!mqttClient) {
+    return res.status(503).json({ error: 'MQTT broker not configured. Set MQTT_BROKER_URL env var.' });
   }
 
   const commandTopic = `cmnd/${DEVICE_NAME}/POWER${channel}`;
