@@ -26,7 +26,12 @@ function connectMQTT() {
     return;
   }
 
-  mqttClient = mqtt.connect(BROKER_URL);
+  const options = {
+    username: process.env.MQTT_USERNAME,
+    password: process.env.MQTT_PASSWORD,
+  };
+
+  mqttClient = mqtt.connect(BROKER_URL, options);
 
   mqttClient.on('connect', () => {
     console.log(`Backend connected to MQTT broker at ${BROKER_URL}`);
