@@ -39,10 +39,10 @@ class ChannelConfig {
 }
 
 const channels = [
-  ChannelConfig('Main Valve', Icons.water, Color(0xFF4FC3F7), Color(0x664FC3F7)),
-  ChannelConfig('Water Pump', Icons.water_drop, Color(0xFF29B6F6), Color(0x6629B6F6)),
   ChannelConfig('Zone 1', Icons.grass, Color(0xFF81C784), Color(0x6681C784)),
   ChannelConfig('Zone 2', Icons.agriculture, Color(0xFFA5D6A7), Color(0x66A5D6A7)),
+  ChannelConfig('Zone 3', Icons.eco, Color(0xFFFFB74D), Color(0x66FFB74D)),
+  ChannelConfig('Zone 4', Icons.local_florist, Color(0xFFFF8A65), Color(0x66FF8A65)),
 ];
 
 class HomePage extends StatefulWidget {
@@ -89,6 +89,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   void _connectSocket() {
     _socket = IO.io('$kProtocol://$kServerIp', <String, dynamic>{
+      'transports': ['websocket'],
       'secure': true,
       'autoConnect': false,
     });

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STEES Device</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0D1117; color: #e0e0e0;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 20px;
+  }
+  .container { max-width: 500px; width: 100%; }
+  h1 { text-align: center; font-size: 28px; font-weight: 800; letter-spacing: 3px; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #666; font-size: 13px; margin-bottom: 24px; }
+  .badge {
+    display: flex; justify-content: center; align-items: center; gap: 8px;
+    margin-bottom: 20px; font-size: 13px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.green { background: #4CAF50; box-shadow: 0 0 8px #4CAF5066; }
+  .dot.yellow { background: #FFC107; box-shadow: 0 0 8px #FFC10766; }
+  .dot.red { background: #f44336; box-shadow: 0 0 8px #f4433666; }
+  .card {
+    cursor: pointer;
+    background: #1C2333; border-radius: 16px; padding: 18px 20px;
+    margin-bottom: 10px; display: flex; align-items: center;
+    justify-content: space-between; transition: all 0.3s;
+    border: 1.5px solid transparent;
+    user-select: none;
+  }
+  .card.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 12%, #1C2333); }
+  .card:active { transform: scale(0.97); }
+  .info { display: flex; align-items: center; gap: 14px; }
+  .icon { font-size: 26px; }
+  .name { font-size: 15px; font-weight: 600; }
+  .ch { font-size: 11px; color: #888; margin-top: 1px; }
+  .state {
+    padding: 5px 14px; border-radius: 20px; font-size: 12px;
+    font-weight: 700; letter-spacing: 1px; transition: all 0.3s;
+  }
+  .state.on { background: var(--c); color: #000; }
+  .state.off { background: #2a2a2a; color: #666; }
+  .footer { text-align: center; margin-top: 16px; font-size: 12px; color: #444; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>STEES</h1>
+  <p class="subtitle" id="deviceLabel">Smart Irrigation Controller</p>
+  <div class="badge">
+    <span class="dot red" id="statusDot"></span>
+    <span id="statusText">Connecting...</span>
+  </div>
+  <div id="cards"></div>
+  <p class="footer" id="log">—</p>
+</div>
+
+<script>
+  const channels = [
+    { id: 1, name: 'Zone 1', icon: '🌱', color: '#81C784' },
+    { id: 2, name: 'Zone 2', icon: '🌿', color: '#A5D6A7' },
+    { id: 3, name: 'Zone 3', icon: '🌾', color: '#FFB74D' },
+    { id: 4, name: 'Zone 4', icon: '🌸', color: '#FF8A65' },
+  ];
+  const states = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const log = document.getElementById('log');
+  let mqttClient = null;
+
+  function logMsg(msg) { log.textContent = msg; }
+
+  function render() {
+    document.getElementById('cards').innerHTML = channels.map(ch => {
+      const on = states[ch.id] === 'ON';
+      return `<div class="card ${on ? 'on' : ''}" style="--c:${ch.color}" onclick="toggle(${ch.id})">
+        <div class="info">
+          <div class="icon">${ch.icon}</div>
+          <div>
+            <div class="name">${ch.name}</div>
+            <div class="ch">CH${ch.id}</div>
+          </div>
+        </div>
+        <div class="state ${on ? 'on' : 'off'}" style="--c:${ch.color}">
+          ${on ? 'ACTIVE' : 'STANDBY'}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function setStatus(color, label) {
+    dot.className = 'dot ' + color;
+    text.textContent = label;
+  }
+
+  // ── MQTT (device mode) ──────────────────────────────────
+  function startMQTT() {
+    const url = 'wss://5a86e38080744eb89c62cd93cf7b9249.s1.eu.hivemq.cloud:8884/mqtt';
+    mqttClient = mqtt.connect(url, { username: 'raouf', password: 'raouf2003' });
+
+    mqttClient.on('connect', () => {
+      setStatus('green', 'MQTT Connected');
+      logMsg('Connected to HiveMQ');
+      mqttClient.subscribe('cmnd/smarthome/+', (err) => {
+        if (err) logMsg('Subscribe error');
+        else logMsg('Listening for commands...');
+      });
+    });
+
+    mqttClient.on('message', (topic, message) => {
+      const t = topic.toString();
+      const payload = message.toString().trim().toUpperCase();
+      const match = t.match(/^cmnd\/smarthome\/POWER(\d)$/);
+      if (!match || !['ON','OFF'].includes(payload)) return;
+
+      const ch = parseInt(match[1]);
+      if (ch < 1 || ch > 4) return;
+
+      states[ch] = payload;
+      render();
+      logMsg(`Relay ${ch} → ${payload} (via MQTT)`);
+
+      const resultTopic = `stat/smarthome/POWER${ch}/RESULT`;
+      mqttClient.publish(resultTopic, JSON.stringify({ ['POWER' + ch]: payload }));
+    });
+
+    mqttClient.on('error', (err) => {
+      logMsg('MQTT error: ' + err.message);
+      setStatus('red', 'MQTT Error');
+    });
+
+    mqttClient.on('close', () => {
+      setStatus('red', 'MQTT Disconnected');
+    });
+  }
+
+  // ── Fallback sync via Render socket.io ──────────────────
+  function startSocketIO() {
+    const socket = io('https://sonoff.onrender.com', { transports: ['websocket'] });
+    socket.on('connect', () => {
+      if (!mqttClient || !mqttClient.connected) setStatus('yellow', 'Socket connected (no MQTT)');
+    });
+    socket.on('connect_error', () => {});
+    socket.on('device_update', (data) => {
+      states[data.channel] = data.state;
+      render();
+      logMsg(`Relay ${data.channel} → ${data.state} (via sync)`);
+    });
+  }
+
+  // ── Toggle (publish MQTT directly) ──────────────────────
+  function toggle(ch) {
+    if (!mqttClient || !mqttClient.connected) {
+      logMsg('MQTT not connected, using HTTP fallback...');
+      const newState = states[ch] === 'ON' ? 'OFF' : 'ON';
+      fetch('https://sonoff.onrender.com/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: ch, state: newState }),
+      }).catch(e => logMsg('HTTP toggle failed'));
+      return;
+    }
+    const newState = states[ch] === 'ON' ? 'OFF' : 'ON';
+    states[ch] = newState;
+    render();
+    const topic = `cmnd/smarthome/POWER${ch}`;
+    mqttClient.publish(topic, newState);
+    logMsg(`Sent: ${topic} → ${newState}`);
+  }
+
+  // ── Fetch initial status from Render ────────────────────
+  fetch('https://sonoff.onrender.com/api/status')
+    .then(r => r.json())
+    .then(data => {
+      for (let i = 1; i <= 4; i++) states[i] = data[`POWER${i}`] || 'OFF';
+      render();
+    })
+    .catch(() => render());
+
+  startMQTT();
+  startSocketIO();
+  render();
+</script>
+</body>
+</html>

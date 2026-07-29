@@ -35,8 +35,9 @@ function connectMQTT() {
 
   mqttClient.on('connect', () => {
     console.log(`Backend connected to MQTT broker at ${BROKER_URL}`);
-    mqttClient.subscribe(`stat/${DEVICE_NAME}/+/RESULT`);
-    mqttClient.subscribe(`tele/${DEVICE_NAME}/+/STATE`);
+    mqttClient.subscribe(`stat/${DEVICE_NAME}/RESULT`);
+    mqttClient.subscribe(`stat/${DEVICE_NAME}/POWER+`);
+    mqttClient.subscribe(`tele/${DEVICE_NAME}/STATE`);
   });
 
   mqttClient.on('error', (err) => {
