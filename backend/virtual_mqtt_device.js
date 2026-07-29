@@ -1,16 +1,18 @@
 const mqtt = require('mqtt');
 
-const BROKER_URL = 'mqtt://localhost:1883';
-const DEVICE_NAME = 'smarthome';
+const BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
+const USERNAME = process.env.MQTT_USERNAME;
+const PASSWORD = process.env.MQTT_PASSWORD;
+const DEVICE_NAME = process.env.DEVICE_NAME || 'smarthome';
 
 const relays = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
 
-const client = mqtt.connect(BROKER_URL);
+const client = mqtt.connect(BROKER_URL, { username: USERNAME, password: PASSWORD });
 
 client.on('connect', () => {
-  console.log('Virtual Sonoff connected to MQTT broker');
+  console.log(`Virtual Sonoff connected to ${BROKER_URL}`);
   client.subscribe(`cmnd/${DEVICE_NAME}/#`, (err) => {
-    if (!err) console.log('Subscribed to cmnd/smarthome/#');
+    if (!err) console.log(`Subscribed to cmnd/${DEVICE_NAME}/#`);
   });
 });
 

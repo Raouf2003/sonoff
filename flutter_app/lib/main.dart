@@ -3,8 +3,8 @@ import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'dart:convert';
 
-const String kServerIp = '192.168.1.43';
-const int kServerPort = 3001;
+const String kServerIp = 'sonoff.onrender.com';
+const String kProtocol = 'https';
 
 void main() {
   runApp(const SteesApp());
@@ -88,7 +88,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   void _connectSocket() {
-    _socket = IO.io('http://$kServerIp:$kServerPort', <String, dynamic>{
+    _socket = IO.io('$kProtocol://$kServerIp', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': false,
     });
@@ -125,7 +125,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _fetchInitialStatus() async {
-    final url = 'http://$kServerIp:$kServerPort/api/status';
+    final url = '$kProtocol://$kServerIp/api/status';
     try {
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
@@ -173,7 +173,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
     try {
       final response = await http.post(
-        Uri.parse('http://$kServerIp:$kServerPort/api/control'),
+        Uri.parse('$kProtocol://$kServerIp/api/control'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'channel': channel, 'state': targetState ? 'ON' : 'OFF'}),
       );
