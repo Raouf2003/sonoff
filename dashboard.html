@@ -125,7 +125,7 @@
       render();
       logMsg(`Relay ${ch} → ${payload} (via MQTT)`);
 
-      const resultTopic = `stat/smarthome/POWER${ch}/RESULT`;
+      const resultTopic = `stat/smarthome/RESULT`;
       mqttClient.publish(resultTopic, JSON.stringify({ ['POWER' + ch]: payload }));
     });
 
