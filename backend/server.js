@@ -104,11 +104,18 @@ io.on('connection', (socket) => {
   });
 });
 
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not configured',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    devices: Object.keys(deviceStates),
+  });
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api', authMiddleware, controlRoutes);
-
-app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not configured',

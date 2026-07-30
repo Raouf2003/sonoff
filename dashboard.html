@@ -3,61 +3,128 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>STEES Device</title>
+<title>STEES — Device</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap" rel="stylesheet">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0D1117; color: #e0e0e0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0B1922;
+    color: #F1F5F9;
     display: flex; justify-content: center; align-items: center;
     min-height: 100vh; padding: 20px;
   }
-  .container { max-width: 500px; width: 100%; }
-  h1 { text-align: center; font-size: 28px; font-weight: 800; letter-spacing: 3px; margin-bottom: 4px; }
-  .device-id { text-align: center; color: #555; font-size: 12px; font-family: monospace; margin-bottom: 2px; }
-  .subtitle { text-align: center; color: #666; font-size: 13px; margin-bottom: 20px; }
-  .badge {
-    display: flex; justify-content: center; align-items: center; gap: 8px;
-    margin-bottom: 20px; font-size: 13px;
+  .container { max-width: 480px; width: 100%; }
+
+  .head {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 6px;
   }
-  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .dot.green { background: #4CAF50; box-shadow: 0 0 8px #4CAF5066; }
-  .dot.yellow { background: #FFC107; box-shadow: 0 0 8px #FFC10766; }
-  .dot.red { background: #f44336; box-shadow: 0 0 8px #f4433666; }
+  .logo {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: linear-gradient(135deg, #2DD4BF, #34D399);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Sora', sans-serif; font-weight: 700; font-size: 20px;
+    color: #0B1922;
+    box-shadow: 0 0 20px rgba(45, 212, 191, 0.3);
+    flex-shrink: 0;
+  }
+  .head-text h1 {
+    font-family: 'Sora', sans-serif; font-size: 20px; font-weight: 700;
+    letter-spacing: 2px; color: #F1F5F9; line-height: 1.2;
+  }
+  .head-text p {
+    font-size: 11px; color: #94A3B8; letter-spacing: 0.5px;
+  }
+  .badge {
+    display: flex; align-items: center; gap: 8px;
+    margin-left: auto; font-size: 12px;
+  }
+  .droplet {
+    width: 10px; height: 10px; border-radius: 50%;
+    transition: all 0.5s;
+  }
+  .droplet.green { background: #2DD4BF; box-shadow: 0 0 10px rgba(45, 212, 191, 0.5); }
+  .droplet.yellow { background: #FBBF24; box-shadow: 0 0 10px rgba(251, 191, 36, 0.4); }
+  .droplet.red { background: #EF4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.4); }
+
+  .device-id {
+    font-family: 'Inter', monospace; font-size: 12px;
+    color: #94A3B8; margin-bottom: 12px;
+    letter-spacing: 0.3px;
+  }
+  .device-id span { color: #2DD4BF; }
+
   .card {
     cursor: pointer;
-    background: #1C2333; border-radius: 16px; padding: 18px 20px;
-    margin-bottom: 10px; display: flex; align-items: center;
-    justify-content: space-between; transition: all 0.3s;
-    border: 1.5px solid transparent;
+    background: #1A2D3D;
+    border-radius: 24px;
+    padding: 20px;
+    margin-bottom: 12px;
+    display: flex; align-items: center;
+    justify-content: space-between;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    border: 1.5px solid rgba(255,255,255,0.06);
     user-select: none;
+    position: relative;
+    overflow: hidden;
   }
-  .card.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 12%, #1C2333); }
+  .card.on {
+    border-color: var(--c);
+    background: color-mix(in srgb, var(--c) 10%, #1A2D3D);
+    box-shadow: 0 0 24px color-mix(in srgb, var(--c) 15%, transparent);
+  }
   .card:active { transform: scale(0.97); }
-  .info { display: flex; align-items: center; gap: 14px; }
-  .icon { font-size: 26px; }
-  .name { font-size: 15px; font-weight: 600; }
-  .ch { font-size: 11px; color: #888; margin-top: 1px; }
-  .state {
-    padding: 5px 14px; border-radius: 20px; font-size: 12px;
-    font-weight: 700; letter-spacing: 1px; transition: all 0.3s;
+
+  .card.on::after {
+    content: '';
+    position: absolute; bottom: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, var(--c), transparent);
+    animation: flow 2s ease-in-out infinite;
   }
-  .state.on { background: var(--c); color: #000; }
-  .state.off { background: #2a2a2a; color: #666; }
-  .footer { text-align: center; margin-top: 16px; font-size: 12px; color: #444; }
+  @keyframes flow {
+    0% { transform: translateX(-100%); opacity: 0; }
+    50% { opacity: 1; }
+    100% { transform: translateX(100%); opacity: 0; }
+  }
+
+  .info { display: flex; align-items: center; gap: 14px; position: relative; z-index: 1; }
+  .icon { font-size: 28px; }
+  .name { font-family: 'Sora', sans-serif; font-size: 14px; font-weight: 600; }
+  .ch { font-size: 10px; color: #94A3B8; letter-spacing: 1.2px; margin-top: 2px; }
+  .ch.on { color: var(--c); }
+
+  .state {
+    padding: 6px 16px; border-radius: 20px;
+    font-family: 'Inter', sans-serif; font-size: 11px;
+    font-weight: 600; letter-spacing: 1.2px;
+    transition: all 0.3s;
+    position: relative; z-index: 1;
+  }
+  .state.on { background: var(--c); color: #0B1922; }
+  .state.off { background: rgba(148, 163, 184, 0.1); color: #94A3B8; }
+
+  .footer { text-align: center; margin-top: 16px; font-size: 11px; color: #4A5A6A; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>STEES</h1>
-  <p class="device-id" id="deviceIdLabel">Device: —</p>
-  <p class="subtitle">Smart Irrigation Controller</p>
-  <div class="badge">
-    <span class="dot red" id="statusDot"></span>
-    <span id="statusText">Connecting...</span>
+  <div class="head">
+    <div class="logo">S</div>
+    <div class="head-text">
+      <h1>STEES</h1>
+      <p>Smart Irrigation</p>
+    </div>
+    <div class="badge">
+      <span class="droplet red" id="statusDot"></span>
+      <span id="statusText" style="color:#94A3B8;">Connecting...</span>
+    </div>
   </div>
+  <p class="device-id">Device · <span id="deviceIdLabel">—</span></p>
   <div id="cards"></div>
   <p class="footer" id="log">—</p>
 </div>
@@ -65,14 +132,13 @@
 <script>
   const params = new URLSearchParams(window.location.search);
   const DEVICE_ID = params.get('deviceId') || 'smarthome';
-
-  document.getElementById('deviceIdLabel').textContent = 'Device: ' + DEVICE_ID;
+  document.getElementById('deviceIdLabel').textContent = DEVICE_ID;
 
   const channels = [
-    { id: 1, name: 'Zone 1', icon: '🌱', color: '#81C784' },
-    { id: 2, name: 'Zone 2', icon: '🌿', color: '#A5D6A7' },
-    { id: 3, name: 'Zone 3', icon: '🌾', color: '#FFB74D' },
-    { id: 4, name: 'Zone 4', icon: '🌸', color: '#FF8A65' },
+    { id: 1, name: 'Zone 1', icon: '💧', color: '#2DD4BF' },
+    { id: 2, name: 'Zone 2', icon: '💧', color: '#2DD4BF' },
+    { id: 3, name: 'Zone 3', icon: '💧', color: '#2DD4BF' },
+    { id: 4, name: 'Zone 4', icon: '💧', color: '#2DD4BF' },
   ];
   const states = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
   const dot = document.getElementById('statusDot');
@@ -89,19 +155,19 @@
         <div class="info">
           <div class="icon">${ch.icon}</div>
           <div>
-            <div class="name">${ch.name}</div>
-            <div class="ch">CH${ch.id}</div>
+            <div class="name" style="color:${on ? ch.color : '#F1F5F9'}">${ch.name}</div>
+            <div class="ch ${on ? 'on' : ''}" style="--c:${ch.color}">ZONE ${ch.id}</div>
           </div>
         </div>
         <div class="state ${on ? 'on' : 'off'}" style="--c:${ch.color}">
-          ${on ? 'ACTIVE' : 'STANDBY'}
+          ${on ? 'FLOWING' : 'DRY'}
         </div>
       </div>`;
     }).join('');
   }
 
   function setStatus(color, label) {
-    dot.className = 'dot ' + color;
+    dot.className = 'droplet ' + color;
     text.textContent = label;
   }
 
@@ -110,11 +176,10 @@
     mqttClient = mqtt.connect(url, { username: 'raouf', password: 'raouf2003' });
 
     mqttClient.on('connect', () => {
-      setStatus('green', 'MQTT Connected');
-      logMsg('Connected to HiveMQ');
+      setStatus('green', 'Connected');
+      logMsg('Listening on ' + DEVICE_ID + '...');
       mqttClient.subscribe('cmnd/' + DEVICE_ID + '/+', (err) => {
         if (err) logMsg('Subscribe error');
-        else logMsg('Listening for commands on ' + DEVICE_ID + '...');
       });
     });
 
@@ -123,53 +188,44 @@
       const payload = message.toString().trim().toUpperCase();
       const match = t.match(new RegExp('^cmnd\\/' + DEVICE_ID + '\\/POWER(\\d)$'));
       if (!match || !['ON','OFF'].includes(payload)) return;
-
       const ch = parseInt(match[1]);
       if (ch < 1 || ch > 4) return;
-
       states[ch] = payload;
       render();
-      logMsg(`Relay ${ch} \u2192 ${payload} (via MQTT)`);
-
-      const resultTopic = 'stat/' + DEVICE_ID + '/RESULT';
-      mqttClient.publish(resultTopic, JSON.stringify({ ['POWER' + ch]: payload }));
+      logMsg('Zone ' + ch + ' \u2192 ' + payload);
+      mqttClient.publish('stat/' + DEVICE_ID + '/RESULT', JSON.stringify({ ['POWER' + ch]: payload }));
     });
 
     mqttClient.on('error', (err) => {
       logMsg('MQTT error: ' + err.message);
-      setStatus('red', 'MQTT Error');
+      setStatus('red', 'Error');
     });
-
-    mqttClient.on('close', () => {
-      setStatus('red', 'MQTT Disconnected');
-    });
+    mqttClient.on('close', () => setStatus('red', 'Disconnected'));
   }
 
   function startSocketIO() {
     const socket = io('https://sonoff.onrender.com', { transports: ['websocket'] });
     socket.on('connect', () => {
-      if (!mqttClient || !mqttClient.connected) setStatus('yellow', 'Socket connected (no MQTT)');
+      if (!mqttClient || !mqttClient.connected) setStatus('yellow', 'Relay');
     });
-    socket.on('connect_error', () => {});
     socket.on('device_update', (data) => {
       if (data.deviceId !== DEVICE_ID) return;
       states[data.channel] = data.state;
       render();
-      logMsg(`Relay ${data.channel} \u2192 ${data.state} (via sync)`);
+      logMsg('Zone ' + data.channel + ' \u2192 ' + data.state + ' (synced)');
     });
   }
 
   function toggle(ch) {
     if (!mqttClient || !mqttClient.connected) {
-      logMsg('MQTT not connected, cannot toggle');
+      logMsg('MQTT disconnected');
       return;
     }
     const newState = states[ch] === 'ON' ? 'OFF' : 'ON';
     states[ch] = newState;
     render();
-    const topic = 'cmnd/' + DEVICE_ID + '/POWER' + ch;
-    mqttClient.publish(topic, newState);
-    logMsg('Sent: ' + topic + ' \u2192 ' + newState);
+    mqttClient.publish('cmnd/' + DEVICE_ID + '/POWER' + ch, newState);
+    logMsg('Sent: Zone ' + ch + ' \u2192 ' + newState);
   }
 
   startMQTT();
