@@ -64,9 +64,11 @@ function connectMQTT() {
 
   mqttClient.on('message', (topic, message) => {
     const topicStr = topic.toString();
+    const payload = message.toString();
+    console.log(`MQTT recv: ${topicStr} => ${payload}`);
+
     const parts = topicStr.split('/');
     const deviceId = parts[1];
-    const payload = message.toString();
 
     if (!deviceStates[deviceId]) {
       deviceStates[deviceId] = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
@@ -78,6 +80,7 @@ function connectMQTT() {
         const key = `POWER${i}`;
         if (data[key]) {
           deviceStates[deviceId][i] = data[key];
+          console.log(`Emitting device_update: ${deviceId} ch${i} ${data[key]}`);
           io.emit('device_update', { deviceId, channel: i, state: data[key] });
         }
       }
@@ -88,6 +91,7 @@ function connectMQTT() {
         const state = payload.trim().toUpperCase();
         if (state === 'ON' || state === 'OFF') {
           deviceStates[deviceId][ch] = state;
+          console.log(`Emitting device_update (raw): ${deviceId} ch${ch} ${state}`);
           io.emit('device_update', { deviceId, channel: ch, state });
         }
       }

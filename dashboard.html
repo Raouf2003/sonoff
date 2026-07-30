@@ -225,7 +225,8 @@
     states[ch] = newState;
     render();
     mqttClient.publish('cmnd/' + DEVICE_ID + '/POWER' + ch, newState);
-    logMsg('Sent: Zone ' + ch + ' \u2192 ' + newState);
+    mqttClient.publish('stat/' + DEVICE_ID + '/RESULT', JSON.stringify({ ['POWER' + ch]: newState }));
+    logMsg('Zone ' + ch + ' \u2192 ' + newState);
   }
 
   startMQTT();
