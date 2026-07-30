@@ -21,21 +21,27 @@ router.post('/claim', async (req, res) => {
       return res.status(400).json({ error: 'deviceId and name are required' });
     }
 
-    const device = await Device.findOne({ deviceId: deviceId.trim() });
+    const tid = deviceId.trim();
+    let device = await Device.findOne({ deviceId: tid });
 
-    if (!device) {
-      return res.status(404).json({ error: 'Device not found. Ensure the device ID is correct.' });
-    }
-
-    if (device.ownerId) {
+    if (device && device.ownerId) {
       return res.status(409).json({ error: 'Device is already claimed by another user' });
     }
 
-    device.ownerId = req.userId;
-    device.name = name.trim();
-    device.claimedAt = new Date();
-    await device.save();
+    if (device) {
+      device.ownerId = req.userId;
+      device.name = name.trim();
+      device.claimedAt = new Date();
+    } else {
+      device = await Device.create({
+        deviceId: tid,
+        name: name.trim(),
+        ownerId: req.userId,
+        claimedAt: new Date(),
+      });
+    }
 
+    await device.save();
     res.json(device.toJSON());
   } catch (err) {
     console.error('Claim device error:', err);
