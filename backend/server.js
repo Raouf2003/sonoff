@@ -116,13 +116,6 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api', authMiddleware, controlRoutes);
-  res.json({
-    status: 'ok',
-    mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not configured',
-    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    devices: Object.keys(deviceStates),
-  });
-});
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);
