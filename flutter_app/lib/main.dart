@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:socket_io_client/socket_io_client.dart' as IO;
-import 'dart:convert';
+import 'package:socket_io_client/socket_io_client.dart' as io;
+import 'services/auth_service.dart';
+import 'services/api_service.dart';
+import 'screens/login_screen.dart';
+import 'screens/add_device_screen.dart';
 
 const String kServerIp = 'sonoff.onrender.com';
 const String kProtocol = 'https';
@@ -24,8 +26,53 @@ class SteesApp extends StatelessWidget {
         colorSchemeSeed: Colors.cyan,
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: const AuthGate(),
+      routes: {
+        '/home': (_) => const AuthGate(),
+      },
     );
+  }
+}
+
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  final _auth = AuthService();
+  bool _checking = true;
+  bool _loggedIn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAuth();
+  }
+
+  Future<void> _checkAuth() async {
+    final loggedIn = await _auth.isLoggedIn();
+    if (mounted) {
+      setState(() {
+        _loggedIn = loggedIn;
+        _checking = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF00E5FF))),
+      );
+    }
+    if (_loggedIn) {
+      return const HomePage();
+    }
+    return const LoginScreen();
   }
 }
 
@@ -57,9 +104,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final List<bool> _loading = [false, false, false, false];
   final List<AnimationController> _pulseControllers = [];
   final List<AnimationController> _entranceControllers = [];
+  final _auth = AuthService();
+  final _api = ApiService();
   bool _connected = false;
   bool _initialLoading = true;
-  IO.Socket? _socket;
+  io.Socket? _socket;
+
+  List<Map<String, dynamic>> _devices = [];
+  String? _selectedDeviceId;
 
   @override
   void initState() {
@@ -74,7 +126,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         duration: Duration(milliseconds: 400 + i * 100),
       )..forward());
     }
-    _fetchInitialStatus();
+    _loadDevices();
     _connectSocket();
   }
 
@@ -87,8 +139,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  Future<void> _loadDevices() async {
+    try {
+      final devices = await _api.getDevices();
+      if (mounted) {
+        setState(() {
+          _devices = devices.cast<Map<String, dynamic>>();
+          if (_devices.isNotEmpty) {
+            _selectedDeviceId = _devices.first['deviceId'] as String;
+          }
+          _initialLoading = false;
+        });
+        if (_selectedDeviceId != null) {
+          _fetchStatus();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _initialLoading = false);
+        _showError('Failed to load devices');
+      }
+    }
+  }
+
   void _connectSocket() {
-    _socket = IO.io('$kProtocol://$kServerIp', <String, dynamic>{
+    _socket = io.io('$kProtocol://$kServerIp', <String, dynamic>{
       'transports': ['websocket'],
       'secure': true,
       'autoConnect': false,
@@ -103,17 +178,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     });
 
     _socket?.onConnectError((data) {
-      print('Socket connection error: $data');
       if (mounted) setState(() => _connected = false);
-    });
-
-    _socket?.onError((data) {
-      print('Socket error: $data');
     });
 
     _socket?.on('device_update', (data) {
       if (!mounted) return;
       final map = data as Map<String, dynamic>;
+      final deviceId = map['deviceId'] as String?;
+      if (deviceId != null && deviceId != _selectedDeviceId) return;
       final channel = map['channel'] as int;
       final state = map['state'] as String;
       final index = channel - 1;
@@ -130,28 +202,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _socket?.connect();
   }
 
-  Future<void> _fetchInitialStatus() async {
-    final url = '$kProtocol://$kServerIp/api/status';
+  Future<void> _fetchStatus() async {
+    if (_selectedDeviceId == null) return;
     try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        setState(() {
-          for (int i = 0; i < 4; i++) {
-            final on = data['POWER${i + 1}'] == 'ON';
-            channelStates[i] = on;
-            if (on) _pulseControllers[i].repeat(reverse: true);
-          }
-          _initialLoading = false;
-        });
-      } else {
-        throw Exception('Server returned ${response.statusCode}');
-      }
+      final data = await _api.getStatus(_selectedDeviceId!);
+      setState(() {
+        for (int i = 0; i < 4; i++) {
+          final on = data['POWER${i + 1}'] == 'ON';
+          channelStates[i] = on;
+          if (on) _pulseControllers[i].repeat(reverse: true);
+        }
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() => _initialLoading = false);
-        _showError('Failed to fetch status');
-      }
+      _showError('Failed to fetch status');
     }
   }
 
@@ -174,31 +237,32 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _toggle(int channel, bool targetState) async {
+    if (_selectedDeviceId == null) return;
     final index = channel - 1;
     setState(() => _loading[index] = true);
 
     try {
-      final response = await http.post(
-        Uri.parse('$kProtocol://$kServerIp/api/control'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'channel': channel, 'state': targetState ? 'ON' : 'OFF'}),
-      );
-
-      if (response.statusCode == 200) {
-        setState(() => channelStates[index] = targetState);
-        if (targetState) {
-          _pulseControllers[index].repeat(reverse: true);
-        } else {
-          _pulseControllers[index].stop();
-          _pulseControllers[index].reset();
-        }
+      await _api.control(_selectedDeviceId!, channel, targetState ? 'ON' : 'OFF');
+      setState(() => channelStates[index] = targetState);
+      if (targetState) {
+        _pulseControllers[index].repeat(reverse: true);
       } else {
-        throw Exception('Server returned ${response.statusCode}');
+        _pulseControllers[index].stop();
+        _pulseControllers[index].reset();
       }
     } catch (e) {
       _showError('Failed to control ${channels[index].name}');
     } finally {
       setState(() => _loading[index] = false);
+    }
+  }
+
+  Future<void> _logout() async {
+    await _auth.clear();
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const AuthGate()),
+      );
     }
   }
 
@@ -217,6 +281,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           child: Column(
             children: [
               _buildHeader(),
+              _buildDeviceSelector(),
               Expanded(child: _buildBody()),
             ],
           ),
@@ -248,44 +313,108 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             ],
           ),
           const Spacer(),
-          _connectionIndicator(),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _connected ? const Color(0xFF4CAF50) : Colors.grey.shade600,
+                  boxShadow: [
+                    BoxShadow(
+                      color: _connected ? const Color(0x664CAF50) : Colors.transparent,
+                      blurRadius: 6,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              InkWell(
+                onTap: () async {
+                  final added = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
+                  );
+                  if (added == true) _loadDevices();
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.add, size: 20, color: Color(0xFF00E5FF)),
+                ),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: _logout,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.logout, size: 20, color: Colors.grey),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
   }
 
-  Widget _connectionIndicator() {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _connected ? const Color(0xFF4CAF50) : Colors.grey.shade600,
-            boxShadow: [
-              BoxShadow(
-                color: _connected ? const Color(0x664CAF50) : Colors.transparent,
-                blurRadius: 8,
-                spreadRadius: 1,
+  Widget _buildDeviceSelector() {
+    if (_devices.length <= 1) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: _devices.map((d) {
+            final id = d['deviceId'] as String;
+            final name = d['name'] as String;
+            final selected = id == _selectedDeviceId;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: Text(name, style: TextStyle(fontSize: 13, color: selected ? Colors.black : Colors.grey.shade300)),
+                selected: selected,
+                onSelected: (_) {
+                  setState(() => _selectedDeviceId = id);
+                  _fetchStatus();
+                },
+                selectedColor: const Color(0xFF00E5FF),
+                backgroundColor: const Color(0xFF1C2333),
+                side: BorderSide.none,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-            ],
-          ),
+            );
+          }).toList(),
         ),
-        const SizedBox(width: 8),
-        Text(
-          _connected ? 'Live' : 'Offline',
-          style: TextStyle(fontSize: 12, color: _connected ? const Color(0xFF4CAF50) : Colors.grey.shade500),
-        ),
-      ],
+      ),
     );
   }
 
   Widget _buildBody() {
     if (_initialLoading) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF00E5FF)));
+    }
+    if (_devices.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.devices, size: 64, color: Colors.grey.shade700),
+            const SizedBox(height: 16),
+            Text('No devices yet', style: TextStyle(fontSize: 18, color: Colors.grey.shade500)),
+            const SizedBox(height: 8),
+            Text('Tap + to add your first device', style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+          ],
+        ),
+      );
     }
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -415,7 +544,6 @@ class _ChannelCardContentState extends State<_ChannelCardContent> with SingleTic
 
   @override
   Widget build(BuildContext context) {
-
     return AnimatedBuilder(
       animation: _hoverAnimation,
       builder: (context, child) {

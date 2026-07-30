@@ -2,12 +2,18 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const mongoose = require('mongoose');
 const mqtt = require('mqtt');
+
+const authRoutes = require('./routes/auth');
+const deviceRoutes = require('./routes/devices');
+const controlRoutes = require('./routes/control');
+const { authMiddleware } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const BROKER_URL = process.env.MQTT_BROKER_URL;
-const DEVICE_NAME = process.env.DEVICE_NAME || 'smarthome';
+const MONGO_URI = process.env.MONGO_URI;
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -17,12 +23,22 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-const deviceState = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
+const deviceStates = {};
 let mqttClient = null;
+
+app.set('deviceStates', deviceStates);
+app.set('mqttClient', null);
+
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch((err) => {
+    console.error('MongoDB connection error:', err.message);
+    console.log('Server will start without database. Auth and device ownership will not work.');
+  });
 
 function connectMQTT() {
   if (!BROKER_URL || !BROKER_URL.startsWith('mqtt')) {
-    console.log(`MQTT broker not configured. Set MQTT_BROKER_URL env var. API will work but no device control.`);
+    console.log(`MQTT broker not configured. Set MQTT_BROKER_URL env var.`);
     return;
   }
 
@@ -32,12 +48,14 @@ function connectMQTT() {
   };
 
   mqttClient = mqtt.connect(BROKER_URL, options);
+  app.set('mqttClient', mqttClient);
 
   mqttClient.on('connect', () => {
     console.log(`Backend connected to MQTT broker at ${BROKER_URL}`);
-    mqttClient.subscribe(`stat/${DEVICE_NAME}/RESULT`);
-    mqttClient.subscribe(`stat/${DEVICE_NAME}/POWER+`);
-    mqttClient.subscribe(`tele/${DEVICE_NAME}/STATE`);
+
+    mqttClient.subscribe('stat/+/RESULT');
+    mqttClient.subscribe('stat/+/POWER+');
+    mqttClient.subscribe('tele/+/STATE');
   });
 
   mqttClient.on('error', (err) => {
@@ -46,19 +64,33 @@ function connectMQTT() {
 
   mqttClient.on('message', (topic, message) => {
     const topicStr = topic.toString();
+    const parts = topicStr.split('/');
+    const deviceId = parts[1];
     const payload = message.toString();
+
+    if (!deviceStates[deviceId]) {
+      deviceStates[deviceId] = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
+    }
 
     try {
       const data = JSON.parse(payload);
       for (let i = 1; i <= 4; i++) {
         const key = `POWER${i}`;
         if (data[key]) {
-          deviceState[i] = data[key];
-          io.emit('device_update', { channel: i, state: data[key] });
+          deviceStates[deviceId][i] = data[key];
+          io.emit('device_update', { deviceId, channel: i, state: data[key] });
         }
       }
     } catch {
-      // Ignore non-JSON payloads
+      const powerMatch = topicStr.match(/POWER(\d)$/);
+      if (powerMatch) {
+        const ch = parseInt(powerMatch[1]);
+        const state = payload.trim().toUpperCase();
+        if (state === 'ON' || state === 'OFF') {
+          deviceStates[deviceId][ch] = state;
+          io.emit('device_update', { deviceId, channel: ch, state });
+        }
+      }
     }
   });
 }
@@ -72,41 +104,17 @@ io.on('connection', (socket) => {
   });
 });
 
-app.post('/api/control', (req, res) => {
-  const { channel, state } = req.body;
+app.use('/api/auth', authRoutes);
+app.use('/api/devices', authMiddleware, deviceRoutes);
+app.use('/api', authMiddleware, controlRoutes);
 
-  if (!channel || !state) {
-    return res.status(400).json({ error: 'channel and state are required' });
-  }
-
-  if (channel < 1 || channel > 4) {
-    return res.status(400).json({ error: 'channel must be between 1 and 4' });
-  }
-
-  const validStates = ['ON', 'OFF', 'TOGGLE'];
-  if (!validStates.includes(state.toUpperCase())) {
-    return res.status(400).json({ error: 'state must be ON, OFF, or TOGGLE' });
-  }
-
-  if (!mqttClient) {
-    return res.status(503).json({ error: 'MQTT broker not configured. Set MQTT_BROKER_URL env var.' });
-  }
-
-  const commandTopic = `cmnd/${DEVICE_NAME}/POWER${channel}`;
-  mqttClient.publish(commandTopic, state.toUpperCase());
-
-  const key = `POWER${channel}`;
-  const response = {};
-  response[key] = state.toUpperCase();
-  res.json(response);
-});
-
-app.get('/api/status', (req, res) => {
-  const status = {};
-  for (let i = 1; i <= 4; i++) {
-    status[`POWER${i}`] = deviceState[i];
-  }
-  res.json(status);
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not configured',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    devices: Object.keys(deviceStates),
+  });
 });
 
 server.listen(PORT, '0.0.0.0', () => {

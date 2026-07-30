@@ -9,8 +9,11 @@
     "dev": "node server.js & node virtual_mqtt_device.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^8.0.0",
     "mqtt": "^5.10.0",
     "socket.io": "^4.7.5",
     "socket.io-client": "^4.8.3"
