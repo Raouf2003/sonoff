@@ -1,5 +1,6 @@
 const express = require('express');
 const Device = require('../models/Device');
+const mqttGateway = require('../services/mqttGateway');
 
 const router = express.Router();
 
@@ -29,17 +30,19 @@ router.post('/control', async (req, res) => {
       return res.status(403).json({ error: 'You do not own this device' });
     }
 
-    const mqttClient = req.app.get('mqttClient');
-    if (!mqttClient) {
-      return res.status(503).json({ error: 'MQTT broker not configured' });
+    if (!mqttGateway.isConnected()) {
+      return res.status(503).json({ error: 'MQTT broker not connected' });
     }
 
-    const commandTopic = `cmnd/${deviceId}/POWER${channel}`;
-    mqttClient.publish(commandTopic, state.toUpperCase());
+    let acked = false;
+    try {
+      acked = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
+    } catch (err) {
+      return res.status(502).json({ error: `Failed to publish command: ${err.message}` });
+    }
 
     const key = `POWER${channel}`;
-    const response = {};
-    response[key] = state.toUpperCase();
+    const response = { [key]: state.toUpperCase(), acked };
     res.json(response);
   } catch (err) {
     console.error('Control error:', err);

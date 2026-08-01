@@ -18,6 +18,18 @@ const deviceSchema = new mongoose.Schema({
     ref: 'User',
     default: null,
   },
+  type: {
+    type: String,
+    default: 'sonoff-4ch',
+    trim: true,
+    maxlength: 30,
+  },
+  channels: {
+    type: Number,
+    default: 4,
+    min: 1,
+    max: 32,
+  },
   claimedAt: {
     type: Date,
     default: null,
