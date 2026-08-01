@@ -3,6 +3,7 @@ class RuntimeState {
     this.deviceStates = new Map();
     this.sensorValues = new Map();
     this.sensorBaselines = new Map();
+    this.sensorObservations = new Map();
     this.ruleActive = new Map();
     this.cooldowns = new Map();
     this.emergencyStops = new Set();
@@ -28,25 +29,42 @@ class RuntimeState {
     return this.deviceStates.get(deviceId) || null;
   }
 
-  setSensorValue(sensorId, value, ts) {
-    this.sensorValues.set(sensorId, { value, lastSeen: ts });
+  setSensorValue(ownerId, sensorId, value, ts) {
+    this.sensorValues.set(`${ownerId}:${sensorId}`, { value, lastSeen: ts });
   }
 
-  getSensorValue(sensorId) {
-    return this.sensorValues.get(sensorId) || null;
+  getSensorValue(ownerId, sensorId) {
+    return this.sensorValues.get(`${ownerId}:${sensorId}`) || null;
   }
 
-  getBaseline(sensorId) {
-    return this.sensorBaselines.get(sensorId) || null;
+  getBaseline(ownerId, sensorId) {
+    return this.sensorBaselines.get(`${ownerId}:${sensorId}`) || null;
   }
 
-  setBaseline(sensorId, value, ts) {
-    this.sensorBaselines.set(sensorId, { value, ts });
+  setBaseline(ownerId, sensorId, value, ts) {
+    this.sensorBaselines.set(`${ownerId}:${sensorId}`, { value, ts });
   }
 
-  clearSensorRuntime(sensorId) {
-    this.sensorValues.delete(sensorId);
-    this.sensorBaselines.delete(sensorId);
+  clearSensorRuntime(ownerId, sensorId) {
+    this.sensorValues.delete(`${ownerId}:${sensorId}`);
+    this.sensorBaselines.delete(`${ownerId}:${sensorId}`);
+  }
+
+  observeSensor(ownerId, sensorId, value, ts, deviceId) {
+    const key = `${ownerId}:${sensorId}`;
+    const prev = this.sensorObservations.get(key);
+    const count = prev ? prev.count + 1 : 1;
+    this.sensorObservations.set(key, { value, ts, deviceId, count, firstSeen: prev ? prev.firstSeen : ts });
+  }
+
+  getSensorObservations(ownerId) {
+    const out = [];
+    for (const [key, obs] of this.sensorObservations) {
+      if (key.startsWith(`${ownerId}:`)) {
+        out.push({ ...obs, sensorId: key.slice(ownerId.length + 1) });
+      }
+    }
+    return out;
   }
 
   isRuleActive(ruleId) {

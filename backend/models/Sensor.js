@@ -1,17 +1,17 @@
 const mongoose = require('mongoose');
 
 const sensorSchema = new mongoose.Schema({
-  sensorId: {
-    type: String,
-    required: true,
-    unique: true,
-    trim: true,
-  },
   ownerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
     index: true,
+  },
+  sensorId: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 40,
   },
   name: {
     type: String,
@@ -24,18 +24,6 @@ const sensorSchema = new mongoose.Schema({
     default: 'generic',
     trim: true,
     maxlength: 30,
-  },
-  deviceId: {
-    type: String,
-    default: null,
-    trim: true,
-    index: true,
-  },
-  field: {
-    type: String,
-    required: true,
-    trim: true,
-    maxlength: 100,
   },
   persistence: {
     mode: {
@@ -59,6 +47,8 @@ const sensorSchema = new mongoose.Schema({
     default: Date.now,
   },
 });
+
+sensorSchema.index({ ownerId: 1, sensorId: 1 }, { unique: true });
 
 sensorSchema.set('toJSON', {
   transform: (doc, ret) => {

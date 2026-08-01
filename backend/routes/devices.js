@@ -1,9 +1,7 @@
 const express = require('express');
 const Device = require('../models/Device');
 const Rule = require('../models/Rule');
-const Sensor = require('../models/Sensor');
 const deviceRegistry = require('../services/deviceRegistry');
-const ruleEngine = require('../services/ruleEngine');
 
 const router = express.Router();
 
@@ -85,7 +83,6 @@ router.post('/unclaim', async (req, res) => {
     await device.save();
 
     deviceRegistry.remove(device.deviceId);
-    await ruleEngine.onDeviceUnclaimed(device.deviceId);
     res.json(device.toJSON());
   } catch (err) {
     console.error('Unclaim device error:', err);
@@ -103,14 +100,8 @@ router.delete('/:deviceId', async (req, res) => {
     const guard = await guardEnabledRules(req.userId, device.deviceId);
     if (guard) return res.status(409).json({ error: guard.error });
 
-    const sensors = await Sensor.find({ ownerId: req.userId, deviceId: device.deviceId });
-    const sensorIds = sensors.map((s) => s.sensorId);
-    await Rule.deleteMany({ ownerId: req.userId, sensorId: { $in: sensorIds } });
-    await Sensor.deleteMany({ ownerId: req.userId, deviceId: device.deviceId });
-
     await device.deleteOne();
     deviceRegistry.remove(device.deviceId);
-    await ruleEngine.rebuildAll();
     res.json({ ok: true });
   } catch (err) {
     console.error('Delete device error:', err);

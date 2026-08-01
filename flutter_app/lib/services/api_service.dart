@@ -118,25 +118,19 @@ class ApiService {
     return jsonDecode(res.body) as List<dynamic>;
   }
 
+  Future<List<dynamic>> getDiscoveredSensors() async {
+    final res = await get('/api/sensors/discovered');
+    if (res.statusCode != 200) throw Exception('Failed to fetch detected sensors');
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+
   Future<Map<String, dynamic>> createSensor({
     required String name,
-    String type = 'generic',
-    String? deviceId,
-    required String field,
-    String mode = 'change_or_interval',
-    int intervalSeconds = 300,
-    double epsilon = 0,
+    required String sensorId,
   }) async {
     final res = await post('/api/sensors', {
       'name': name,
-      'type': type,
-      'deviceId': deviceId,
-      'field': field,
-      'persistence': {
-        'mode': mode,
-        'intervalSeconds': intervalSeconds,
-        'epsilon': epsilon,
-      },
+      'sensorId': sensorId,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 201) throw Exception(body['error'] ?? 'Failed to create sensor');
@@ -176,7 +170,6 @@ class ApiService {
     required Map<String, dynamic> action,
     int cooldownS = 0,
     int freshnessS = 3600,
-    int priority = 0,
   }) async {
     final res = await post('/api/rules', {
       'name': name,
@@ -185,7 +178,6 @@ class ApiService {
       'action': action,
       'cooldownS': cooldownS,
       'freshnessS': freshnessS,
-      'priority': priority,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 201) throw Exception(body['error'] ?? 'Failed to create rule');
@@ -199,7 +191,6 @@ class ApiService {
     required Map<String, dynamic> action,
     int cooldownS = 0,
     int freshnessS = 3600,
-    int priority = 0,
   }) async {
     final res = await put('/api/rules/$id', {
       'name': name,
@@ -208,7 +199,6 @@ class ApiService {
       'action': action,
       'cooldownS': cooldownS,
       'freshnessS': freshnessS,
-      'priority': priority,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 200) throw Exception(body['error'] ?? 'Failed to update rule');

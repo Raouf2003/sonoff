@@ -23,6 +23,20 @@ String _valText(dynamic v) {
   return v?.toString() ?? '—';
 }
 
+String _timeAgo(DateTime t) {
+  final d = DateTime.now().difference(t);
+  if (d.inSeconds < 60) return '${d.inSeconds}s ago';
+  if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+  if (d.inHours < 24) return '${d.inHours}h ago';
+  return '${d.inDays}d ago';
+}
+
+String _friendlyName(String id) {
+  final words = id.split(RegExp(r'[_-]')).where((w) => w.isNotEmpty).toList();
+  if (words.isEmpty) return id;
+  return words.map((w) => w[0].toUpperCase() + w.substring(1)).join(' ');
+}
+
 class AutomationScreen extends StatefulWidget {
   const AutomationScreen({super.key});
 
@@ -109,11 +123,11 @@ class _AutomationScreenState extends State<AutomationScreen>
         builder: (ctx) => AlertDialog(
           backgroundColor: _submerged,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text('Enable Emergency Stop', style: GoogleFonts.inter(color: _foam, fontWeight: FontWeight.w600)),
-          content: Text('All automation rules will be blocked from sending commands until you turn this off.', style: GoogleFonts.inter(color: _mist)),
+          title: Text('Pause Automation', style: GoogleFonts.inter(color: _foam, fontWeight: FontWeight.w600)),
+          content: Text('All automation rules will pause and stop sending commands until you resume them.', style: GoogleFonts.inter(color: _mist)),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: GoogleFonts.inter(color: _mist))),
-            TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text('Enable', style: GoogleFonts.inter(color: Colors.redAccent, fontWeight: FontWeight.w600))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text('Pause', style: GoogleFonts.inter(color: Colors.redAccent, fontWeight: FontWeight.w600))),
           ],
         ),
       );
@@ -241,7 +255,7 @@ class _AutomationScreenState extends State<AutomationScreen>
           ),
           IconButton(
             onPressed: _toggleEmergency,
-            tooltip: 'Emergency stop',
+            tooltip: 'Pause automation',
             icon: Icon(
               _emergencyStop ? Icons.power_settings_new : Icons.power_settings_new_outlined,
               size: 20,
@@ -266,7 +280,7 @@ class _AutomationScreenState extends State<AutomationScreen>
         children: [
           Icon(Icons.warning_amber_rounded, size: 18, color: Colors.redAccent),
           const SizedBox(width: 10),
-          Expanded(child: Text('Emergency stop is ON — all automation commands are blocked', style: GoogleFonts.inter(fontSize: 12, color: Colors.redAccent))),
+          Expanded(child: Text('Automation is paused — no commands will be sent until you resume', style: GoogleFonts.inter(fontSize: 12, color: Colors.redAccent))),
         ],
       ),
     );
@@ -326,7 +340,7 @@ class _AutomationScreenState extends State<AutomationScreen>
                 const SizedBox(height: 16),
                 Center(child: Text('No sensors yet', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600, color: _mist))),
                 const SizedBox(height: 8),
-                Center(child: Text('Tap + to add a sensor from your device telemetry', style: GoogleFonts.inter(fontSize: 13, color: _mist.withValues(alpha: 0.6)))),
+                Center(child: Text('Tap + to add a sensor using its ID from your device code', style: GoogleFonts.inter(fontSize: 13, color: _mist.withValues(alpha: 0.6)))),
               ],
             )
           : ListView.separated(
@@ -336,7 +350,6 @@ class _AutomationScreenState extends State<AutomationScreen>
               separatorBuilder: (_, _) => const SizedBox(height: 10),
               itemBuilder: (_, i) => _SensorCard(
                 sensor: _sensors[i],
-                deviceName: _deviceName(_sensors[i]['deviceId'] as String? ?? ''),
                 onView: () => _viewTelemetry(_sensors[i]),
                 onDelete: () => _deleteSensor(_sensors[i]),
               ),
@@ -400,16 +413,12 @@ class _AutomationScreenState extends State<AutomationScreen>
   }
 
   Future<void> _createSensor() async {
-    if (_devices.isEmpty) {
-      _showError('Claim a device first');
-      return;
-    }
     final result = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: _submerged,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => _SensorFormSheet(api: _api, devices: _devices),
+      builder: (_) => _SensorFormSheet(api: _api),
     );
     if (result == true) _load();
   }
@@ -454,7 +463,7 @@ class _AutomationScreenState extends State<AutomationScreen>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(sensor['name'] as String, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: _foam)),
-                        Text('${sensor['deviceId'] ?? 'external'} · ${sensor['field']}', style: GoogleFonts.inter(fontSize: 12, color: _mist)),
+                        Text('@${sensor['sensorId']}', style: GoogleFonts.inter(fontSize: 12, color: _mist)),
                       ],
                     ),
                   ),
@@ -601,12 +610,6 @@ class _RuleCard extends StatelessWidget {
           const SizedBox(height: 4),
           Text('THEN $deviceName · CH${action['channel']} → ${action['state']}',
               style: GoogleFonts.inter(fontSize: 12, color: enabled ? _stream : _mist)),
-          if ((rule['priority'] ?? 0) as num > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text('priority ${rule['priority']}',
-                  style: GoogleFonts.inter(fontSize: 10, letterSpacing: 1, color: _mist.withValues(alpha: 0.6))),
-            ),
         ],
       ),
     );
@@ -615,16 +618,31 @@ class _RuleCard extends StatelessWidget {
 
 class _SensorCard extends StatelessWidget {
   final Map<String, dynamic> sensor;
-  final String deviceName;
   final VoidCallback onView;
   final VoidCallback onDelete;
 
-  const _SensorCard({required this.sensor, required this.deviceName, required this.onView, required this.onDelete});
+  const _SensorCard({required this.sensor, required this.onView, required this.onDelete});
 
   @override
   Widget build(BuildContext context) {
-    final persistence = (sensor['persistence'] as Map<String, dynamic>?) ?? {};
-    final deviceId = sensor['deviceId'] as String?;
+    final lastSeenRaw = sensor['lastSeen'];
+    final lastSeen = lastSeenRaw is num ? DateTime.fromMillisecondsSinceEpoch(lastSeenRaw.toInt()) : null;
+    final online = lastSeen != null && DateTime.now().difference(lastSeen).inMinutes < 60;
+    final lastValue = sensor['lastValue'];
+
+    String statusLine;
+    Color statusColor;
+    if (online) {
+      statusLine = 'Live · updated ${_timeAgo(lastSeen)}';
+      statusColor = _leaf;
+    } else if (lastSeen != null) {
+      statusLine = 'Offline · last seen ${_timeAgo(lastSeen)}';
+      statusColor = _mist;
+    } else {
+      statusLine = 'Waiting for first reading';
+      statusColor = _sunlight;
+    }
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -635,12 +653,14 @@ class _SensorCard extends StatelessWidget {
       child: Row(
         children: [
           Container(
-            width: 40, height: 40,
+            width: 40,
+            height: 40,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: const LinearGradient(colors: [_stream, _leaf]),
+              color: statusColor.withValues(alpha: 0.12),
+              border: Border.all(color: statusColor.withValues(alpha: 0.5)),
             ),
-            child: const Icon(Icons.sensors, size: 20, color: _well),
+            child: Icon(Icons.sensors, size: 20, color: statusColor),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -649,15 +669,28 @@ class _SensorCard extends StatelessWidget {
               children: [
                 Text(sensor['name'] as String? ?? '', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: _foam)),
                 const SizedBox(height: 2),
-                Text(
-                  deviceId == null ? 'external sensor · ${sensor['field']}' : '$deviceName · ${sensor['field']}',
-                  style: GoogleFonts.inter(fontSize: 12, color: _mist),
-                ),
+                Text('@${sensor['sensorId']}', style: GoogleFonts.inter(fontSize: 12, color: _mist)),
                 const SizedBox(height: 2),
-                Text(
-                  '${sensor['type'] ?? 'generic'} · ${persistence['mode'] ?? 'change_or_interval'} (every ${persistence['intervalSeconds'] ?? 300}s, ε ${_valText(persistence['epsilon'] ?? 0)})',
-                  style: GoogleFonts.inter(fontSize: 10, color: _mist.withValues(alpha: 0.6)),
+                Row(
+                  children: [
+                    Container(
+                      width: 7, height: 7,
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        statusLine,
+                        style: GoogleFonts.inter(fontSize: 11, color: statusColor),
+                      ),
+                    ),
+                  ],
                 ),
+                if (lastValue != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text('Latest: ${_valText(lastValue)}', style: GoogleFonts.inter(fontSize: 11, color: _mist.withValues(alpha: 0.7))),
+                  ),
               ],
             ),
           ),
@@ -747,17 +780,19 @@ class _RuleFormSheet extends StatefulWidget {
 class _RuleFormSheetState extends State<_RuleFormSheet> {
   final _form = GlobalKey<FormState>();
   late final TextEditingController _name;
-  late final TextEditingController _min;
-  late final TextEditingController _max;
+  late final TextEditingController _threshold;
   late final TextEditingController _hyst;
   late final TextEditingController _cooldown;
   late final TextEditingController _freshness;
-  late final TextEditingController _priority;
 
   String? _sensorId;
   String? _deviceId;
   int? _channel;
   String _state = 'ON';
+  String _direction = 'below';
+  double? _min;
+  double? _max;
+  bool _advancedOpen = false;
   bool _saving = false;
 
   @override
@@ -766,13 +801,19 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
     final rule = widget.initial;
     final action = (rule?['action'] as Map<String, dynamic>?) ?? {};
     final band = ((rule?['condition'] as Map<String, dynamic>?)?['band']) as Map<String, dynamic>? ?? {};
+    final min = band['min'];
+    final max = band['max'];
+    _min = min != null ? double.tryParse(min.toString()) : null;
+    _max = max != null ? double.tryParse(max.toString()) : null;
+    if (_min != null && _max == null) _direction = 'above';
+    if (_min == null && _max != null) _direction = 'below';
+    if (_min != null && _max != null) _direction = 'below';
+
     _name = TextEditingController(text: rule?['name'] as String? ?? '');
-    _min = TextEditingController(text: band['min']?.toString() ?? '');
-    _max = TextEditingController(text: band['max']?.toString() ?? '');
-    _hyst = TextEditingController(text: (band['hysteresis'] ?? 0).toString());
+    _threshold = TextEditingController(text: _primaryBound?.toString() ?? '');
+    _hyst = TextEditingController(text: (band['hysteresis'] ?? 2).toString());
     _cooldown = TextEditingController(text: (rule?['cooldownS'] ?? 0).toString());
     _freshness = TextEditingController(text: (rule?['freshnessS'] ?? 3600).toString());
-    _priority = TextEditingController(text: (rule?['priority'] ?? 0).toString());
     _sensorId = rule?['sensorId'] as String? ?? widget.sensors.firstOrNull?['sensorId'];
     _deviceId = action['deviceId'] as String? ?? widget.devices.firstOrNull?['deviceId'];
     final ch = action['channel'];
@@ -782,9 +823,22 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
 
   @override
   void dispose() {
-    _name.dispose(); _min.dispose(); _max.dispose(); _hyst.dispose();
-    _cooldown.dispose(); _freshness.dispose(); _priority.dispose();
+    _name.dispose();
+    _threshold.dispose();
+    _hyst.dispose();
+    _cooldown.dispose();
+    _freshness.dispose();
     super.dispose();
+  }
+
+  double? get _primaryBound => _direction == 'above' ? _min : _max;
+
+  void _setPrimaryBound(double? v) {
+    if (_direction == 'above') {
+      _min = v;
+    } else {
+      _max = v;
+    }
   }
 
   int _channelsOf(String? deviceId) {
@@ -794,19 +848,48 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
     return 4;
   }
 
+  String _sensorName(String? id) {
+    for (final s in widget.sensors) {
+      if (s['sensorId'] == id) return s['name'] as String;
+    }
+    return id ?? '—';
+  }
+
+  String _deviceName(String? id) {
+    for (final d in widget.devices) {
+      if (d['deviceId'] == id) return d['name'] as String;
+    }
+    return id ?? '—';
+  }
+
+  void _onDirectionChanged(String d) {
+    setState(() {
+      _direction = d;
+      _threshold.text = _primaryBound?.toString() ?? '';
+    });
+  }
+
+  void _onThresholdChanged(String t) {
+    setState(() => _setPrimaryBound(double.tryParse(t.trim())));
+  }
+
+  String get _previewText {
+    final dir = _direction == 'above' ? 'above' : 'below';
+    final th = _primaryBound;
+    return 'IF ${_sensorName(_sensorId)} is $dir${th != null ? ' ${_valText(th)}' : ''}  ·  THEN ${_deviceName(_deviceId)} CH$_channel → $_state';
+  }
+
   Future<void> _save() async {
     if (!_form.currentState!.validate()) return;
     if (_sensorId == null || _deviceId == null || _channel == null) return;
-    final minTxt = _min.text.trim();
-    final maxTxt = _max.text.trim();
-    if (minTxt.isEmpty && maxTxt.isEmpty) {
-      _show('Set at least a min or max value');
+    final min = _min;
+    final max = _max;
+    if (min == null && max == null) {
+      _show('Enter a threshold value');
       return;
     }
-    final min = minTxt.isEmpty ? null : double.parse(minTxt);
-    final max = maxTxt.isEmpty ? null : double.parse(maxTxt);
     if (min != null && max != null && min >= max) {
-      _show('min must be less than max');
+      _show('The threshold values are not valid');
       return;
     }
     setState(() => _saving = true);
@@ -815,20 +898,19 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
         'band': {
           'min': min,
           'max': max,
-          'hysteresis': double.parse(_hyst.text.trim().isEmpty ? '0' : _hyst.text.trim()),
+          'hysteresis': double.tryParse(_hyst.text.trim()) ?? 2,
         },
       };
       final action = {'deviceId': _deviceId, 'channel': _channel, 'state': _state};
       final cooldown = int.tryParse(_cooldown.text.trim()) ?? 0;
       final freshness = int.tryParse(_freshness.text.trim()) ?? 3600;
-      final priority = int.tryParse(_priority.text.trim()) ?? 0;
       if (widget.initial != null) {
         await widget.api.updateRule(widget.initial!['_id'] as String,
             name: _name.text.trim(), sensorId: _sensorId!, condition: condition, action: action,
-            cooldownS: cooldown, freshnessS: freshness, priority: priority);
+            cooldownS: cooldown, freshnessS: freshness);
       } else {
         await widget.api.createRule(name: _name.text.trim(), sensorId: _sensorId!, condition: condition,
-            action: action, cooldownS: cooldown, freshnessS: freshness, priority: priority);
+            action: action, cooldownS: cooldown, freshnessS: freshness);
       }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -852,7 +934,7 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.9),
         child: Form(
           key: _form,
           child: ListView(
@@ -860,68 +942,95 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
             padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
             children: [
               Text(widget.initial == null ? 'New Rule' : 'Edit Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: _foam)),
+              const SizedBox(height: 4),
+              Text('When a sensor crosses a value, control a device.', style: GoogleFonts.inter(fontSize: 12, color: _mist)),
               const SizedBox(height: 16),
+              _previewCard(),
+              _sectionTitle('WHEN'),
               _field(_name, 'Rule name', 'e.g. Pump on dry soil'),
               const SizedBox(height: 12),
+              _label('Sensor'),
               DropdownButtonFormField<String>(
                 initialValue: _sensorId,
                 dropdownColor: _submerged,
-                decoration: _dec('Sensor'),
+                decoration: _dec(),
                 items: widget.sensors.map((s) => DropdownMenuItem(value: s['sensorId'] as String, child: Text(s['name'] as String, style: GoogleFonts.inter(fontSize: 13, color: _foam)))).toList(),
                 onChanged: (v) => setState(() => _sensorId = v),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
+              _label('Condition'),
               Row(
                 children: [
-                  Expanded(child: _field(_min, 'Min', 'threshold ≥')),
+                  SegmentedButton<String>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(value: 'above', label: Text('Above >')),
+                      ButtonSegment(value: 'below', label: Text('Below <')),
+                    ],
+                    selected: {_direction},
+                    onSelectionChanged: (s) => _onDirectionChanged(s.first),
+                    style: _segmentedStyle(),
+                  ),
                   const SizedBox(width: 10),
-                  Expanded(child: _field(_max, 'Max', 'threshold ≤')),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _threshold,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      style: GoogleFonts.inter(fontSize: 14, color: _foam),
+                      decoration: _dec().copyWith(
+                        hintText: '40',
+                        hintStyle: GoogleFonts.inter(fontSize: 13, color: _mist.withValues(alpha: 0.5)),
+                      ),
+                      onChanged: _onThresholdChanged,
+                      validator: (v) {
+                        final t = v?.trim() ?? '';
+                        if (t.isEmpty) return 'required';
+                        return double.tryParse(t) == null ? 'number' : null;
+                      },
+                    ),
+                  ),
                 ],
               ),
-              const SizedBox(height: 12),
-              _field(_hyst, 'Hysteresis', 're-arm margin (optional)'),
-              const SizedBox(height: 12),
+              const SizedBox(height: 20),
+              _sectionTitle('THEN'),
+              _label('Device'),
               DropdownButtonFormField<String>(
                 initialValue: _deviceId,
                 dropdownColor: _submerged,
-                decoration: _dec('Action device'),
+                decoration: _dec(),
                 items: widget.devices.map((d) => DropdownMenuItem(value: d['deviceId'] as String, child: Text(d['name'] as String, style: GoogleFonts.inter(fontSize: 13, color: _foam)))).toList(),
                 onChanged: (v) => setState(() => _deviceId = v),
               ),
               const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                      initialValue: _channel,
-                      dropdownColor: _submerged,
-                      decoration: _dec('Channel'),
-                      items: List.generate(_channelsOf(_deviceId), (i) => DropdownMenuItem(value: i + 1, child: Text('CH ${i + 1}', style: GoogleFonts.inter(fontSize: 13, color: _foam)))),
-                      onChanged: (v) => setState(() => _channel = v),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _state,
-                      dropdownColor: _submerged,
-                      decoration: _dec('State'),
-                      items: ['ON', 'OFF', 'TOGGLE'].map((s) => DropdownMenuItem(value: s, child: Text(s, style: GoogleFonts.inter(fontSize: 13, color: _foam)))).toList(),
-                      onChanged: (v) => setState(() => _state = v!),
-                    ),
-                  ),
-                ],
+              _label('Channel'),
+              Wrap(
+                spacing: 8,
+                children: List.generate(_channelsOf(_deviceId), (i) {
+                  final ch = i + 1;
+                  return ChoiceChip(
+                    label: Text('CH $ch', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: _channel == ch ? _well : _mist)),
+                    selected: _channel == ch,
+                    showCheckmark: false,
+                    onSelected: (_) => setState(() => _channel = ch),
+                    selectedColor: _stream,
+                    backgroundColor: Colors.transparent,
+                    side: BorderSide(color: _channel == ch ? _stream : Colors.white.withValues(alpha: 0.1)),
+                  );
+                }),
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(child: _field(_cooldown, 'Cooldown (s)', 'min gap between fires')),
-                  const SizedBox(width: 10),
-                  Expanded(child: _field(_freshness, 'Freshness (s)', 'max sensor age')),
-                ],
+              const SizedBox(height: 16),
+              _label('Action'),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: ['ON', 'OFF']
+                    .map((s) => ButtonSegment(value: s, label: Text(s)))
+                    .toList(),
+                selected: {_state},
+                onSelectionChanged: (s) => setState(() => _state = s.first),
+                style: _segmentedStyle(),
               ),
-              const SizedBox(height: 12),
-              _field(_priority, 'Priority', 'higher runs first (0-100)'),
+              const SizedBox(height: 20),
+              _advancedSection(),
               const SizedBox(height: 20),
               FilledButton(
                 onPressed: _saving ? null : _save,
@@ -937,23 +1046,113 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
     );
   }
 
-  InputDecoration _dec(String label) => InputDecoration(
-        labelText: label,
-        labelStyle: GoogleFonts.inter(fontSize: 13, color: _mist),
+  Widget _previewCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: _stream.withValues(alpha: 0.08),
+        border: Border.all(color: _stream.withValues(alpha: 0.3)),
+      ),
+      child: Text(_previewText, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: _foam)),
+    );
+  }
+
+  Widget _advancedSection() {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 16),
+        title: Row(
+          children: [
+            Icon(Icons.tune, size: 18, color: _mist),
+            const SizedBox(width: 10),
+            Text('Advanced Settings', style: GoogleFonts.inter(fontSize: 13, color: _mist)),
+          ],
+        ),
+        initiallyExpanded: _advancedOpen,
+        onExpansionChanged: (v) => setState(() => _advancedOpen = v),
+        backgroundColor: Colors.transparent,
+        collapsedBackgroundColor: Colors.transparent,
+        iconColor: _mist,
+        collapsedIconColor: _mist,
+        shape: const Border(),
+        collapsedShape: const Border(),
+        children: [
+          if (_min != null && _max != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text('Extended: fires when ${_valText(_min)} ≤ value ≤ ${_valText(_max)}',
+                  style: GoogleFonts.inter(fontSize: 11, color: _sunlight)),
+            ),
+          _field(_hyst, 'Hysteresis', 're-arm margin'),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(child: _field(_cooldown, 'Cooldown (s)', 'min gap between fires')),
+              const SizedBox(width: 10),
+              Expanded(child: _field(_freshness, 'Freshness (s)', 'max sensor age')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionTitle(String t) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Text(t, style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 1.5, color: _foam)),
+    );
+  }
+
+  Widget _label(String t) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(t.toUpperCase(), style: GoogleFonts.inter(fontSize: 10, letterSpacing: 1.2, color: _mist.withValues(alpha: 0.7))),
+    );
+  }
+
+  ButtonStyle _segmentedStyle() {
+    return SegmentedButton.styleFrom(
+      textStyle: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
+      selectedBackgroundColor: _stream.withValues(alpha: 0.2),
+      selectedForegroundColor: _stream,
+      foregroundColor: _mist,
+      backgroundColor: Colors.transparent,
+      side: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    );
+  }
+
+  InputDecoration _dec() => InputDecoration(
         filled: true,
         fillColor: Colors.white.withValues(alpha: 0.04),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _stream.withValues(alpha: 0.5))),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       );
 
   Widget _field(TextEditingController c, String label, String hint) {
     return TextFormField(
       controller: c,
+      keyboardType: label == 'Rule name' ? TextInputType.text : const TextInputType.numberWithOptions(decimal: true),
       style: GoogleFonts.inter(fontSize: 13, color: _foam),
-      decoration: _dec(label).copyWith(hintText: hint, hintStyle: GoogleFonts.inter(fontSize: 12, color: _mist.withValues(alpha: 0.5))),
+      decoration: _dec().copyWith(
+        labelText: label,
+        labelStyle: GoogleFonts.inter(fontSize: 13, color: _mist),
+        hintText: hint,
+        hintStyle: GoogleFonts.inter(fontSize: 12, color: _mist.withValues(alpha: 0.5)),
+      ),
       validator: (v) {
-        if (label == 'Rule name' && (v == null || v.trim().isEmpty)) return 'required';
-        if (label != 'Rule name' && v != null && v.trim().isNotEmpty && double.tryParse(v.trim()) == null) return 'number';
+        final t = v?.trim() ?? '';
+        if (label == 'Rule name') return t.isEmpty ? 'required' : null;
+        if (t.isNotEmpty && double.tryParse(t) == null) return 'number';
         return null;
       },
     );
@@ -962,9 +1161,8 @@ class _RuleFormSheetState extends State<_RuleFormSheet> {
 
 class _SensorFormSheet extends StatefulWidget {
   final ApiService api;
-  final List<Map<String, dynamic>> devices;
 
-  const _SensorFormSheet({required this.api, required this.devices});
+  const _SensorFormSheet({required this.api});
 
   @override
   State<_SensorFormSheet> createState() => _SensorFormSheetState();
@@ -972,31 +1170,46 @@ class _SensorFormSheet extends StatefulWidget {
 
 class _SensorFormSheetState extends State<_SensorFormSheet> {
   final _form = GlobalKey<FormState>();
+  final _idPattern = RegExp(r'^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,39}$');
   late final TextEditingController _name;
-  late final TextEditingController _type;
-  late final TextEditingController _field;
-  late final TextEditingController _interval;
-  late final TextEditingController _epsilon;
-
-  String? _deviceId;
-  String _mode = 'change_or_interval';
+  late final TextEditingController _id;
   bool _saving = false;
+  bool _loadingDiscovered = false;
+  List<Map<String, dynamic>> _discovered = [];
 
   @override
   void initState() {
     super.initState();
     _name = TextEditingController();
-    _type = TextEditingController(text: 'generic');
-    _field = TextEditingController();
-    _interval = TextEditingController(text: '300');
-    _epsilon = TextEditingController(text: '0');
-    _deviceId = widget.devices.firstOrNull?['deviceId'];
+    _id = TextEditingController();
+    _loadDiscovered();
   }
 
   @override
   void dispose() {
-    _name.dispose(); _type.dispose(); _field.dispose(); _interval.dispose(); _epsilon.dispose();
+    _name.dispose();
+    _id.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadDiscovered() async {
+    setState(() => _loadingDiscovered = true);
+    try {
+      final raw = await widget.api.getDiscoveredSensors();
+      if (mounted) setState(() => _discovered = raw.cast<Map<String, dynamic>>());
+    } catch (_) {
+      if (mounted) _discovered = [];
+    } finally {
+      if (mounted) setState(() => _loadingDiscovered = false);
+    }
+  }
+
+  void _useDetected(Map<String, dynamic> d) {
+    setState(() {
+      final id = d['sensorId'] as String;
+      _id.text = id;
+      if (_name.text.trim().isEmpty) _name.text = _friendlyName(id);
+    });
   }
 
   Future<void> _save() async {
@@ -1005,12 +1218,7 @@ class _SensorFormSheetState extends State<_SensorFormSheet> {
     try {
       await widget.api.createSensor(
         name: _name.text.trim(),
-        type: _type.text.trim().isEmpty ? 'generic' : _type.text.trim(),
-        deviceId: _deviceId,
-        field: _field.text.trim(),
-        mode: _mode,
-        intervalSeconds: int.tryParse(_interval.text.trim()) ?? 300,
-        epsilon: double.tryParse(_epsilon.text.trim()) ?? 0,
+        sensorId: _id.text.trim(),
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -1034,62 +1242,35 @@ class _SensorFormSheetState extends State<_SensorFormSheet> {
             padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
             children: [
               Text('New Sensor', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: _foam)),
+              const SizedBox(height: 4),
+              Text('Name the reading your device already reports. Only the Name and Sensor ID matter.', style: GoogleFonts.inter(fontSize: 12, color: _mist)),
+              const SizedBox(height: 16),
+              _detectedSection(),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _name,
+                keyboardType: TextInputType.text,
                 style: GoogleFonts.inter(fontSize: 13, color: _foam),
                 decoration: _dec('Sensor name').copyWith(hintText: 'e.g. Soil Moisture', hintStyle: GoogleFonts.inter(fontSize: 12, color: _mist.withValues(alpha: 0.5))),
                 validator: (v) => (v == null || v.trim().isEmpty) ? 'required' : null,
               ),
               const SizedBox(height: 12),
               TextFormField(
-                controller: _type,
+                controller: _id,
+                keyboardType: TextInputType.text,
                 style: GoogleFonts.inter(fontSize: 13, color: _foam),
-                decoration: _dec('Type'),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: _deviceId,
-                dropdownColor: _submerged,
-                decoration: _dec('Device'),
-                items: widget.devices.map((d) => DropdownMenuItem(value: d['deviceId'] as String, child: Text(d['name'] as String, style: GoogleFonts.inter(fontSize: 13, color: _foam)))).toList(),
-                onChanged: (v) => setState(() => _deviceId = v),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _field,
-                style: GoogleFonts.inter(fontSize: 13, color: _foam),
-                decoration: _dec('Telemetry field').copyWith(hintText: 'e.g. Temp, SoilMoisture, ENERGY.Voltage', hintStyle: GoogleFonts.inter(fontSize: 12, color: _mist.withValues(alpha: 0.5))),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'required' : null,
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: _mode,
-                dropdownColor: _submerged,
-                decoration: _dec('Persistence mode'),
-                items: ['change_or_interval', 'change_only', 'interval_only'].map((m) => DropdownMenuItem(value: m, child: Text(m, style: GoogleFonts.inter(fontSize: 12, color: _foam)))).toList(),
-                onChanged: (v) => setState(() => _mode = v!),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _interval,
-                      style: GoogleFonts.inter(fontSize: 13, color: _foam),
-                      decoration: _dec('Interval (s)'),
-                      validator: (v) => (v == null || v.trim().isEmpty) ? 'required' : null,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _epsilon,
-                      style: GoogleFonts.inter(fontSize: 13, color: _foam),
-                      decoration: _dec('Epsilon'),
-                    ),
-                  ),
-                ],
+                decoration: _dec('Sensor ID').copyWith(
+                  hintText: 'e.g. soil_1',
+                  hintStyle: GoogleFonts.inter(fontSize: 12, color: _mist.withValues(alpha: 0.5)),
+                  helperText: 'The ID used in your device code',
+                  helperStyle: GoogleFonts.inter(fontSize: 10, color: _mist.withValues(alpha: 0.6)),
+                ),
+                validator: (v) {
+                  final t = v?.trim() ?? '';
+                  if (t.isEmpty) return 'required';
+                  if (!_idPattern.hasMatch(t)) return 'letters, numbers, _ or - only';
+                  return null;
+                },
               ),
               const SizedBox(height: 20),
               FilledButton(
@@ -1102,6 +1283,65 @@ class _SensorFormSheetState extends State<_SensorFormSheet> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _detectedSection() {
+    if (_loadingDiscovered) {
+      return const Center(child: Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: _stream))));
+    }
+    if (_discovered.isEmpty) return const SizedBox.shrink();
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: _stream.withValues(alpha: 0.06),
+        border: Border.all(color: _stream.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
+            child: Row(
+              children: [
+                Icon(Icons.radar, size: 16, color: _stream),
+                const SizedBox(width: 8),
+                Text('Detected on your devices', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: _stream)),
+                const Spacer(),
+                IconButton(
+                  onPressed: _loadDiscovered,
+                  tooltip: 'Refresh',
+                  icon: const Icon(Icons.refresh, size: 16, color: _stream),
+                ),
+              ],
+            ),
+          ),
+          ..._discovered.take(5).map((d) {
+            final id = d['sensorId'] as String;
+            return InkWell(
+              onTap: () => _useDetected(d),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.add_circle_outline, size: 16, color: _stream),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('@$id', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: _foam)),
+                    ),
+                    Text('${_valText(d['value'])} · ${d['deviceName'] ?? ''}', style: GoogleFonts.inter(fontSize: 11, color: _mist)),
+                  ],
+                ),
+              ),
+            );
+          }),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 10),
+            child: Text('Tap a reading to fill in its ID', style: GoogleFonts.inter(fontSize: 10, color: _mist.withValues(alpha: 0.6))),
+          ),
+        ],
       ),
     );
   }

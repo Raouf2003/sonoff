@@ -1,62 +1,95 @@
 const express = require('express');
-const crypto = require('crypto');
 const Sensor = require('../models/Sensor');
 const Rule = require('../models/Rule');
 const Telemetry = require('../models/Telemetry');
 const Device = require('../models/Device');
 const ruleEngine = require('../services/ruleEngine');
+const runtimeState = require('../services/runtimeState');
 
 const router = express.Router();
 
-function generateSensorId() {
-  return `sensor_${crypto.randomBytes(4).toString('hex')}`;
+const SENSOR_ID_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,39}$/;
+
+function validateSensorId(id) {
+  if (!id || !SENSOR_ID_RE.test(String(id).trim())) {
+    return 'Sensor ID must be 1-40 characters (letters, numbers, _ or -)';
+  }
+  return null;
 }
 
-async function validateDeviceOwnership(userId, deviceId) {
-  if (!deviceId) return null;
-  const device = await Device.findOne({ deviceId, ownerId: userId });
-  if (!device) return { error: 'Device not found or not owned by you' };
-  return device;
+function enrich(sensor) {
+  const out = sensor.toJSON();
+  const ownerId = out.ownerId.toString();
+  const live = runtimeState.getSensorValue(ownerId, out.sensorId);
+  out.lastValue = live ? live.value : null;
+  out.lastSeen = live ? live.lastSeen : null;
+  return out;
 }
 
 router.get('/', async (req, res) => {
   try {
     const sensors = await Sensor.find({ ownerId: req.userId }).sort({ createdAt: -1 });
-    res.json(sensors);
+    res.json(sensors.map(enrich));
   } catch (err) {
     console.error('List sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
+router.get('/discovered', async (req, res) => {
+  try {
+    const sensors = await Sensor.find({ ownerId: req.userId }, 'sensorId');
+    const registered = new Set(sensors.map((s) => s.sensorId));
+    const devices = await Device.find({ ownerId: req.userId }, 'deviceId name');
+    const nameByDevice = new Map(devices.map((d) => [d.deviceId, d.name]));
+
+    const discovered = runtimeState
+      .getSensorObservations(req.userId)
+      .filter((obs) => !registered.has(obs.sensorId))
+      .map((obs) => ({
+        sensorId: obs.sensorId,
+        deviceId: obs.deviceId,
+        deviceName: nameByDevice.get(obs.deviceId) || obs.deviceId,
+        value: obs.value,
+        ts: obs.ts,
+        count: obs.count,
+      }));
+
+    res.json(discovered);
+  } catch (err) {
+    console.error('List discovered sensors error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/', async (req, res) => {
   try {
-    const { name, type, deviceId, field, persistence } = req.body;
+    const { name, sensorId } = req.body;
 
-    if (!name || !field) {
-      return res.status(400).json({ error: 'name and field are required' });
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'name is required' });
     }
-
-    const device = await validateDeviceOwnership(req.userId, deviceId);
-    if (device && device.error) return res.status(400).json({ error: device.error });
+    const idError = validateSensorId(sensorId);
+    if (idError) return res.status(400).json({ error: idError });
 
     const sensor = await Sensor.create({
-      sensorId: generateSensorId(),
       ownerId: req.userId,
+      sensorId: String(sensorId).trim(),
       name: String(name).trim(),
-      type: (type || 'generic').trim(),
-      deviceId: deviceId || null,
-      field: String(field).trim(),
+      type: 'generic',
       persistence: {
-        mode: (persistence && persistence.mode) || 'change_or_interval',
-        intervalSeconds: (persistence && persistence.intervalSeconds) || 300,
-        epsilon: (persistence && persistence.epsilon) || 0,
+        mode: 'change_or_interval',
+        intervalSeconds: 300,
+        epsilon: 0,
       },
     });
 
     await ruleEngine.onSensorChanged(sensor);
     res.status(201).json(sensor.toJSON());
   } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ error: 'That Sensor ID is already in use' });
+    }
     console.error('Create sensor error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -67,24 +100,17 @@ router.put('/:sensorId', async (req, res) => {
     const sensor = await Sensor.findOne({ sensorId: req.params.sensorId, ownerId: req.userId });
     if (!sensor) return res.status(404).json({ error: 'Sensor not found' });
 
-    const { name, type, deviceId, field, persistence } = req.body;
-
-    const device = await validateDeviceOwnership(req.userId, deviceId);
-    if (device && device.error) return res.status(400).json({ error: device.error });
-
-    if (name !== undefined) sensor.name = String(name).trim();
-    if (type !== undefined) sensor.type = String(type).trim();
-    if (field !== undefined) sensor.field = String(field).trim();
-    if (deviceId !== undefined) sensor.deviceId = deviceId || null;
-    if (persistence) {
-      if (persistence.mode !== undefined) sensor.persistence.mode = persistence.mode;
-      if (persistence.intervalSeconds !== undefined) sensor.persistence.intervalSeconds = persistence.intervalSeconds;
-      if (persistence.epsilon !== undefined) sensor.persistence.epsilon = persistence.epsilon;
+    const { name } = req.body;
+    if (name !== undefined) {
+      if (!String(name).trim()) {
+        return res.status(400).json({ error: 'name is required' });
+      }
+      sensor.name = String(name).trim();
     }
 
     await sensor.save();
     await ruleEngine.onSensorChanged(sensor);
-    res.json(sensor.toJSON());
+    res.json(enrich(sensor));
   } catch (err) {
     console.error('Update sensor error:', err);
     res.status(500).json({ error: 'Internal server error' });

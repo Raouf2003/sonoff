@@ -2,12 +2,7 @@ const mqtt = require('mqtt');
 const Telemetry = require('../models/Telemetry');
 
 const ACK_TIMEOUT_MS = 5000;
-
-function getPath(obj, path) {
-  return String(path)
-    .split('.')
-    .reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
-}
+const SENSOR_META_KEYS = new Set(['Time', 'Epoch', 'Uptime', 'UptimeSec', 'Heap', 'LoadAvg']);
 
 function coerceValue(v) {
   if (typeof v === 'number') return v;
@@ -87,6 +82,7 @@ class MqttGateway {
     this.client.subscribe('stat/+/RESULT');
     this.client.subscribe('stat/+/POWER+');
     this.client.subscribe('tele/+/STATE');
+    this.client.subscribe('tele/+/SENSOR');
     console.log('MQTT subscriptions (re)registered');
   }
 
@@ -153,23 +149,14 @@ class MqttGateway {
 
     const channelUpdates = {};
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
+    const isSensor = parts[0] === 'tele' && parts[2] === 'SENSOR';
     const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER\d+$/.test(parts[2]));
 
-    if (isState && parsed) {
+    if (isSensor && owned && parsed && typeof parsed === 'object') {
+      this._ingestSensorPayload(deviceId, device.ownerId, parsed);
+    } else if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
-      if (owned) {
-        const sensors = this.engine.getSensorsForDevice(deviceId);
-        if (sensors) {
-          for (const sensor of sensors.values()) {
-            const v = getPath(parsed, sensor.field);
-            if (v === undefined || v === null) continue;
-            const val = coerceValue(v);
-            if (val === undefined) continue;
-            this._ingestReading(sensor, val);
-          }
-        }
-      }
     } else if (isResult && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
@@ -196,6 +183,19 @@ class MqttGateway {
     }
   }
 
+  _ingestSensorPayload(deviceId, ownerId, parsed) {
+    const ts = Date.now();
+    for (const [sensorId, raw] of Object.entries(parsed)) {
+      if (SENSOR_META_KEYS.has(sensorId)) continue;
+      const value = coerceValue(raw);
+      if (value === undefined) continue;
+      this.runtimeState.observeSensor(ownerId, sensorId, value, ts, deviceId);
+      const sensor = this.engine.getSensor(ownerId, sensorId);
+      if (!sensor) continue;
+      this._ingestReading(sensor, value, ts, deviceId);
+    }
+  }
+
   _resolveAcks(deviceId, parsed) {
     if (!parsed || typeof parsed !== 'object') return;
     for (const key of Object.keys(parsed)) {
@@ -206,27 +206,28 @@ class MqttGateway {
     }
   }
 
-  _ingestReading(sensor, value) {
-    const ts = Date.now();
-    this.engine.handleReading(sensor.sensorId, value, ts);
+  _ingestReading(sensor, value, ts, deviceId) {
+    const ownerId = sensor.ownerId.toString();
+    this.engine.handleReading(ownerId, sensor.sensorId, value, ts);
     if (this._shouldPersist(sensor, value, ts)) {
       Telemetry.create({
         ownerId: sensor.ownerId,
         sensorId: sensor.sensorId,
-        deviceId: sensor.deviceId,
+        deviceId: deviceId || null,
         value,
         ts: new Date(ts),
       }).catch((err) => console.error('Telemetry write error:', err.message));
-      this.runtimeState.setBaseline(sensor.sensorId, value, ts);
+      this.runtimeState.setBaseline(ownerId, sensor.sensorId, value, ts);
     }
   }
 
   _shouldPersist(sensor, value, ts) {
+    const ownerId = sensor.ownerId.toString();
     const p = sensor.persistence || {};
     const mode = p.mode || 'change_or_interval';
     const intervalMs = (p.intervalSeconds && p.intervalSeconds > 0 ? p.intervalSeconds : 300) * 1000;
     const epsilon = p.epsilon || 0;
-    const baseline = this.runtimeState.getBaseline(sensor.sensorId);
+    const baseline = this.runtimeState.getBaseline(ownerId, sensor.sensorId);
     if (!baseline) return true;
 
     const intervalElapsed = ts - baseline.ts >= intervalMs;

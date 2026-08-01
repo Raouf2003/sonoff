@@ -3,8 +3,8 @@ const Rule = require('../models/Rule');
 
 class RuleEngine {
   constructor() {
-    this.sensorsByDevice = new Map();
-    this.rulesBySensor = new Map();
+    this.sensorsByKey = new Map();
+    this.rulesByKey = new Map();
     this.byId = new Map();
     this.runtimeState = null;
     this.commandRouter = null;
@@ -17,8 +17,8 @@ class RuleEngine {
 
   async rebuildAll() {
     const [sensors, rules] = await Promise.all([Sensor.find({}), Rule.find({})]);
-    this.sensorsByDevice.clear();
-    this.rulesBySensor.clear();
+    this.sensorsByKey.clear();
+    this.rulesByKey.clear();
     this.byId.clear();
     this.runtimeState.reset();
     for (const s of sensors) this._indexSensor(s);
@@ -26,29 +26,29 @@ class RuleEngine {
     console.log(`RuleEngine: indexed ${sensors.length} sensor(s), ${rules.length} rule(s)`);
   }
 
-  getSensorsForDevice(deviceId) {
-    return this.sensorsByDevice.get(deviceId) || null;
+  getSensor(ownerId, sensorId) {
+    return this.sensorsByKey.get(`${ownerId}:${sensorId}`) || null;
+  }
+
+  _key(ownerId, sensorId) {
+    return `${ownerId}:${sensorId}`;
   }
 
   _indexSensor(s) {
-    if (!s.deviceId) return;
-    if (!this.sensorsByDevice.has(s.deviceId)) {
-      this.sensorsByDevice.set(s.deviceId, new Map());
-    }
-    this.sensorsByDevice.get(s.deviceId).set(s.sensorId, s);
+    this.sensorsByKey.set(this._key(s.ownerId.toString(), s.sensorId), s);
   }
 
   _dropSensor(s) {
-    const m = this.sensorsByDevice.get(s.deviceId);
-    if (m) m.delete(s.sensorId);
+    this.sensorsByKey.delete(this._key(s.ownerId.toString(), s.sensorId));
   }
 
   _indexRule(r) {
     const rid = r._id.toString();
     this.byId.set(rid, r);
 
-    if (!this.rulesBySensor.has(r.sensorId)) this.rulesBySensor.set(r.sensorId, []);
-    const arr = this.rulesBySensor.get(r.sensorId);
+    const key = this._key(r.ownerId.toString(), r.sensorId);
+    if (!this.rulesByKey.has(key)) this.rulesByKey.set(key, []);
+    const arr = this.rulesByKey.get(key);
     if (!arr.some((x) => x._id.toString() === rid)) arr.push(r);
     arr.sort((a, b) => (b.priority || 0) - (a.priority || 0));
   }
@@ -56,7 +56,8 @@ class RuleEngine {
   _dropRule(r) {
     const rid = r._id.toString();
     this.byId.delete(rid);
-    const arr = this.rulesBySensor.get(r.sensorId);
+    const key = this._key(r.ownerId.toString(), r.sensorId);
+    const arr = this.rulesByKey.get(key);
     if (arr) {
       const i = arr.findIndex((x) => x._id.toString() === rid);
       if (i >= 0) arr.splice(i, 1);
@@ -71,7 +72,7 @@ class RuleEngine {
 
   async onSensorDeleted(s) {
     this._dropSensor(s);
-    this.runtimeState.clearSensorRuntime(s.sensorId);
+    this.runtimeState.clearSensorRuntime(s.ownerId.toString(), s.sensorId);
   }
 
   async onRuleChanged(r) {
@@ -82,30 +83,16 @@ class RuleEngine {
     this._dropRule(r);
   }
 
-  async onDeviceUnclaimed(deviceId) {
-    const sensors = this.sensorsByDevice.get(deviceId);
-    if (!sensors) return;
-    for (const s of sensors.values()) {
-      this.runtimeState.clearSensorRuntime(s.sensorId);
-      for (const r of this.rulesBySensor.get(s.sensorId) || []) {
-        if (r.enabled) {
-          r.enabled = false;
-          this.runtimeState.setRuleActive(r._id.toString(), false);
-        }
-      }
-    }
-    this.sensorsByDevice.delete(deviceId);
-  }
-
-  handleReading(sensorId, value, ts) {
+  handleReading(ownerId, sensorId, value, ts) {
     const rt = this.runtimeState;
-    const prev = rt.getSensorValue(sensorId);
-    rt.setSensorValue(sensorId, value, ts);
+    const key = this._key(ownerId, sensorId);
+    const prev = rt.getSensorValue(ownerId, sensorId);
+    rt.setSensorValue(ownerId, sensorId, value, ts);
 
-    const rules = this.rulesBySensor.get(sensorId) || [];
+    const rules = this.rulesByKey.get(key) || [];
     for (const rule of rules) {
       if (!rule.enabled) continue;
-      if (rt.isEmergencyStop(rule.ownerId.toString())) continue;
+      if (rt.isEmergencyStop(ownerId)) continue;
       const rid = rule._id.toString();
       const lastSeen = prev ? prev.lastSeen : ts;
       if (rule.freshnessS > 0 && ts - lastSeen > rule.freshnessS * 1000) {
