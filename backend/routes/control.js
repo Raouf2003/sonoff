@@ -34,16 +34,14 @@ router.post('/control', async (req, res) => {
       return res.status(503).json({ error: 'MQTT broker not connected' });
     }
 
-    let acked = false;
     try {
-      acked = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
+      await mqttGateway.publishCommandNoWait(device.deviceId, channel, state.toUpperCase());
     } catch (err) {
       return res.status(502).json({ error: `Failed to publish command: ${err.message}` });
     }
 
     const key = `POWER${channel}`;
-    const response = { [key]: state.toUpperCase(), acked };
-    res.json(response);
+    res.json({ [key]: state.toUpperCase(), acked: null });
   } catch (err) {
     console.error('Control error:', err);
     res.status(500).json({ error: 'Internal server error' });

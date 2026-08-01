@@ -113,6 +113,20 @@ class MqttGateway {
     });
   }
 
+  publishCommandNoWait(deviceId, channel, state) {
+    return new Promise((resolve, reject) => {
+      const c = this.client;
+      if (!c || !c.connected) {
+        return reject(new Error('MQTT not connected'));
+      }
+      const topic = `cmnd/${deviceId}/POWER${channel}`;
+      c.publish(topic, String(state).toUpperCase(), { qos: 1, retain: false }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
   _resolvePending(deviceId, channel, observed) {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);

@@ -70,16 +70,18 @@ class _AutomationScreenState extends State<AutomationScreen>
 
   Future<void> _load() async {
     try {
-      final devices = await _api.getDevices();
-      final sensors = await _api.getSensors();
-      final rules = await _api.getRules();
-      final emStop = await _api.getEmergencyStop();
+      final results = await Future.wait<Object?>([
+        _api.getDevices(),
+        _api.getSensors(),
+        _api.getRules(),
+        _api.getEmergencyStop(),
+      ]);
       if (mounted) {
         setState(() {
-          _devices = devices.cast<Map<String, dynamic>>();
-          _sensors = sensors.cast<Map<String, dynamic>>();
-          _rules = rules.cast<Map<String, dynamic>>();
-          _emergencyStop = emStop;
+          _devices = (results[0] as List<dynamic>).cast<Map<String, dynamic>>();
+          _sensors = (results[1] as List<dynamic>).cast<Map<String, dynamic>>();
+          _rules = (results[2] as List<dynamic>).cast<Map<String, dynamic>>();
+          _emergencyStop = results[3] as bool;
           _loading = false;
         });
       }

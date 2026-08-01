@@ -274,18 +274,33 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
     final index = channel - 1;
-    setState(() => _loading[index] = true);
-    try {
-      await _api.control(_selectedDeviceId!, channel, targetState ? 'ON' : 'OFF');
-      setState(() => channelStates[index] = targetState);
+    final prev = channelStates[index];
+    setState(() {
+      channelStates[index] = targetState;
+      _loading[index] = true;
       if (targetState) {
         _rippleControllers[index].repeat(reverse: true);
       } else {
         _rippleControllers[index].stop();
         _rippleControllers[index].reset();
       }
-    } catch (e) { _showError('Failed to control ${channels[index].name}'); }
-    finally { if (mounted) setState(() => _loading[index] = false); }
+    });
+    try {
+      await _api.control(_selectedDeviceId!, channel, targetState ? 'ON' : 'OFF');
+    } catch (e) {
+      setState(() {
+        channelStates[index] = prev;
+        if (prev) {
+          _rippleControllers[index].repeat(reverse: true);
+        } else {
+          _rippleControllers[index].stop();
+          _rippleControllers[index].reset();
+        }
+      });
+      _showError('Failed to control ${channels[index].name}');
+    } finally {
+      if (mounted) setState(() => _loading[index] = false);
+    }
   }
 
   Future<void> _logout() async {
