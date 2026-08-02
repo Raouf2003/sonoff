@@ -4,13 +4,6 @@ const detectedSensors = require('./detectedSensors');
 
 const ACK_TIMEOUT_MS = 5000;
 
-// Tasmota-style metadata keys. Everything else in a SENSOR payload is a
-// sensor: the JSON key IS the sensor ID ({"soil_1":42}).
-const SENSOR_META_KEYS = new Set([
-  'Time', 'Version', 'Uptime', 'RSSI', 'Heap', 'Mac', 'Hostname',
-  'IPAddress', 'Wifi', 'StatusPRT', 'TempUnit', 'ANALOG', 'ENERGY',
-]);
-
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
   if (!parsed || typeof parsed !== 'object') return updates;
@@ -143,9 +136,17 @@ class MqttGateway {
 
   _handle(topic, payload) {
     const parts = topic.split('/');
-    const deviceId = parts[1];
-    if (!deviceId) return;
+    const id = parts[1];
+    if (!id) return;
 
+    // Sensor nodes: tele/<SENSOR_ID>/SENSOR, payload {"value":42}. The sensor
+    // id comes from the topic; the payload only carries the numeric value.
+    if (parts[0] === 'tele' && parts[2] === 'SENSOR') {
+      this._ingestSensor(id, payload);
+      return;
+    }
+
+    const deviceId = id;
     const device = this.deviceRegistry.get(deviceId);
     const owned = !!(device && device.ownerId);
     const channelCount = device ? device.channels : 4;
@@ -155,11 +156,6 @@ class MqttGateway {
       parsed = JSON.parse(payload);
     } catch {
       parsed = null;
-    }
-
-    if (parts[0] === 'tele' && parts[2] === 'SENSOR') {
-      this._ingestSensor(deviceId, parsed);
-      return;
     }
 
     const channelUpdates = {};
@@ -205,26 +201,25 @@ class MqttGateway {
     }
   }
 
-  _ingestSensor(topicDeviceId, parsed) {
+  _ingestSensor(sensorId, payload) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      parsed = null;
+    }
     if (!parsed || typeof parsed !== 'object') return;
 
-    // The topic device id is ignored entirely. Each JSON key is a sensor id;
-    // the sensor knows its Sonoff device because the user selected it when
-    // creating the sensor.
+    const value = parsed.value;
+    if (typeof value !== 'number') return;
+
     const now = new Date();
+    detectedSensors.observe(sensorId, value);
 
-    for (const key of Object.keys(parsed)) {
-      if (SENSOR_META_KEYS.has(key)) continue;
-      const value = parsed[key];
-      if (typeof value !== 'number') continue;
-
-      detectedSensors.observe(key, value);
-
-      Sensor.updateOne(
-        { sensorId: key },
-        { $set: { lastValue: value, lastSeen: now } },
-      ).catch((err) => console.error('Sensor update error:', err));
-    }
+    Sensor.updateOne(
+      { sensorId },
+      { $set: { lastValue: value, lastSeen: now } },
+    ).catch((err) => console.error('Sensor update error:', err));
   }
 }
 

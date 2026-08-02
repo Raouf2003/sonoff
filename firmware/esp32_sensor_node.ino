@@ -9,8 +9,6 @@ const int   MQTT_PORT = 1883;
 const char* MQTT_USER = "";
 const char* MQTT_PASS = "";
 
-const char* DEVICE_ID = "esp32_sensor_01";
-
 const char* SENSOR_ID = "soil_1";
 
 const int SENSOR_PIN = 34;
@@ -51,7 +49,7 @@ bool connectWiFi() {
 bool connectMQTT() {
   if (mqtt.connected()) return true;
   Serial.print("MQTT: connecting");
-  String clientId = String(DEVICE_ID) + "_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  String clientId = String((uint32_t)ESP.getEfuseMac(), HEX);
   unsigned long start = millis();
   while (!mqtt.connected() && millis() - start < 10000) {
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
@@ -67,8 +65,8 @@ bool connectMQTT() {
 
 void publishSensor() {
   int value = readSensorPercent();
-  char payload[96];
-  snprintf(payload, sizeof(payload), "{\"%s\":%d}", SENSOR_ID, value);
+  char payload[64];
+  snprintf(payload, sizeof(payload), "{\"value\":%d}", value);
   bool ok = mqtt.publish(sensorTopic.c_str(), payload);
   Serial.printf("Publish %s -> %d%% (%s)\n", SENSOR_ID, value, ok ? "ok" : "failed");
 }
@@ -79,10 +77,10 @@ void setup() {
 
   analogReadResolution(12);
 
-  sensorTopic = String("tele/") + DEVICE_ID + "/SENSOR";
+  sensorTopic = String("tele/") + SENSOR_ID + "/SENSOR";
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
 
-  Serial.printf("Sensor node %s (%s) ready\n", DEVICE_ID, SENSOR_ID);
+  Serial.printf("Sensor node %s ready\n", SENSOR_ID);
 }
 
 void loop() {

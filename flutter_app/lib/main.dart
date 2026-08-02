@@ -130,6 +130,29 @@ class _SteesLogo extends StatelessWidget {
   }
 }
 
+class _HeaderIconButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  const _HeaderIconButton({required this.icon, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(7),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: color.withValues(alpha: 0.2)),
+        ),
+        child: Icon(icon, size: 16, color: color),
+      ),
+    );
+  }
+}
+
 class ChannelConfig {
   final String name;
   final IconData icon;
@@ -327,78 +350,67 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 4),
       child: Row(
         children: [
-          const _SteesLogo(size: 44),
-          const SizedBox(width: 14),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('STEES', style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.foam, letterSpacing: 2)),
-              Text('Smart Irrigation', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist, letterSpacing: 0.5)),
-            ],
+          const _SteesLogo(size: 36),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('STEES', maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam, letterSpacing: 2)),
+                Text('Smart Irrigation', maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(fontSize: 10, color: AppColors.mist, letterSpacing: 0.5)),
+              ],
+            ),
           ),
-          const Spacer(),
+          const SizedBox(width: 8),
           _ConnectionDroplet(connected: _connected),
-          const SizedBox(width: 12),
-          InkWell(
-            onTap: () async {
-              final added = await Navigator.of(context).push<bool>(
-                MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
-              );
-              if (added == true) _loadDevices();
-            },
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: AppColors.stream.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.stream.withValues(alpha: 0.2)),
-              ),
-              child: Icon(Icons.add, size: 18, color: AppColors.stream),
-            ),
-          ),
           const SizedBox(width: 8),
-          InkWell(
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const AddSensorScreen()),
-            ),
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: AppColors.leaf.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.leaf.withValues(alpha: 0.2)),
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _HeaderIconButton(
+                    icon: Icons.add,
+                    color: AppColors.stream,
+                    onTap: () async {
+                      final added = await Navigator.of(context).push<bool>(
+                        MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
+                      );
+                      if (added == true) _loadDevices();
+                    },
+                  ),
+                  const SizedBox(width: 6),
+                  _HeaderIconButton(
+                    icon: Icons.sensors,
+                    color: AppColors.leaf,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const AddSensorScreen()),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  _HeaderIconButton(
+                    icon: Icons.rule,
+                    color: AppColors.sunlight,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const RulesScreen()),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  _HeaderIconButton(
+                    icon: Icons.logout,
+                    color: AppColors.mist,
+                    onTap: _logout,
+                  ),
+                ],
               ),
-              child: Icon(Icons.sensors, size: 18, color: AppColors.leaf),
-            ),
-          ),
-          const SizedBox(width: 8),
-          InkWell(
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const RulesScreen()),
-            ),
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: AppColors.sunlight.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.sunlight.withValues(alpha: 0.2)),
-              ),
-              child: Icon(Icons.rule, size: 18, color: AppColors.sunlight),
-            ),
-          ),
-          const SizedBox(width: 8),
-          InkWell(
-            onTap: _logout,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.05),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(Icons.logout, size: 18, color: AppColors.mist),
             ),
           ),
         ],

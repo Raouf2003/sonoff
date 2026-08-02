@@ -58,7 +58,7 @@ setInterval(() => {
 
 setInterval(() => {
   const value = SENSOR_BASE + Math.round(Math.sin(Date.now() / 30000) * 8);
-  const payload = JSON.stringify({ [SENSOR_ID]: value });
-  client.publish(`tele/${DEVICE_ID}/SENSOR`, payload);
-  console.log(`[${DEVICE_ID}] sensor -> ${payload}`);
+  const payload = JSON.stringify({ value });
+  client.publish(`tele/${SENSOR_ID}/SENSOR`, payload);
+  console.log(`[${SENSOR_ID}] sensor -> ${payload}`);
 }, 10000);
