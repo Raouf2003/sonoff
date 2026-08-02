@@ -41,25 +41,14 @@ client.on('message', (topic, message) => {
   client.publish(`stat/${DEVICE_ID}/RESULT`, resultPayload);
 });
 
-const state = { temp_1: 24, soil_1: 40 };
-
 setInterval(() => {
-  state.temp_1 = 24 + Math.sin(Date.now() / 60000) * 2 + (Math.random() * 0.5 - 0.25);
-  state.soil_1 = Math.max(5, Math.min(95, state.soil_1 + (Math.random() * 4 - 2)));
-  const now = new Date().toISOString();
   const teleState = {
-    Time: now,
+    Time: new Date().toISOString(),
     POWER1: relays[1],
     POWER2: relays[2],
     POWER3: relays[3],
     POWER4: relays[4],
   };
   client.publish(`tele/${DEVICE_ID}/STATE`, JSON.stringify(teleState));
-  const sensorPayload = {
-    Time: now,
-    temp_1: Number(state.temp_1.toFixed(1)),
-    soil_1: Number(state.soil_1.toFixed(1)),
-  };
-  client.publish(`tele/${DEVICE_ID}/SENSOR`, JSON.stringify(sensorPayload));
-  console.log(`[${DEVICE_ID}] tele -> ${JSON.stringify(sensorPayload)}`);
+  console.log(`[${DEVICE_ID}] tele -> ${JSON.stringify(teleState)}`);
 }, 10000);

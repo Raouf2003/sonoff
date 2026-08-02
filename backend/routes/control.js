@@ -1,6 +1,7 @@
 const express = require('express');
 const Device = require('../models/Device');
 const mqttGateway = require('../services/mqttGateway');
+const runtimeState = require('../services/runtimeState');
 
 const router = express.Router();
 
@@ -65,12 +66,12 @@ router.get('/status', async (req, res) => {
       return res.status(403).json({ error: 'You do not own this device' });
     }
 
-    const deviceStates = req.app.get('deviceStates') || {};
-    const state = deviceStates[deviceId] || {};
+    const deviceState = runtimeState.getDeviceState(deviceId);
+    const channels = deviceState ? deviceState.channels : {};
 
     const status = {};
     for (let i = 1; i <= 4; i++) {
-      status[`POWER${i}`] = state[i] || 'OFF';
+      status[`POWER${i}`] = channels[i] || 'OFF';
     }
     res.json(status);
   } catch (err) {

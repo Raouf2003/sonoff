@@ -7,16 +7,10 @@ const mongoose = require('mongoose');
 const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
 const controlRoutes = require('./routes/control');
-const ruleRoutes = require('./routes/rules');
-const sensorRoutes = require('./routes/sensors');
-const runtimeRoutes = require('./routes/runtime');
 const { authMiddleware } = require('./middleware/auth');
 
-const User = require('./models/User');
 const deviceRegistry = require('./services/deviceRegistry');
 const runtimeState = require('./services/runtimeState');
-const commandRouter = require('./services/commandRouter');
-const ruleEngine = require('./services/ruleEngine');
 const mqttGateway = require('./services/mqttGateway');
 
 const app = express();
@@ -44,9 +38,7 @@ mongoose
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function initRuntime() {
-  ruleEngine.init({ runtimeState, commandRouter });
-  commandRouter.init({ mqttGateway, deviceRegistry, runtimeState });
-  mqttGateway.init({ io, deviceRegistry, runtimeState, engine: ruleEngine });
+  mqttGateway.init({ io, deviceRegistry, runtimeState });
 }
 
 async function loadFromDb() {
@@ -54,14 +46,10 @@ async function loadFromDb() {
     await delay(1000);
   }
   if (mongoose.connection.readyState !== 1) {
-    console.error('Database unavailable; device ownership and rules will not be loaded');
+    console.error('Database unavailable; device ownership will not be loaded');
     return;
   }
   await deviceRegistry.init();
-  await ruleEngine.rebuildAll();
-  const stops = await User.find({ emergencyStop: true }, '_id');
-  for (const u of stops) runtimeState.setEmergencyStop(u._id.toString(), true);
-  if (stops.length) console.log(`RuntimeState: restored ${stops.length} emergency-stop flag(s)`);
 }
 
 initRuntime();
@@ -85,9 +73,6 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
-app.use('/api/rules', authMiddleware, ruleRoutes);
-app.use('/api/sensors', authMiddleware, sensorRoutes);
-app.use('/api/runtime', authMiddleware, runtimeRoutes);
 app.use('/api', authMiddleware, controlRoutes);
 
 server.listen(PORT, '0.0.0.0', () => {

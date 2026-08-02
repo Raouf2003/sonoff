@@ -1,6 +1,5 @@
 const express = require('express');
 const Device = require('../models/Device');
-const Rule = require('../models/Rule');
 const deviceRegistry = require('../services/deviceRegistry');
 
 const router = express.Router();
@@ -52,14 +51,6 @@ router.post('/claim', async (req, res) => {
   }
 });
 
-async function guardEnabledRules(userId, deviceId) {
-  const enabled = await Rule.findOne({ ownerId: userId, enabled: true, 'action.deviceId': deviceId });
-  if (enabled) {
-    return { error: `Device is referenced by enabled rule "${enabled.name}". Disable or delete it first.` };
-  }
-  return null;
-}
-
 router.post('/unclaim', async (req, res) => {
   try {
     const { deviceId } = req.body;
@@ -69,14 +60,6 @@ router.post('/unclaim', async (req, res) => {
     if (!device || !device.ownerId || device.ownerId.toString() !== req.userId) {
       return res.status(403).json({ error: 'You do not own this device' });
     }
-
-    const guard = await guardEnabledRules(req.userId, device.deviceId);
-    if (guard) return res.status(409).json({ error: guard.error });
-
-    await Rule.updateMany(
-      { ownerId: req.userId, 'action.deviceId': device.deviceId },
-      { $set: { enabled: false, updatedAt: new Date() } },
-    );
 
     device.ownerId = null;
     device.claimedAt = null;
@@ -96,9 +79,6 @@ router.delete('/:deviceId', async (req, res) => {
     if (!device || !device.ownerId || device.ownerId.toString() !== req.userId) {
       return res.status(403).json({ error: 'You do not own this device' });
     }
-
-    const guard = await guardEnabledRules(req.userId, device.deviceId);
-    if (guard) return res.status(409).json({ error: guard.error });
 
     await device.deleteOne();
     deviceRegistry.remove(device.deviceId);

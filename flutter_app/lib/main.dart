@@ -5,7 +5,6 @@ import 'services/auth_service.dart';
 import 'services/api_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/add_device_screen.dart';
-import 'screens/automation_screen.dart';
 
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
@@ -350,24 +349,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           const Spacer(),
           _ConnectionDroplet(connected: _connected),
           const SizedBox(width: 12),
-          InkWell(
-            onTap: () async {
-              await Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const AutomationScreen()),
-              );
-              _loadDevices();
-            },
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: AppColors.leaf.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.leaf.withValues(alpha: 0.2)),
-              ),
-              child: Icon(Icons.auto_awesome, size: 18, color: AppColors.leaf),
-            ),
-          ),
-          const SizedBox(width: 8),
           InkWell(
             onTap: () async {
               final added = await Navigator.of(context).push<bool>(

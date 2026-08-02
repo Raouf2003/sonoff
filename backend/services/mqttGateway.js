@@ -1,17 +1,6 @@
 const mqtt = require('mqtt');
-const Telemetry = require('../models/Telemetry');
 
 const ACK_TIMEOUT_MS = 5000;
-const SENSOR_META_KEYS = new Set(['Time', 'Epoch', 'Uptime', 'UptimeSec', 'Heap', 'LoadAvg']);
-
-function coerceValue(v) {
-  if (typeof v === 'number') return v;
-  if (typeof v === 'boolean') return v;
-  const s = String(v).trim();
-  if (s === '') return undefined;
-  const num = Number(s);
-  return Number.isNaN(num) ? s.toUpperCase() : num;
-}
 
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
@@ -29,15 +18,13 @@ class MqttGateway {
     this.io = null;
     this.deviceRegistry = null;
     this.runtimeState = null;
-    this.engine = null;
     this.pending = new Map();
   }
 
-  init({ io, deviceRegistry, runtimeState, engine }) {
+  init({ io, deviceRegistry, runtimeState }) {
     this.io = io;
     this.deviceRegistry = deviceRegistry;
     this.runtimeState = runtimeState;
-    this.engine = engine;
     this._connect();
   }
 
@@ -82,7 +69,6 @@ class MqttGateway {
     this.client.subscribe('stat/+/RESULT');
     this.client.subscribe('stat/+/POWER+');
     this.client.subscribe('tele/+/STATE');
-    this.client.subscribe('tele/+/SENSOR');
     console.log('MQTT subscriptions (re)registered');
   }
 
@@ -163,12 +149,9 @@ class MqttGateway {
 
     const channelUpdates = {};
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
-    const isSensor = parts[0] === 'tele' && parts[2] === 'SENSOR';
     const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER\d+$/.test(parts[2]));
 
-    if (isSensor && owned && parsed && typeof parsed === 'object') {
-      this._ingestSensorPayload(deviceId, device.ownerId, parsed);
-    } else if (isState && parsed) {
+    if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
     } else if (isResult && parsed) {
@@ -197,19 +180,6 @@ class MqttGateway {
     }
   }
 
-  _ingestSensorPayload(deviceId, ownerId, parsed) {
-    const ts = Date.now();
-    for (const [sensorId, raw] of Object.entries(parsed)) {
-      if (SENSOR_META_KEYS.has(sensorId)) continue;
-      const value = coerceValue(raw);
-      if (value === undefined) continue;
-      this.runtimeState.observeSensor(ownerId, sensorId, value, ts, deviceId);
-      const sensor = this.engine.getSensor(ownerId, sensorId);
-      if (!sensor) continue;
-      this._ingestReading(sensor, value, ts, deviceId);
-    }
-  }
-
   _resolveAcks(deviceId, parsed) {
     if (!parsed || typeof parsed !== 'object') return;
     for (const key of Object.keys(parsed)) {
@@ -218,41 +188,6 @@ class MqttGateway {
         this._resolvePending(deviceId, parseInt(m[1], 10), parsed[key]);
       }
     }
-  }
-
-  _ingestReading(sensor, value, ts, deviceId) {
-    const ownerId = sensor.ownerId.toString();
-    this.engine.handleReading(ownerId, sensor.sensorId, value, ts);
-    if (this._shouldPersist(sensor, value, ts)) {
-      Telemetry.create({
-        ownerId: sensor.ownerId,
-        sensorId: sensor.sensorId,
-        deviceId: deviceId || null,
-        value,
-        ts: new Date(ts),
-      }).catch((err) => console.error('Telemetry write error:', err.message));
-      this.runtimeState.setBaseline(ownerId, sensor.sensorId, value, ts);
-    }
-  }
-
-  _shouldPersist(sensor, value, ts) {
-    const ownerId = sensor.ownerId.toString();
-    const p = sensor.persistence || {};
-    const mode = p.mode || 'change_or_interval';
-    const intervalMs = (p.intervalSeconds && p.intervalSeconds > 0 ? p.intervalSeconds : 300) * 1000;
-    const epsilon = p.epsilon || 0;
-    const baseline = this.runtimeState.getBaseline(ownerId, sensor.sensorId);
-    if (!baseline) return true;
-
-    const intervalElapsed = ts - baseline.ts >= intervalMs;
-    if (mode === 'interval_only') return intervalElapsed;
-
-    const numeric = typeof baseline.value === 'number' && typeof value === 'number';
-    const changed = numeric
-      ? Math.abs(value - baseline.value) >= epsilon
-      : value !== baseline.value;
-    if (mode === 'change_only') return changed;
-    return changed || intervalElapsed;
   }
 }
 
