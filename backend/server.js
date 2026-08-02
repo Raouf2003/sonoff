@@ -8,11 +8,13 @@ const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
 const controlRoutes = require('./routes/control');
 const sensorRoutes = require('./routes/sensors');
+const ruleRoutes = require('./routes/rules');
 const { authMiddleware } = require('./middleware/auth');
 
 const deviceRegistry = require('./services/deviceRegistry');
 const runtimeState = require('./services/runtimeState');
 const mqttGateway = require('./services/mqttGateway');
+const ruleEngine = require('./services/ruleEngine');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -40,6 +42,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function initRuntime() {
   mqttGateway.init({ io, deviceRegistry, runtimeState });
+  ruleEngine.init({ mqttGateway });
 }
 
 async function loadFromDb() {
@@ -75,6 +78,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api/sensors', authMiddleware, sensorRoutes);
+app.use('/api/rules', authMiddleware, ruleRoutes);
 app.use('/api', authMiddleware, controlRoutes);
 
 server.listen(PORT, '0.0.0.0', () => {

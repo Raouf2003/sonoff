@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const sensorSchema = new mongoose.Schema({
+const ruleSchema = new mongoose.Schema({
   ownerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -16,21 +16,35 @@ const sensorSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true,
-    maxlength: 40,
   },
   deviceId: {
     type: String,
     required: true,
     trim: true,
-    maxlength: 60,
   },
-  lastValue: {
-    type: mongoose.Schema.Types.Mixed,
-    default: null,
+  channel: {
+    type: Number,
+    required: true,
+    min: 1,
+    max: 4,
   },
-  lastSeen: {
-    type: Date,
-    default: null,
+  condition: {
+    type: String,
+    enum: ['above', 'below'],
+    required: true,
+  },
+  threshold: {
+    type: Number,
+    required: true,
+  },
+  action: {
+    type: String,
+    enum: ['ON', 'OFF'],
+    required: true,
+  },
+  enabled: {
+    type: Boolean,
+    default: true,
   },
   createdAt: {
     type: Date,
@@ -38,14 +52,11 @@ const sensorSchema = new mongoose.Schema({
   },
 });
 
-// sensorId is the global key: MQTT ingestion looks sensors up by sensorId only.
-sensorSchema.index({ sensorId: 1 }, { unique: true });
-
-sensorSchema.set('toJSON', {
+ruleSchema.set('toJSON', {
   transform: (doc, ret) => {
     delete ret.__v;
     return ret;
   },
 });
 
-module.exports = mongoose.model('Sensor', sensorSchema);
+module.exports = mongoose.model('Rule', ruleSchema);

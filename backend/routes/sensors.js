@@ -1,6 +1,8 @@
 const express = require('express');
 const Sensor = require('../models/Sensor');
-const SensorDiscovery = require('../models/SensorDiscovery');
+const Device = require('../models/Device');
+const Rule = require('../models/Rule');
+const detectedSensors = require('../services/detectedSensors');
 
 const router = express.Router();
 
@@ -10,17 +12,15 @@ const ONLINE_WINDOW = 5 * 60 * 1000;
 
 // "status" is never stored in the database. It is derived on every response
 // from lastSeen.
-function withStatus(doc) {
-  const json = doc.toJSON();
-  const lastSeen = json.lastSeen ? new Date(json.lastSeen).getTime() : 0;
-  json.status = lastSeen && Date.now() - lastSeen < ONLINE_WINDOW ? 'online' : 'offline';
-  return json;
+function statusOf(lastSeen) {
+  const t = lastSeen ? new Date(lastSeen).getTime() : 0;
+  return t && Date.now() - t < ONLINE_WINDOW ? 'online' : 'offline';
 }
 
 router.get('/', async (req, res) => {
   try {
     const sensors = await Sensor.find({ ownerId: req.userId }).sort({ createdAt: -1 });
-    res.json(sensors.map(withStatus));
+    res.json(sensors.map((s) => ({ ...s.toJSON(), status: statusOf(s.lastSeen) })));
   } catch (err) {
     console.error('List sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -29,10 +29,10 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, sensorId } = req.body;
+    const { name, sensorId, deviceId } = req.body;
 
-    if (!name || !sensorId) {
-      return res.status(400).json({ error: 'name and sensorId are required' });
+    if (!name || !sensorId || !deviceId) {
+      return res.status(400).json({ error: 'name, sensorId, and deviceId are required' });
     }
 
     const tid = String(sensorId).trim();
@@ -40,7 +40,13 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'sensorId must be 1-40 characters (letters, numbers, _ . -)' });
     }
 
-    const existing = await Sensor.findOne({ ownerId: req.userId, sensorId: tid });
+    const did = String(deviceId).trim();
+    const device = await Device.findOne({ deviceId: did, ownerId: req.userId });
+    if (!device) {
+      return res.status(400).json({ error: 'Device not found or not owned by you' });
+    }
+
+    const existing = await Sensor.findOne({ sensorId: tid });
     if (existing) {
       return res.status(409).json({ error: 'This Sensor ID is already added' });
     }
@@ -49,9 +55,10 @@ router.post('/', async (req, res) => {
       ownerId: req.userId,
       name: String(name).trim(),
       sensorId: tid,
+      deviceId: did,
     });
 
-    res.status(201).json(sensor.toJSON());
+    res.status(201).json({ ...sensor.toJSON(), status: statusOf(sensor.lastSeen) });
   } catch (err) {
     if (err && err.code === 11000) {
       return res.status(409).json({ error: 'This Sensor ID is already added' });
@@ -61,10 +68,12 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Detected sensors: in-memory list of sensor IDs seen on MQTT. It only helps
+// the user fill the Sensor ID field and never creates relationships.
 router.get('/discovered', async (req, res) => {
   try {
-    const discovered = await SensorDiscovery.find({ ownerId: req.userId }).sort({ lastSeen: -1 });
-    res.json(discovered.map(withStatus));
+    const discovered = detectedSensors.all();
+    res.json(discovered.map((d) => ({ ...d, status: statusOf(d.lastSeen) })));
   } catch (err) {
     console.error('Discovered sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -78,6 +87,7 @@ router.delete('/:sensorId', async (req, res) => {
       return res.status(404).json({ error: 'Sensor not found' });
     }
     await sensor.deleteOne();
+    await Rule.deleteMany({ ownerId: req.userId, sensorId: req.params.sensorId });
     res.json({ ok: true });
   } catch (err) {
     console.error('Delete sensor error:', err);

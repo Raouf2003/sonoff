@@ -1,6 +1,6 @@
 const mqtt = require('mqtt');
 const Sensor = require('../models/Sensor');
-const SensorDiscovery = require('../models/SensorDiscovery');
+const detectedSensors = require('./detectedSensors');
 
 const ACK_TIMEOUT_MS = 5000;
 
@@ -205,14 +205,12 @@ class MqttGateway {
     }
   }
 
-  _ingestSensor(deviceId, parsed) {
+  _ingestSensor(topicDeviceId, parsed) {
     if (!parsed || typeof parsed !== 'object') return;
 
-    // Only sensors published by a claimed device are ingested. The owner is
-    // resolved from the device registry, never from the payload.
-    const ownerId = this.deviceRegistry.ownerOf(deviceId);
-    if (!ownerId) return;
-
+    // The topic device id is ignored entirely. Each JSON key is a sensor id;
+    // the sensor knows its Sonoff device because the user selected it when
+    // creating the sensor.
     const now = new Date();
 
     for (const key of Object.keys(parsed)) {
@@ -220,15 +218,11 @@ class MqttGateway {
       const value = parsed[key];
       if (typeof value !== 'number') continue;
 
-      SensorDiscovery.findOneAndUpdate(
-        { ownerId, deviceId, sensorId: key },
-        { $set: { lastValue: value, lastSeen: now } },
-        { upsert: true, new: true },
-      ).catch((err) => console.error('Discovery update error:', err));
+      detectedSensors.observe(key, value);
 
       Sensor.updateOne(
-        { ownerId, sensorId: key },
-        { $set: { lastValue: value, lastSeen: now, deviceId } },
+        { sensorId: key },
+        { $set: { lastValue: value, lastSeen: now } },
       ).catch((err) => console.error('Sensor update error:', err));
     }
   }

@@ -7,6 +7,7 @@ import 'services/api_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/add_device_screen.dart';
 import 'screens/add_sensor_screen.dart';
+import 'screens/rules_screen.dart';
 
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
@@ -371,6 +372,21 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 border: Border.all(color: AppColors.leaf.withValues(alpha: 0.2)),
               ),
               child: Icon(Icons.sensors, size: 18, color: AppColors.leaf),
+            ),
+          ),
+          const SizedBox(width: 8),
+          InkWell(
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RulesScreen()),
+            ),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.sunlight.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.sunlight.withValues(alpha: 0.2)),
+              ),
+              child: Icon(Icons.rule, size: 18, color: AppColors.sunlight),
             ),
           ),
           const SizedBox(width: 8),

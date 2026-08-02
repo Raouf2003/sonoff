@@ -17,9 +17,11 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
   final _api = ApiService();
 
   List<Map<String, dynamic>> _discovered = [];
+  List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
   bool _adding = false;
   String? _selected;
+  String? _selectedDeviceId;
   Timer? _timer;
   late final AnimationController _pulse;
 
@@ -27,6 +29,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
   void initState() {
     super.initState();
     _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))..repeat(reverse: true);
+    _refreshDevices();
     _refreshDiscovered();
     _timer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshDiscovered(silent: true));
   }
@@ -38,6 +41,13 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
     _sensorIdCtl.dispose();
     _pulse.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshDevices() async {
+    try {
+      final list = await _api.getDevices();
+      if (mounted) setState(() => _devices = list.cast<Map<String, dynamic>>());
+    } catch (_) {}
   }
 
   Future<void> _refreshDiscovered({bool silent = false}) async {
@@ -83,9 +93,10 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
     final name = _nameCtl.text.trim();
     final id = _sensorIdCtl.text.trim();
     if (name.isEmpty || id.isEmpty) { _err('Enter a Sensor Name and Sensor ID'); return; }
+    if (_selectedDeviceId == null) { _err('Select the Sonoff device for this sensor'); return; }
     setState(() => _adding = true);
     try {
-      await _api.createSensor(name, id);
+      await _api.createSensor(name, id, _selectedDeviceId!);
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) { _err(e.toString().replaceFirst('Exception: ', '')); }
     finally { if (mounted) setState(() => _adding = false); }
@@ -193,8 +204,8 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
 
   Widget _buildDetectedTile(Map<String, dynamic> d) {
     final id = d['sensorId'] as String? ?? '';
-    final deviceId = d['deviceId'] as String? ?? '';
     final value = d['lastValue'];
+    final online = d['status'] == 'online';
     final selected = _selected == id;
 
     return GestureDetector(
@@ -214,19 +225,10 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
         ),
         child: Row(
           children: [
-            _PulseDot(controller: _pulse, color: AppColors.leaf),
+            _PulseDot(controller: _pulse, color: online ? AppColors.leaf : AppColors.mist),
             const SizedBox(width: 12),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(id, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                  if (deviceId.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text('via $deviceId', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
-                  ],
-                ],
-              ),
+              child: Text(id, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
             ),
             if (value != null)
               Container(
@@ -264,13 +266,19 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
           Text('Sensor details', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
           const SizedBox(height: 4),
           Text(
-            'Enter the Sensor ID exactly as configured on the device.',
+            'Enter the Sensor ID exactly as configured on the device, then choose which Sonoff controller it belongs to.',
             style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.7)),
           ),
           const SizedBox(height: 18),
           _Field(controller: _nameCtl, hint: 'Sensor Name', subtitle: 'e.g. Soil Moisture', icon: Icons.label_outline, next: true),
           const SizedBox(height: 12),
           _Field(controller: _sensorIdCtl, hint: 'Sensor ID', subtitle: 'e.g. soil_1', icon: Icons.sensors, onSubmit: () => _add()),
+          const SizedBox(height: 12),
+          _DeviceDropdown(
+            devices: _devices,
+            value: _selectedDeviceId,
+            onChanged: (v) => setState(() => _selectedDeviceId = v),
+          ),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity, height: 50,
@@ -310,6 +318,54 @@ class _PulseDot extends StatelessWidget {
           boxShadow: [BoxShadow(color: color.withValues(alpha: 0.35 + controller.value * 0.3), blurRadius: 6 + controller.value * 5)],
         ),
       ),
+    );
+  }
+}
+
+class _DeviceDropdown extends StatelessWidget {
+  final List<Map<String, dynamic>> devices;
+  final String? value;
+  final ValueChanged<String> onChanged;
+
+  const _DeviceDropdown({required this.devices, required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: value,
+      isExpanded: true,
+      style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+      dropdownColor: AppColors.submerged,
+      icon: const Icon(Icons.expand_more, size: 18, color: AppColors.mist),
+      decoration: InputDecoration(
+        labelText: 'Device',
+        hintText: devices.isEmpty ? 'No Sonoff devices yet' : 'Select the Sonoff device',
+        labelStyle: GoogleFonts.inter(fontSize: 12, color: AppColors.mist),
+        helperText: 'e.g. Greenhouse Sonoff',
+        helperStyle: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.5)),
+        prefixIcon: const Icon(Icons.settings_input_hdmi, size: 18, color: AppColors.mist),
+        filled: true,
+        fillColor: AppColors.well,
+        contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: AppColors.stream, width: 1.5),
+        ),
+      ),
+      items: devices.map<DropdownMenuItem<String>>((d) {
+        return DropdownMenuItem<String>(
+          value: d['deviceId'] as String,
+          child: Text(
+            '${d['name']}  (${d['deviceId']})',
+            style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+            overflow: TextOverflow.ellipsis,
+          ),
+        );
+      }).toList(),
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
     );
   }
 }

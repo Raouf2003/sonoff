@@ -42,6 +42,15 @@ class ApiService {
     );
   }
 
+  Future<http.Response> patch(String path, Map<String, dynamic> body) async {
+    final headers = await _headers();
+    return await http.patch(
+      Uri.parse('$kBaseUrl$path'),
+      headers: headers,
+      body: jsonEncode(body),
+    );
+  }
+
   Future<http.Response> delete(String path) async {
     final headers = await _headers();
     return await http.delete(Uri.parse('$kBaseUrl$path'), headers: headers);
@@ -144,10 +153,11 @@ class ApiService {
     return jsonDecode(res.body) as List<dynamic>;
   }
 
-  Future<Map<String, dynamic>> createSensor(String name, String sensorId) async {
+  Future<Map<String, dynamic>> createSensor(String name, String sensorId, String deviceId) async {
     final res = await post('/api/sensors', {
       'name': name,
       'sensorId': sensorId,
+      'deviceId': deviceId,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 201) {
@@ -161,6 +171,54 @@ class ApiService {
     if (res.statusCode != 200) {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       throw Exception(body['error'] ?? 'Failed to delete sensor');
+    }
+  }
+
+  Future<List<dynamic>> getRules() async {
+    final res = await get('/api/rules');
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch rules');
+    }
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+
+  Future<Map<String, dynamic>> createRule({
+    required String name,
+    required String sensorId,
+    required int channel,
+    required String condition,
+    required double threshold,
+    required String action,
+  }) async {
+    final res = await post('/api/rules', {
+      'name': name,
+      'sensorId': sensorId,
+      'channel': channel,
+      'condition': condition,
+      'threshold': threshold,
+      'action': action,
+    });
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 201) {
+      throw Exception(body['error'] ?? 'Failed to create rule');
+    }
+    return body;
+  }
+
+  Future<Map<String, dynamic>> toggleRule(String ruleId) async {
+    final res = await patch('/api/rules/$ruleId/enable', {});
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(body['error'] ?? 'Failed to toggle rule');
+    }
+    return body;
+  }
+
+  Future<void> deleteRule(String ruleId) async {
+    final res = await delete('/api/rules/$ruleId');
+    if (res.statusCode != 200) {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      throw Exception(body['error'] ?? 'Failed to delete rule');
     }
   }
 }
