@@ -7,7 +7,8 @@ import 'services/api_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/add_device_screen.dart';
 import 'screens/add_sensor_screen.dart';
-import 'screens/rules_screen.dart';
+import 'screens/rule_form_screen.dart';
+import 'screens/sensor_rules_screen.dart';
 
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
@@ -186,6 +187,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   bool _initialLoading = true;
   io.Socket? _socket;
   List<Map<String, dynamic>> _devices = [];
+  List<Map<String, dynamic>> _sensors = [];
   String? _selectedDeviceId;
 
   @override
@@ -198,6 +200,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       )..forward());
     }
     _loadDevices();
+    _loadSensors();
     _connectSocket();
   }
 
@@ -226,6 +229,29 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     } catch (e) {
       if (mounted) setState(() => _initialLoading = false);
     }
+  }
+
+  Future<void> _loadSensors() async {
+    try {
+      final sensors = await _api.getSensors();
+      if (mounted) setState(() => _sensors = sensors.cast<Map<String, dynamic>>());
+    } catch (e) {
+      // Non-fatal; sensors are refreshed on return from AddSensorScreen.
+    }
+  }
+
+  String _deviceName(String deviceId) {
+    for (final d in _devices) {
+      if (d['deviceId'] == deviceId) return d['name'] as String? ?? deviceId;
+    }
+    return deviceId;
+  }
+
+  void _openAddSensor() async {
+    final added = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const AddSensorScreen()),
+    );
+    if (added == true) _loadSensors();
   }
 
   void _connectSocket() {
@@ -391,17 +417,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   _HeaderIconButton(
                     icon: Icons.sensors,
                     color: AppColors.leaf,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const AddSensorScreen()),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  _HeaderIconButton(
-                    icon: Icons.rule,
-                    color: AppColors.sunlight,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const RulesScreen()),
-                    ),
+                    onTap: _openAddSensor,
                   ),
                   const SizedBox(width: 6),
                   _HeaderIconButton(
@@ -480,24 +496,170 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: GridView.count(
-        crossAxisCount: 2,
-        mainAxisSpacing: 14,
-        crossAxisSpacing: 14,
-        childAspectRatio: 0.85,
-        physics: const BouncingScrollPhysics(),
-        children: List.generate(4, (i) => _WaterCard(
-          index: i,
-          channel: i + 1,
-          config: channels[i],
-          isOn: channelStates[i],
-          loading: _loading[i],
-          entrance: _entranceControllers[i],
-          ripple: _rippleControllers[i],
-          onToggle: (val) => _toggle(i + 1, val),
-        )),
+      child: Column(
+        children: [
+          if (_sensors.isNotEmpty) ...[
+            _buildSensorsHeader(),
+            const SizedBox(height: 10),
+            ..._sensors.map(_buildSensorCard),
+            const SizedBox(height: 20),
+          ],
+          Expanded(
+            child: GridView.count(
+              crossAxisCount: 2,
+              mainAxisSpacing: 14,
+              crossAxisSpacing: 14,
+              childAspectRatio: 0.85,
+              physics: const BouncingScrollPhysics(),
+              children: List.generate(4, (i) => _WaterCard(
+                index: i,
+                channel: i + 1,
+                config: channels[i],
+                isOn: channelStates[i],
+                loading: _loading[i],
+                entrance: _entranceControllers[i],
+                ripple: _rippleControllers[i],
+                onToggle: (val) => _toggle(i + 1, val),
+              )),
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  Widget _buildSensorsHeader() {
+    return Row(
+      children: [
+        Text('SENSORS', style: GoogleFonts.sora(fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 2, color: AppColors.mist)),
+        const Spacer(),
+        Text('${_sensors.length} linked', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.6))),
+      ],
+    );
+  }
+
+  Widget _buildSensorCard(Map<String, dynamic> s) {
+    final id = s['sensorId'] as String? ?? '';
+    final name = s['name'] as String? ?? id;
+    final online = s['status'] == 'online';
+    final value = s['lastValue'];
+    final deviceName = _deviceName(s['deviceId'] as String? ?? '');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
+      decoration: BoxDecoration(
+        color: AppColors.submerged,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: online ? AppColors.leaf.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.06),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppColors.leaf.withValues(alpha: 0.12),
+                ),
+                child: const Icon(Icons.agriculture, size: 18, color: AppColors.leaf),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                    Text('ID: $id', maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist)),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: online ? AppColors.leaf.withValues(alpha: 0.12) : AppColors.mist.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(online ? 'Online' : 'Offline',
+                  style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600,
+                    color: online ? AppColors.leaf : AppColors.mist)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Icon(Icons.settings_input_hdmi, size: 13, color: AppColors.mist.withValues(alpha: 0.7)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('Device: $deviceName', maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.8))),
+              ),
+              if (value != null) ...[
+                Text('Value: ',
+                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.8))),
+                Text(_fmtValue(value),
+                  style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.stream)),
+              ],
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => SensorRulesScreen(sensorId: id, sensorName: name)),
+                    );
+                    _loadSensors();
+                  },
+                  icon: const Icon(Icons.rule, size: 16),
+                  label: Text('Rules', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.foam,
+                    side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: () async {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => RuleFormScreen(sensorId: id, sensorName: name)),
+                    );
+                    _loadSensors();
+                  },
+                  icon: const Icon(Icons.add, size: 16),
+                  label: Text('Add Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.stream,
+                    foregroundColor: AppColors.well,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fmtValue(dynamic value) {
+    if (value is double) {
+      final rounded = value == value.roundToDouble() ? value.toInt().toString() : value.toStringAsFixed(1);
+      return '$rounded%';
+    }
+    return '$value%';
   }
 }
 

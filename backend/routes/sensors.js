@@ -2,13 +2,16 @@ const express = require('express');
 const Sensor = require('../models/Sensor');
 const Device = require('../models/Device');
 const Rule = require('../models/Rule');
-const detectedSensors = require('../services/detectedSensors');
+const mqttGateway = require('../services/mqttGateway');
 
 const router = express.Router();
 
 const SENSOR_ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 
 const ONLINE_WINDOW = 5 * 60 * 1000;
+
+// A sensor is considered verified only if it reported on MQTT within this window.
+const VERIFY_FRESH_MS = 15 * 1000;
 
 // "status" is never stored in the database. It is derived on every response
 // from lastSeen.
@@ -51,31 +54,32 @@ router.post('/', async (req, res) => {
       return res.status(409).json({ error: 'This Sensor ID is already added' });
     }
 
+    // Verify the sensor is live on MQTT by reading the in-memory cache. No
+    // waiting, no promises, no blocking. A sensor with no fresh reading is
+    // never created.
+    const reading = mqttGateway.getSensorReading(tid, VERIFY_FRESH_MS);
+    if (!reading) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sensor not found. Make sure the ESP32 is online and the Sensor ID is correct.',
+      });
+    }
+
     const sensor = await Sensor.create({
       ownerId: req.userId,
       name: String(name).trim(),
       sensorId: tid,
       deviceId: did,
+      lastValue: reading.value,
+      lastSeen: reading.lastSeen,
     });
 
-    res.status(201).json({ ...sensor.toJSON(), status: statusOf(sensor.lastSeen) });
+    res.status(200).json({ success: true, sensor: { ...sensor.toJSON(), status: statusOf(sensor.lastSeen) } });
   } catch (err) {
     if (err && err.code === 11000) {
       return res.status(409).json({ error: 'This Sensor ID is already added' });
     }
     console.error('Create sensor error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Detected sensors: in-memory list of sensor IDs seen on MQTT. It only helps
-// the user fill the Sensor ID field and never creates relationships.
-router.get('/discovered', async (req, res) => {
-  try {
-    const discovered = detectedSensors.all();
-    res.json(discovered.map((d) => ({ ...d, status: statusOf(d.lastSeen) })));
-  } catch (err) {
-    console.error('Discovered sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

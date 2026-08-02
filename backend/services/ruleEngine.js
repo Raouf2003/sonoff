@@ -1,5 +1,5 @@
 const Rule = require('../models/Rule');
-const detectedSensors = require('./detectedSensors');
+const Sensor = require('../models/Sensor');
 
 const CHECK_INTERVAL_MS = 10000;
 
@@ -26,14 +26,26 @@ class RuleEngine {
       return;
     }
 
+    // Latest live value for every sensor referenced by an enabled rule.
+    const sensorMap = new Map();
+    if (rules.length > 0) {
+      try {
+        const sensors = await Sensor.find({ sensorId: { $in: rules.map((r) => r.sensorId) } });
+        for (const s of sensors) sensorMap.set(s.sensorId, s);
+      } catch (err) {
+        console.error('RuleEngine sensor query error:', err);
+        return;
+      }
+    }
+
     for (const rule of rules) {
-      const reading = detectedSensors.get(rule.sensorId);
-      if (!reading) {
+      const sensor = sensorMap.get(rule.sensorId);
+      if (!sensor || typeof sensor.lastValue !== 'number') {
         this.prev.delete(String(rule._id));
         continue;
       }
 
-      const value = reading.lastValue;
+      const value = sensor.lastValue;
       const conditionTrue =
         rule.condition === 'above' ? value > rule.threshold : value < rule.threshold;
 

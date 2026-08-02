@@ -1,6 +1,5 @@
 const mqtt = require('mqtt');
 const Sensor = require('../models/Sensor');
-const detectedSensors = require('./detectedSensors');
 
 const ACK_TIMEOUT_MS = 5000;
 
@@ -21,6 +20,9 @@ class MqttGateway {
     this.deviceRegistry = null;
     this.runtimeState = null;
     this.pending = new Map();
+    // sensorId -> { value, lastSeen } latest live MQTT reading. Transient,
+    // never persisted. Used to verify a sensor exists before saving it.
+    this.sensorCache = new Map();
   }
 
   init({ io, deviceRegistry, runtimeState }) {
@@ -114,6 +116,15 @@ class MqttGateway {
         else resolve();
       });
     });
+  }
+
+  // Latest known reading for a sensor, or null if never seen. The reading is
+  // valid only if it arrived within `maxAgeMs`.
+  getSensorReading(sensorId, maxAgeMs) {
+    const entry = this.sensorCache.get(sensorId);
+    if (!entry) return null;
+    if (Date.now() - entry.lastSeen > maxAgeMs) return null;
+    return { sensorId, value: entry.value, lastSeen: new Date(entry.lastSeen) };
   }
 
   _resolvePending(deviceId, channel, observed) {
@@ -213,12 +224,12 @@ class MqttGateway {
     const value = parsed.value;
     if (typeof value !== 'number') return;
 
-    const now = new Date();
-    detectedSensors.observe(sensorId, value);
+    const now = Date.now();
+    this.sensorCache.set(sensorId, { value, lastSeen: now });
 
     Sensor.updateOne(
       { sensorId },
-      { $set: { lastValue: value, lastSeen: now } },
+      { $set: { lastValue: value, lastSeen: new Date(now) } },
     ).catch((err) => console.error('Sensor update error:', err));
   }
 }

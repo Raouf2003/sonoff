@@ -145,14 +145,6 @@ class ApiService {
     return jsonDecode(res.body) as List<dynamic>;
   }
 
-  Future<List<dynamic>> getDiscoveredSensors() async {
-    final res = await get('/api/sensors/discovered');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch detected sensors');
-    }
-    return jsonDecode(res.body) as List<dynamic>;
-  }
-
   Future<Map<String, dynamic>> createSensor(String name, String sensorId, String deviceId) async {
     final res = await post('/api/sensors', {
       'name': name,
@@ -160,8 +152,8 @@ class ApiService {
       'deviceId': deviceId,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 201) {
-      throw Exception(body['error'] ?? 'Failed to add sensor');
+    if (res.statusCode != 200) {
+      throw Exception(body['message'] ?? body['error'] ?? 'Failed to add sensor');
     }
     return body;
   }

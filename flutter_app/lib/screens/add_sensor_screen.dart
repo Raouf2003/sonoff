@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
@@ -11,35 +10,25 @@ class AddSensorScreen extends StatefulWidget {
   State<AddSensorScreen> createState() => _AddSensorScreenState();
 }
 
-class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProviderStateMixin {
+class _AddSensorScreenState extends State<AddSensorScreen> {
   final _nameCtl = TextEditingController();
   final _sensorIdCtl = TextEditingController();
   final _api = ApiService();
 
-  List<Map<String, dynamic>> _discovered = [];
   List<Map<String, dynamic>> _devices = [];
-  bool _loading = true;
-  bool _adding = false;
-  String? _selected;
   String? _selectedDeviceId;
-  Timer? _timer;
-  late final AnimationController _pulse;
+  bool _adding = false;
 
   @override
   void initState() {
     super.initState();
-    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))..repeat(reverse: true);
     _refreshDevices();
-    _refreshDiscovered();
-    _timer = Timer.periodic(const Duration(seconds: 10), (_) => _refreshDiscovered(silent: true));
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
     _nameCtl.dispose();
     _sensorIdCtl.dispose();
-    _pulse.dispose();
     super.dispose();
   }
 
@@ -50,56 +39,51 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
     } catch (_) {}
   }
 
-  Future<void> _refreshDiscovered({bool silent = false}) async {
-    try {
-      final list = await _api.getDiscoveredSensors();
-      if (mounted) {
-        setState(() {
-          _discovered = list.cast<Map<String, dynamic>>();
-          _loading = false;
-        });
-      }
-    } catch (_) {
-      if (mounted && !silent) {
-        setState(() => _loading = false);
-        _err('Could not reach the STEES backend');
-      }
-    }
-  }
-
-  String _humanize(String id) {
-    final words = id.replaceAll(RegExp(r'[-_.]'), ' ').split(' ');
-    return words
-        .where((w) => w.isNotEmpty)
-        .map((w) => w[0].toUpperCase() + w.substring(1))
-        .join(' ');
-  }
-
-  String _fmt(dynamic value) {
-    if (value is double) {
-      return value == value.roundToDouble() ? value.toInt().toString() : value.toStringAsFixed(1);
-    }
-    return value.toString();
-  }
-
-  void _select(Map<String, dynamic> d) {
-    final id = d['sensorId'] as String? ?? '';
-    setState(() => _selected = id);
-    _nameCtl.text = _humanize(id);
-    _sensorIdCtl.text = id;
-  }
-
   Future<void> _add() async {
     final name = _nameCtl.text.trim();
     final id = _sensorIdCtl.text.trim();
     if (name.isEmpty || id.isEmpty) { _err('Enter a Sensor Name and Sensor ID'); return; }
     if (_selectedDeviceId == null) { _err('Select the Sonoff device for this sensor'); return; }
+
     setState(() => _adding = true);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _SearchingDialog(),
+    );
+
     try {
       await _api.createSensor(name, id, _selectedDeviceId!);
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _ResultDialog(
+          icon: Icons.check_circle,
+          color: AppColors.leaf,
+          title: 'Sensor connected successfully.',
+          message: 'Your sensor is now linked to the Sonoff device.',
+          autoClose: Duration(milliseconds: 1500),
+        ),
+      );
       if (mounted) Navigator.of(context).pop(true);
-    } catch (e) { _err(e.toString().replaceFirst('Exception: ', '')); }
-    finally { if (mounted) setState(() => _adding = false); }
+    } catch (_) {
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await showDialog(
+        context: context,
+        barrierDismissible: true,
+        builder: (_) => const _ResultDialog(
+          icon: Icons.error_outline,
+          color: Color(0xFFFF7A7A),
+          title: 'Sensor not found',
+          message: 'Check the Sensor ID and make sure the ESP32 is connected.',
+        ),
+      );
+      if (mounted) setState(() => _adding = false);
+    }
   }
 
   void _err(String m) {
@@ -138,18 +122,8 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildDetectedHeader(),
-                const SizedBox(height: 10),
-                if (_loading)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 36),
-                    child: Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream))),
-                  )
-                else if (_discovered.isEmpty)
-                  _buildEmptyDetected()
-                else
-                  ..._discovered.map(_buildDetectedTile),
-                const SizedBox(height: 24),
+                _buildIntro(),
+                const SizedBox(height: 18),
                 _buildForm(),
               ],
             ),
@@ -159,94 +133,31 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
     );
   }
 
-  Widget _buildDetectedHeader() {
-    return Row(
-      children: [
-        _PulseDot(controller: _pulse, color: AppColors.stream),
-        const SizedBox(width: 10),
-        Text('DETECTED', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: AppColors.mist)),
-        const Spacer(),
-        IconButton(
-          onPressed: () => _refreshDiscovered(),
-          icon: const Icon(Icons.refresh, size: 20, color: AppColors.mist),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-          tooltip: 'Refresh',
-        ),
-      ],
-    );
-  }
-
-  Widget _buildEmptyDetected() {
+  Widget _buildIntro() {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
       decoration: BoxDecoration(
         color: AppColors.submerged,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.sensors, size: 40, color: AppColors.mist.withValues(alpha: 0.4)),
-          const SizedBox(height: 12),
-          Text('No sensors detected yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-          const SizedBox(height: 6),
+          Row(
+            children: [
+              Icon(Icons.sensors, size: 18, color: AppColors.stream),
+              const SizedBox(width: 10),
+              Text('LINK A SENSOR', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: AppColors.mist)),
+            ],
+          ),
+          const SizedBox(height: 10),
           Text(
-            'Power on your sensor node so it publishes to tele/<DEVICE_ID>/SENSOR.\nIt refreshes automatically every 10 seconds.',
-            style: GoogleFonts.inter(fontSize: 12, height: 1.5, color: AppColors.mist.withValues(alpha: 0.7)),
-            textAlign: TextAlign.center,
+            'The sensor will be verified on MQTT before it is added. Make sure your ESP32 is powered on so it can be found.',
+            style: GoogleFonts.inter(fontSize: 12.5, height: 1.55, color: AppColors.foam.withValues(alpha: 0.85)),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildDetectedTile(Map<String, dynamic> d) {
-    final id = d['sensorId'] as String? ?? '';
-    final value = d['lastValue'];
-    final online = d['status'] == 'online';
-    final selected = _selected == id;
-
-    return GestureDetector(
-      onTap: () => _select(d),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          color: selected ? AppColors.stream.withValues(alpha: 0.08) : AppColors.submerged,
-          border: Border.all(
-            color: selected ? AppColors.stream.withValues(alpha: 0.6) : Colors.white.withValues(alpha: 0.06),
-            width: 1.4,
-          ),
-        ),
-        child: Row(
-          children: [
-            _PulseDot(controller: _pulse, color: online ? AppColors.leaf : AppColors.mist),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(id, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-            ),
-            if (value != null)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppColors.stream.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(_fmt(value), style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.stream)),
-              ),
-            const SizedBox(width: 12),
-            Icon(
-              selected ? Icons.check_circle : Icons.radio_button_unchecked,
-              size: 20,
-              color: selected ? AppColors.stream : AppColors.mist.withValues(alpha: 0.3),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -272,7 +183,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
           const SizedBox(height: 18),
           _Field(controller: _nameCtl, hint: 'Sensor Name', subtitle: 'e.g. Soil Moisture', icon: Icons.label_outline, next: true),
           const SizedBox(height: 12),
-          _Field(controller: _sensorIdCtl, hint: 'Sensor ID', subtitle: 'e.g. soil_1', icon: Icons.sensors, onSubmit: () => _add()),
+          _Field(controller: _sensorIdCtl, hint: 'Sensor ID', subtitle: 'e.g. soil_1', icon: Icons.sensors, onSubmit: _adding ? null : () => _add()),
           const SizedBox(height: 12),
           _DeviceDropdown(
             devices: _devices,
@@ -289,9 +200,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
                 foregroundColor: AppColors.well,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               ),
-              child: _adding
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
-                  : Text('Add Sensor', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+              child: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
             ),
           ),
         ],
@@ -300,22 +209,94 @@ class _AddSensorScreenState extends State<AddSensorScreen> with SingleTickerProv
   }
 }
 
-class _PulseDot extends StatelessWidget {
-  final AnimationController controller;
-  final Color color;
-  const _PulseDot({required this.controller, required this.color});
+class _SearchingDialog extends StatelessWidget {
+  const _SearchingDialog();
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (_, child) => Container(
-        width: 9 + controller.value * 3,
-        height: 9 + controller.value * 3,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: color,
-          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.35 + controller.value * 0.3), blurRadius: 6 + controller.value * 5)],
+    return Dialog(
+      backgroundColor: AppColors.submerged,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 34, height: 34, child: CircularProgressIndicator(strokeWidth: 3, color: AppColors.stream)),
+            const SizedBox(height: 20),
+            Text('Searching for sensor...', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
+            const SizedBox(height: 8),
+            Text(
+              'Waiting for the sensor to report on MQTT. This can take a few seconds.',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 12, height: 1.5, color: AppColors.mist.withValues(alpha: 0.8)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ResultDialog extends StatefulWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String message;
+  final Duration? autoClose;
+
+  const _ResultDialog({required this.icon, required this.color, required this.title, required this.message, this.autoClose});
+
+  @override
+  State<_ResultDialog> createState() => _ResultDialogState();
+}
+
+class _ResultDialogState extends State<_ResultDialog> {
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoClose != null) {
+      Future.delayed(widget.autoClose!, () {
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: AppColors.submerged,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(widget.icon, size: 44, color: widget.color),
+            const SizedBox(height: 16),
+            Text(widget.title, textAlign: TextAlign.center, style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
+            const SizedBox(height: 8),
+            Text(
+              widget.message,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 12.5, height: 1.5, color: AppColors.mist.withValues(alpha: 0.85)),
+            ),
+            if (widget.autoClose == null) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity, height: 42,
+                child: FilledButton(
+                  onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.stream,
+                    foregroundColor: AppColors.well,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: Text('OK', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ],
+          ],
         ),
       ),
     );
