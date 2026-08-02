@@ -1,6 +1,6 @@
 const mqtt = require('mqtt');
 const Sensor = require('../models/Sensor');
-const sensorDiscovery = require('./sensorDiscovery');
+const SensorDiscovery = require('../models/SensorDiscovery');
 
 const ACK_TIMEOUT_MS = 5000;
 
@@ -207,7 +207,12 @@ class MqttGateway {
 
   _ingestSensor(deviceId, parsed) {
     if (!parsed || typeof parsed !== 'object') return;
+
+    // Only sensors published by a claimed device are ingested. The owner is
+    // resolved from the device registry, never from the payload.
     const ownerId = this.deviceRegistry.ownerOf(deviceId);
+    if (!ownerId) return;
+
     const now = new Date();
 
     for (const key of Object.keys(parsed)) {
@@ -215,12 +220,15 @@ class MqttGateway {
       const value = parsed[key];
       if (typeof value !== 'number') continue;
 
-      sensorDiscovery.observe(deviceId, key, value);
+      SensorDiscovery.findOneAndUpdate(
+        { ownerId, deviceId, sensorId: key },
+        { $set: { lastValue: value, lastSeen: now } },
+        { upsert: true, new: true },
+      ).catch((err) => console.error('Discovery update error:', err));
 
-      if (!ownerId) continue;
       Sensor.updateOne(
         { ownerId, sensorId: key },
-        { $set: { lastValue: value, lastSeen: now, status: 'online', deviceId } },
+        { $set: { lastValue: value, lastSeen: now, deviceId } },
       ).catch((err) => console.error('Sensor update error:', err));
     }
   }

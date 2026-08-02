@@ -1,15 +1,26 @@
 const express = require('express');
 const Sensor = require('../models/Sensor');
-const sensorDiscovery = require('../services/sensorDiscovery');
+const SensorDiscovery = require('../models/SensorDiscovery');
 
 const router = express.Router();
 
 const SENSOR_ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 
+const ONLINE_WINDOW = 5 * 60 * 1000;
+
+// "status" is never stored in the database. It is derived on every response
+// from lastSeen.
+function withStatus(doc) {
+  const json = doc.toJSON();
+  const lastSeen = json.lastSeen ? new Date(json.lastSeen).getTime() : 0;
+  json.status = lastSeen && Date.now() - lastSeen < ONLINE_WINDOW ? 'online' : 'offline';
+  return json;
+}
+
 router.get('/', async (req, res) => {
   try {
     const sensors = await Sensor.find({ ownerId: req.userId }).sort({ createdAt: -1 });
-    res.json(sensors);
+    res.json(sensors.map(withStatus));
   } catch (err) {
     console.error('List sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -52,8 +63,8 @@ router.post('/', async (req, res) => {
 
 router.get('/discovered', async (req, res) => {
   try {
-    const discovered = sensorDiscovery.forOwner(req.userId);
-    res.json(discovered);
+    const discovered = await SensorDiscovery.find({ ownerId: req.userId }).sort({ lastSeen: -1 });
+    res.json(discovered.map(withStatus));
   } catch (err) {
     console.error('Discovered sensors error:', err);
     res.status(500).json({ error: 'Internal server error' });

@@ -1,16 +1,16 @@
 const mongoose = require('mongoose');
 
-const sensorSchema = new mongoose.Schema({
+const sensorDiscoverySchema = new mongoose.Schema({
   ownerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
   },
-  name: {
+  deviceId: {
     type: String,
     required: true,
     trim: true,
-    maxlength: 50,
+    maxlength: 60,
   },
   sensorId: {
     type: String,
@@ -18,31 +18,23 @@ const sensorSchema = new mongoose.Schema({
     trim: true,
     maxlength: 40,
   },
-  deviceId: {
-    type: String,
-    default: null,
-  },
   lastValue: {
     type: mongoose.Schema.Types.Mixed,
     default: null,
   },
   lastSeen: {
     type: Date,
-    default: null,
-  },
-  createdAt: {
-    type: Date,
     default: Date.now,
   },
 });
 
-sensorSchema.index({ ownerId: 1, sensorId: 1 }, { unique: true });
+sensorDiscoverySchema.index({ ownerId: 1, deviceId: 1, sensorId: 1 }, { unique: true });
 
-sensorSchema.set('toJSON', {
+sensorDiscoverySchema.set('toJSON', {
   transform: (doc, ret) => {
     delete ret.__v;
     return ret;
   },
 });
 
-module.exports = mongoose.model('Sensor', sensorSchema);
+module.exports = mongoose.model('SensorDiscovery', sensorDiscoverySchema);
