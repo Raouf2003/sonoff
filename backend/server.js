@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const authRoutes = require('./routes/auth');
 const deviceRoutes = require('./routes/devices');
 const controlRoutes = require('./routes/control');
+const sensorRoutes = require('./routes/sensors');
 const { authMiddleware } = require('./middleware/auth');
 
 const deviceRegistry = require('./services/deviceRegistry');
@@ -73,6 +74,7 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
+app.use('/api/sensors', authMiddleware, sensorRoutes);
 app.use('/api', authMiddleware, controlRoutes);
 
 server.listen(PORT, '0.0.0.0', () => {

@@ -5,6 +5,9 @@ const USERNAME = process.env.MQTT_USERNAME;
 const PASSWORD = process.env.MQTT_PASSWORD;
 const DEVICE_ID = process.env.DEVICE_ID || process.env.DEVICE_NAME || 'smarthome';
 
+const SENSOR_ID = process.env.SENSOR_ID || 'soil_1';
+const SENSOR_BASE = parseFloat(process.env.SENSOR_BASE || '42');
+
 const relays = { 1: 'OFF', 2: 'OFF', 3: 'OFF', 4: 'OFF' };
 
 const client = mqtt.connect(BROKER_URL, { username: USERNAME, password: PASSWORD });
@@ -51,4 +54,11 @@ setInterval(() => {
   };
   client.publish(`tele/${DEVICE_ID}/STATE`, JSON.stringify(teleState));
   console.log(`[${DEVICE_ID}] tele -> ${JSON.stringify(teleState)}`);
+}, 10000);
+
+setInterval(() => {
+  const value = SENSOR_BASE + Math.round(Math.sin(Date.now() / 30000) * 8);
+  const payload = JSON.stringify({ [SENSOR_ID]: value });
+  client.publish(`tele/${DEVICE_ID}/SENSOR`, payload);
+  console.log(`[${DEVICE_ID}] sensor -> ${payload}`);
 }, 10000);

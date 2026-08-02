@@ -1,6 +1,15 @@
 const mqtt = require('mqtt');
+const Sensor = require('../models/Sensor');
+const sensorDiscovery = require('./sensorDiscovery');
 
 const ACK_TIMEOUT_MS = 5000;
+
+// Tasmota-style metadata keys. Everything else in a SENSOR payload is a
+// sensor: the JSON key IS the sensor ID ({"soil_1":42}).
+const SENSOR_META_KEYS = new Set([
+  'Time', 'Version', 'Uptime', 'RSSI', 'Heap', 'Mac', 'Hostname',
+  'IPAddress', 'Wifi', 'StatusPRT', 'TempUnit', 'ANALOG', 'ENERGY',
+]);
 
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
@@ -69,6 +78,7 @@ class MqttGateway {
     this.client.subscribe('stat/+/RESULT');
     this.client.subscribe('stat/+/POWER+');
     this.client.subscribe('tele/+/STATE');
+    this.client.subscribe('tele/+/SENSOR');
     console.log('MQTT subscriptions (re)registered');
   }
 
@@ -147,6 +157,11 @@ class MqttGateway {
       parsed = null;
     }
 
+    if (parts[0] === 'tele' && parts[2] === 'SENSOR') {
+      this._ingestSensor(deviceId, parsed);
+      return;
+    }
+
     const channelUpdates = {};
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
     const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER\d+$/.test(parts[2]));
@@ -187,6 +202,26 @@ class MqttGateway {
       if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
         this._resolvePending(deviceId, parseInt(m[1], 10), parsed[key]);
       }
+    }
+  }
+
+  _ingestSensor(deviceId, parsed) {
+    if (!parsed || typeof parsed !== 'object') return;
+    const ownerId = this.deviceRegistry.ownerOf(deviceId);
+    const now = new Date();
+
+    for (const key of Object.keys(parsed)) {
+      if (SENSOR_META_KEYS.has(key)) continue;
+      const value = parsed[key];
+      if (typeof value !== 'number') continue;
+
+      sensorDiscovery.observe(deviceId, key, value);
+
+      if (!ownerId) continue;
+      Sensor.updateOne(
+        { ownerId, sensorId: key },
+        { $set: { lastValue: value, lastSeen: now, status: 'online', deviceId } },
+      ).catch((err) => console.error('Sensor update error:', err));
     }
   }
 }

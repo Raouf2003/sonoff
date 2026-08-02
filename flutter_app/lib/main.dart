@@ -1,23 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
+import 'theme.dart';
 import 'services/auth_service.dart';
 import 'services/api_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/add_device_screen.dart';
+import 'screens/add_sensor_screen.dart';
 
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
-
-class AppColors {
-  static const well = Color(0xFF0B1922);
-  static const submerged = Color(0xFF1A2D3D);
-  static const stream = Color(0xFF2DD4BF);
-  static const leaf = Color(0xFF34D399);
-  static const sunlight = Color(0xFFFBBF24);
-  static const mist = Color(0xFF94A3B8);
-  static const foam = Color(0xFFF1F5F9);
-}
 
 void main() {
   runApp(const SteesApp());
@@ -364,6 +356,21 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 border: Border.all(color: AppColors.stream.withValues(alpha: 0.2)),
               ),
               child: Icon(Icons.add, size: 18, color: AppColors.stream),
+            ),
+          ),
+          const SizedBox(width: 8),
+          InkWell(
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const AddSensorScreen()),
+            ),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.leaf.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.leaf.withValues(alpha: 0.2)),
+              ),
+              child: Icon(Icons.sensors, size: 18, color: AppColors.leaf),
             ),
           ),
           const SizedBox(width: 8),

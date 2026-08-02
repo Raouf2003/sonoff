@@ -127,4 +127,40 @@ class ApiService {
       throw Exception(body['error'] ?? 'Failed to delete device');
     }
   }
+
+  Future<List<dynamic>> getSensors() async {
+    final res = await get('/api/sensors');
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch sensors');
+    }
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+
+  Future<List<dynamic>> getDiscoveredSensors() async {
+    final res = await get('/api/sensors/discovered');
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch detected sensors');
+    }
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+
+  Future<Map<String, dynamic>> createSensor(String name, String sensorId) async {
+    final res = await post('/api/sensors', {
+      'name': name,
+      'sensorId': sensorId,
+    });
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 201) {
+      throw Exception(body['error'] ?? 'Failed to add sensor');
+    }
+    return body;
+  }
+
+  Future<void> deleteSensor(String sensorId) async {
+    final res = await delete('/api/sensors/$sensorId');
+    if (res.statusCode != 200) {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      throw Exception(body['error'] ?? 'Failed to delete sensor');
+    }
+  }
 }
