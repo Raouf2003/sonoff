@@ -157,9 +157,8 @@ class _Field extends StatelessWidget {
   final String subtitle;
   final IconData icon;
   final bool next;
-  final VoidCallback? onSubmit;
 
-  const _Field({required this.controller, required this.hint, required this.subtitle, required this.icon, this.next = false, this.onSubmit});
+  const _Field({required this.controller, required this.hint, required this.subtitle, required this.icon, this.next = false});
 
   @override
   Widget build(BuildContext context) {
@@ -167,7 +166,6 @@ class _Field extends StatelessWidget {
       controller: controller,
       style: GoogleFonts.inter(fontSize: 14, color: const Color(0xFFF1F5F9)),
       textInputAction: next ? TextInputAction.next : TextInputAction.done,
-      onSubmitted: (_) => onSubmit?.call(),
       decoration: InputDecoration(
         hintText: hint,
         helperText: subtitle,

@@ -23,6 +23,9 @@ class MqttGateway {
     // sensorId -> { value, lastSeen } latest live MQTT reading. Transient,
     // never persisted. Used to verify a sensor exists before saving it.
     this.sensorCache = new Map();
+    // deviceId/sensorId -> { lastSeen } entities observed on the broker, used
+    // to log first-boots without spamming every message.
+    this.seenLog = new Map();
   }
 
   init({ io, deviceRegistry, runtimeState }) {
@@ -127,6 +130,32 @@ class MqttGateway {
     return { sensorId, value: entry.value, lastSeen: new Date(entry.lastSeen) };
   }
 
+  // Logs a newly-seen entity (device or sensor) once, so the logs show every
+  // thing currently talking to the broker without flooding per-message noise.
+  _logSeen(kind, id) {
+    const now = Date.now();
+    const last = this.seenLog.get(id);
+    if (last && now - last < 60 * 1000) return;
+    this.seenLog.set(id, now);
+    const owned = kind === 'device' && this.deviceRegistry.isOwned(id);
+    console.log(`[mqtt] ${kind} seen on broker: ${id}${owned ? ' (claimed)' : ''}`);
+  }
+
+  snapshot() {
+    return {
+      sensors: Array.from(this.sensorCache, ([sensorId, e]) => ({
+        sensorId,
+        value: e.value,
+        lastSeen: new Date(e.lastSeen),
+      })),
+      devices: Array.from(this.deviceRegistry.all(), (d) => ({
+        deviceId: d.deviceId,
+        name: d.name,
+        channels: d.channels,
+      })),
+    };
+  }
+
   _resolvePending(deviceId, channel, observed) {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);
@@ -153,11 +182,13 @@ class MqttGateway {
     // Sensor nodes: tele/<SENSOR_ID>/SENSOR, payload {"value":42}. The sensor
     // id comes from the topic; the payload only carries the numeric value.
     if (parts[0] === 'tele' && parts[2] === 'SENSOR') {
+      this._logSeen('sensor', id);
       this._ingestSensor(id, payload);
       return;
     }
 
     const deviceId = id;
+    this._logSeen('device', deviceId);
     const device = this.deviceRegistry.get(deviceId);
     const owned = !!(device && device.ownerId);
     const channelCount = device ? device.channels : 4;

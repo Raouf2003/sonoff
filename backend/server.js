@@ -67,12 +67,20 @@ io.on('connection', (socket) => {
 });
 
 app.get('/api/health', (req, res) => {
+  const seen = mqttGateway.snapshot();
   res.json({
     status: 'ok',
     mqtt: mqttGateway.isConnected() ? 'connected' : 'disconnected',
     db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     claimedDevices: deviceRegistry.size(),
+    seenOnMqtt: seen.sensors.length + seen.devices.length,
   });
+});
+
+// Devices and sensors currently observed on the MQTT broker - no auth so it's
+// easy to curl from anywhere for debugging.
+app.get('/api/mqtt/snapshot', (req, res) => {
+  res.json(mqttGateway.snapshot());
 });
 
 app.use('/api/auth', authRoutes);
