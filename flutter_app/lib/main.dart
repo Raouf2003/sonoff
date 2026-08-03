@@ -291,6 +291,30 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       }
     });
 
+    _socket?.on('sensor_update', (data) {
+      if (!mounted) return;
+      final map = data as Map<String, dynamic>;
+      final sensorId = map['sensorId'] as String?;
+      if (sensorId == null) return;
+      // Only update a sensor already displayed (it belongs to the currently
+      // selected device). Ignore everything else.
+      int idx = -1;
+      for (int i = 0; i < _sensors.length; i++) {
+        if (_sensors[i]['sensorId'] == sensorId) { idx = i; break; }
+      }
+      if (idx < 0) return;
+      final value = map['value'];
+      final lastSeen = map['lastSeen'];
+      setState(() {
+        if (value != null) _sensors[idx]['lastValue'] = value;
+        if (lastSeen != null) {
+          _sensors[idx]['lastSeen'] = lastSeen;
+          // A fresh reading means the sensor is online.
+          _sensors[idx]['status'] = 'online';
+        }
+      });
+    });
+
     _socket?.connect();
   }
 

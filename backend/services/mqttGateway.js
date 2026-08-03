@@ -283,6 +283,17 @@ class MqttGateway {
       { sensorId },
       { $set: { lastValue: value, lastSeen: new Date(now) } },
     ).catch((err) => console.error('Sensor update error:', err));
+
+    // Live push to the app, mirroring device_update. Emitted on every valid
+    // reading so the online dot / timestamp stays fresh. Same broadcast scope
+    // as device_update - the app filters by sensorId client-side.
+    if (this.io) {
+      this.io.emit('sensor_update', {
+        sensorId,
+        value,
+        lastSeen: new Date(now).toISOString(),
+      });
+    }
   }
 }
 
