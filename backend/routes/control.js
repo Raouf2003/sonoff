@@ -31,6 +31,10 @@ router.post('/control', async (req, res) => {
       return res.status(400).json({ error: `channel must be between 1 and ${device.channels || 4}` });
     }
 
+    if (!runtimeState.isOnline(deviceId)) {
+      return res.status(409).json({ error: 'Device is not connected or is powered off' });
+    }
+
     if (!mqttGateway.isConnected()) {
       return res.status(503).json({ error: 'MQTT broker not connected' });
     }

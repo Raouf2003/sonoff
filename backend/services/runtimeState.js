@@ -8,7 +8,7 @@ class RuntimeState {
     if (!state) {
       const chans = {};
       for (let i = 1; i <= channels; i++) chans[i] = 'OFF';
-      state = { channels: chans, lastSeen: null };
+      state = { channels: chans, lastSeen: null, online: false };
       this.deviceStates.set(deviceId, state);
     }
     return state.channels;
@@ -17,6 +17,22 @@ class RuntimeState {
   touchDevice(deviceId) {
     const state = this.deviceStates.get(deviceId);
     if (state) state.lastSeen = Date.now();
+  }
+
+  setOnline(deviceId, online) {
+    const state = this.deviceStates.get(deviceId);
+    if (!state) return;
+    state.online = online;
+    if (online) state.lastSeen = Date.now();
+  }
+
+  isOnline(deviceId) {
+    const state = this.deviceStates.get(deviceId);
+    if (!state) return false;
+    if (state.online) return true;
+    // Fallback: recent telemetry counts as alive even without an LWT event.
+    const FRESH_MS = 60 * 1000;
+    return !!state.lastSeen && Date.now() - state.lastSeen < FRESH_MS;
   }
 
   getDeviceState(deviceId) {

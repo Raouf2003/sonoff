@@ -6,16 +6,20 @@ const ACK_TIMEOUT_MS = 5000;
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
   if (!parsed || typeof parsed !== 'object') return updates;
-  // Single-relay devices report a bare POWER key (no number). Treat it as
-  // channel 1.
-  if (channelCount === 1) {
-    const v = parsed.POWER;
-    if (v === 'ON' || v === 'OFF') updates[1] = v;
-    return updates;
-  }
+  // Multi-relay devices report POWER1..POWERn.
+  let found = false;
   for (let i = 1; i <= channelCount; i++) {
     const v = parsed[`POWER${i}`];
-    if (v === 'ON' || v === 'OFF') updates[i] = v;
+    if (v === 'ON' || v === 'OFF') {
+      updates[i] = v;
+      found = true;
+    }
+  }
+  // Single-relay devices report a bare POWER key (no number). Map it to
+  // channel 1 whenever present and no numbered keys were found, so reverse
+  // effect works regardless of the stored channel count.
+  if (!found && (parsed.POWER === 'ON' || parsed.POWER === 'OFF')) {
+    updates[1] = parsed.POWER;
   }
   return updates;
 }
@@ -83,6 +87,7 @@ class MqttGateway {
     this.client.subscribe('stat/+/RESULT');
     this.client.subscribe('stat/+/POWER+');
     this.client.subscribe('tele/+/STATE');
+    this.client.subscribe('tele/+/LWT');
     this.client.subscribe('tele/+/SENSOR');
     console.log('MQTT subscriptions (re)registered');
   }
@@ -199,6 +204,14 @@ class MqttGateway {
     const device = this.deviceRegistry.get(deviceId);
     const owned = !!(device && device.ownerId);
     const channelCount = device ? device.channels : 4;
+
+    // Tasmota LWT reports liveness: tele/<deviceId>/LWT = "Online"/"Offline".
+    if (parts[0] === 'tele' && parts[2] === 'LWT') {
+      const up = payload.trim().toLowerCase() === 'online';
+      this.runtimeState.ensureDeviceState(deviceId, channelCount);
+      this.runtimeState.setOnline(deviceId, up);
+      return;
+    }
 
     let parsed = null;
     try {

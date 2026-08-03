@@ -348,7 +348,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           _rippleControllers[index].reset();
         }
       });
-      _showError('Failed to control ${channels[index].name}');
+      _showError(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) setState(() => _loading[index] = false);
     }
