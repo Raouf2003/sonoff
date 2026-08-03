@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../widgets/window_timeline.dart';
 
 class ScheduleFormScreen extends StatefulWidget {
   final String deviceId;
@@ -210,7 +211,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEdit ? 'Edit Schedule' : 'Add Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
+        title: Text(_isEdit ? 'Edit Schedule' : 'New Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
         backgroundColor: AppColors.well,
         iconTheme: const IconThemeData(color: AppColors.mist),
       ),
@@ -228,77 +229,44 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                  decoration: BoxDecoration(
-                    color: AppColors.stream.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+                _DeviceBanner(deviceName: widget.deviceName, deviceId: widget.deviceId),
+                const SizedBox(height: 18),
+                _SectionCard(
+                  eyebrow: 'NAME',
+                  child: TextField(
+                    controller: _nameCtl,
+                    style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+                    textInputAction: TextInputAction.next,
+                    decoration: _inputDec('Schedule name', 'e.g. Morning irrigation', Icons.label_outline),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                ),
+                const SizedBox(height: 14),
+                _SectionCard(
+                  eyebrow: 'CHANNELS',
+                  description: 'Which outlets this schedule drives.',
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
                     children: [
-                      Text('DEVICE', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: AppColors.stream)),
-                      const SizedBox(height: 6),
-                      Text(widget.deviceName, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                      const SizedBox(height: 2),
-                      Text('ID: ${widget.deviceId}', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                      for (var i = 1; i <= widget.maxChannel; i++)
+                        _ChannelChip(
+                          label: 'CH$i',
+                          selected: _channels.contains(i),
+                          color: AppColors.stream,
+                          onTap: () => setState(() {
+                            if (!_channels.remove(i)) _channels.add(i);
+                          }),
+                        ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 18),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: AppColors.submerged,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-                  ),
+                const SizedBox(height: 14),
+                _SectionCard(
+                  eyebrow: 'REPEATS',
+                  description: 'When the week this schedule runs.',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Schedule details', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Turns the selected channels ON during each time range, OFF at other times.',
-                        style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.7)),
-                      ),
-                      const SizedBox(height: 18),
-                      TextField(
-                        controller: _nameCtl,
-                        style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
-                        textInputAction: TextInputAction.next,
-                        decoration: _inputDec('Schedule name', 'e.g. Morning irrigation', Icons.label_outline),
-                      ),
-                      const SizedBox(height: 16),
-                      _label('CHANNELS'),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 10,
-                        children: [
-                          for (var i = 1; i <= widget.maxChannel; i++)
-                            FilterChip(
-                              label: Text('CH$i', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: _channels.contains(i) ? AppColors.well : AppColors.foam)),
-                              selected: _channels.contains(i),
-                              selectedColor: AppColors.stream,
-                              checkmarkColor: AppColors.well,
-                              backgroundColor: AppColors.well,
-                              side: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                              onSelected: (sel) => setState(() {
-                                if (sel) {
-                                  _channels.add(i);
-                                } else {
-                                  _channels.remove(i);
-                                }
-                              }),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 18),
-                      _label('REPEATS'),
                       SegmentedButton<String>(
                         segments: const [
                           ButtonSegment(value: 'daily', label: Text('Daily', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
@@ -321,63 +289,62 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                           runSpacing: 8,
                           children: [
                             for (var i = 0; i < 7; i++)
-                              ChoiceChip(
-                                label: Text(_dayLabels[i], style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: _daysOfWeek.contains(i) ? AppColors.well : AppColors.foam)),
+                              _ChannelChip(
+                                label: _dayLabels[i],
                                 selected: _daysOfWeek.contains(i),
-                                selectedColor: AppColors.sunlight,
-                                backgroundColor: AppColors.well,
-                                checkmarkColor: AppColors.well,
-                                side: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                onSelected: (sel) => setState(() {
-                                  if (sel) {
-                                    _daysOfWeek.add(i);
-                                  } else {
-                                    _daysOfWeek.remove(i);
-                                  }
+                                color: AppColors.sunlight,
+                                onTap: () => setState(() {
+                                  if (!_daysOfWeek.remove(i)) _daysOfWeek.add(i);
                                 }),
                               ),
                           ],
                         ),
                       ],
-                      const SizedBox(height: 18),
-                      Row(
-                        children: [
-                          Text('TIME RANGES', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: AppColors.mist)),
-                          const Spacer(),
-                          TextButton.icon(
-                            onPressed: _rangeStarts.length >= 6
-                                ? null
-                                : () => setState(() {
-                                    _rangeStarts.add(TimeOfDay(hour: 6, minute: 0));
-                                    _rangeEnds.add(TimeOfDay(hour: 12, minute: 0));
-                                  }),
-                            icon: const Icon(Icons.add, size: 16),
-                            label: Text('Add range', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                            style: TextButton.styleFrom(foregroundColor: AppColors.stream),
-                          ),
-                        ],
-                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                _SectionCard(
+                  eyebrow: 'WINDOWS',
+                  description: 'Channels are ON inside each window, OFF otherwise.',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      WindowTimeline(windows: _timelineWindows()),
+                      const SizedBox(height: 14),
                       for (var i = 0; i < _rangeStarts.length; i++) ...[
                         _buildRangeRow(i),
                         if (i < _rangeStarts.length - 1) const SizedBox(height: 10),
                       ],
-                      const SizedBox(height: 22),
-                      SizedBox(
-                        width: double.infinity, height: 50,
-                        child: FilledButton(
-                          onPressed: _saving ? null : _save,
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.stream,
-                            foregroundColor: AppColors.well,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                          ),
-                          child: _saving
-                              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
-                              : Text(_isEdit ? 'Save Changes' : 'Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
-                        ),
+                      const SizedBox(height: 8),
+                      TextButton.icon(
+                        onPressed: _rangeStarts.length >= 6
+                            ? null
+                            : () => setState(() {
+                                _rangeStarts.add(TimeOfDay(hour: 6, minute: 0));
+                                _rangeEnds.add(TimeOfDay(hour: 12, minute: 0));
+                              }),
+                        icon: const Icon(Icons.add, size: 16),
+                        label: Text('Add another window', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                        style: TextButton.styleFrom(foregroundColor: AppColors.stream),
                       ),
                     ],
+                  ),
+                ),
+                const SizedBox(height: 22),
+                SizedBox(
+                  width: double.infinity, height: 52,
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : _save,
+                    icon: _saving
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
+                        : Icon(_isEdit ? Icons.save_outlined : Icons.add, size: 18),
+                    label: Text(_isEdit ? 'Save Changes' : 'Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.stream,
+                      foregroundColor: AppColors.well,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
                   ),
                 ),
               ],
@@ -388,9 +355,19 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     );
   }
 
+  List<({int start, int end})> _timelineWindows() {
+    return [
+      for (var i = 0; i < _rangeStarts.length; i++)
+        (
+          start: _rangeStarts[i].hour * 60 + _rangeStarts[i].minute,
+          end: _rangeEnds[i].hour * 60 + _rangeEnds[i].minute,
+        ),
+    ];
+  }
+
   Widget _buildRangeRow(int index) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: AppColors.well,
         borderRadius: BorderRadius.circular(14),
@@ -400,18 +377,20 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
         children: [
           Expanded(
             child: _timeButton(
-              label: 'Start',
+              label: 'Starts',
               time: _rangeStarts[index],
               onTap: () => _pickTime(isStart: true, index: index),
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8),
-            child: Icon(Icons.arrow_forward, size: 16, color: AppColors.mist),
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            height: 20,
+            width: 1,
+            color: Colors.white.withValues(alpha: 0.08),
           ),
           Expanded(
             child: _timeButton(
-              label: 'End',
+              label: 'Ends',
               time: _rangeEnds[index],
               onTap: () => _pickTime(isStart: false, index: index),
             ),
@@ -423,7 +402,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 _rangeEnds.removeAt(index);
               }),
               icon: const Icon(Icons.close, size: 16, color: Color(0xFFFF7A7A)),
-              tooltip: 'Remove range',
+              tooltip: 'Remove window',
             ),
         ],
       ),
@@ -435,27 +414,19 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 12),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+          border: Border.all(color: AppColors.stream.withValues(alpha: 0.3)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(label, style: GoogleFonts.inter(fontSize: 10, color: AppColors.mist)),
-            const SizedBox(height: 2),
             Text(_hhmm(time), style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.foam)),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _label(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Text(text, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: AppColors.mist)),
     );
   }
 
@@ -473,6 +444,124 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
         borderSide: const BorderSide(color: AppColors.stream, width: 1.5),
+      ),
+    );
+  }
+}
+
+class _DeviceBanner extends StatelessWidget {
+  final String deviceName;
+  final String deviceId;
+  const _DeviceBanner({required this.deviceName, required this.deviceId});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: AppColors.stream.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38, height: 38,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppColors.stream.withValues(alpha: 0.15),
+            ),
+            child: const Icon(Icons.schedule, size: 20, color: AppColors.stream),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(deviceName, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                const SizedBox(height: 2),
+                Text(deviceId, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionCard extends StatelessWidget {
+  final String eyebrow;
+  final String? description;
+  final Widget child;
+  const _SectionCard({required this.eyebrow, required this.child, this.description});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.submerged,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(width: 20, height: 2, decoration: BoxDecoration(color: AppColors.stream, borderRadius: BorderRadius.circular(2))),
+              const SizedBox(width: 8),
+              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: AppColors.stream)),
+            ],
+          ),
+          if (description != null) ...[
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(left: 28),
+              child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+            ),
+          ],
+          const SizedBox(height: 14),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _ChannelChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
+  const _ChannelChip({required this.label, required this.selected, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? color : AppColors.well,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? color : Colors.white.withValues(alpha: 0.1),
+            width: selected ? 0 : 1,
+          ),
+          boxShadow: selected ? [BoxShadow(color: color.withValues(alpha: 0.3), blurRadius: 8)] : null,
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? AppColors.well : AppColors.foam),
+        ),
       ),
     );
   }

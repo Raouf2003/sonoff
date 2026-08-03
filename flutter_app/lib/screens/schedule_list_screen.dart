@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
 
 class ScheduleListScreen extends StatefulWidget {
@@ -209,61 +210,98 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
     final channels = (schedule['channels'] as List<dynamic>? ?? [])
         .map((c) => 'CH$c')
         .join(', ');
+    final windows = _scheduleWindows(schedule);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
       decoration: BoxDecoration(
         color: AppColors.submerged,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
           color: enabled ? AppColors.leaf.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.06),
         ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: InkWell(
-              onTap: () => _edit(schedule),
-              borderRadius: BorderRadius.circular(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(schedule['name'] as String? ?? '', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                  const SizedBox(height: 4),
-                  Text('Channels: $channels', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                  const SizedBox(height: 4),
-                  Text(_rangesSummary(schedule), style: GoogleFonts.inter(fontSize: 12, color: AppColors.stream.withValues(alpha: 0.9))),
-                  const SizedBox(height: 4),
-                  Text(_recurrenceSummary(schedule), style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
-                ],
+          Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  onTap: () => _edit(schedule),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(schedule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Icon(Icons.tune, size: 12, color: AppColors.mist.withValues(alpha: 0.8)),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 6),
+              IconButton(
+                onPressed: () => _edit(schedule),
+                icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
+                tooltip: 'Edit',
+              ),
+              Switch(
+                value: enabled,
+                onChanged: (_) => _toggle(schedule),
+                activeTrackColor: AppColors.leaf,
+                activeThumbColor: AppColors.well,
+              ),
+              IconButton(
+                onPressed: () => _delete(schedule),
+                icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
+                tooltip: 'Delete',
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: () => _edit(schedule),
-            icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
-            tooltip: 'Edit',
-          ),
-          Switch(
-            value: enabled,
-            onChanged: (_) => _toggle(schedule),
-            activeTrackColor: AppColors.leaf,
-            activeThumbColor: AppColors.well,
-          ),
-          IconButton(
-            onPressed: () => _delete(schedule),
-            icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
-            tooltip: 'Delete',
+          const SizedBox(height: 12),
+          WindowTimeline(windows: windows, compact: true),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9))),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  String _rangesSummary(Map<String, dynamic> schedule) {
+  static List<({int start, int end})> _scheduleWindows(Map<String, dynamic> schedule) {
     final ranges = (schedule['timeRanges'] as List<dynamic>? ?? []);
-    if (ranges.isEmpty) return 'No ranges';
-    return ranges.map((r) => '${r['start']} - ${r['end']}').join('   ');
+    return [
+      for (final r in ranges)
+        (
+          start: _minOf(r['start'] as String?),
+          end: _minOf(r['end'] as String?),
+        ),
+    ];
+  }
+
+  static int _minOf(String? hhmm) {
+    if (hhmm == null) return 0;
+    final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
+    if (m == null) return 0;
+    return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
   }
 
   String _recurrenceSummary(Map<String, dynamic> schedule) {
