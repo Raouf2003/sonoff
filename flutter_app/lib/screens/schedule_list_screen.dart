@@ -63,6 +63,20 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
     if (created == true) _load();
   }
 
+  Future<void> _edit(Map<String, dynamic> schedule) async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ScheduleFormScreen(
+          deviceId: widget.deviceId,
+          deviceName: widget.deviceName,
+          maxChannel: widget.maxChannel,
+          existing: schedule,
+        ),
+      ),
+    );
+    if (changed == true) _load();
+  }
+
   Future<void> _toggle(Map<String, dynamic> schedule) async {
     final id = schedule['_id'] as String;
     final target = !((schedule['enabled'] as bool?) ?? false);
@@ -207,20 +221,29 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       child: Row(
         children: [
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(schedule['name'] as String? ?? '', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                const SizedBox(height: 4),
-                Text('Channels: $channels', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                const SizedBox(height: 4),
-                Text(_rangesSummary(schedule), style: GoogleFonts.inter(fontSize: 12, color: AppColors.stream.withValues(alpha: 0.9))),
-                const SizedBox(height: 4),
-                Text(_recurrenceSummary(schedule), style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
-              ],
+            child: InkWell(
+              onTap: () => _edit(schedule),
+              borderRadius: BorderRadius.circular(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(schedule['name'] as String? ?? '', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                  const SizedBox(height: 4),
+                  Text('Channels: $channels', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                  const SizedBox(height: 4),
+                  Text(_rangesSummary(schedule), style: GoogleFonts.inter(fontSize: 12, color: AppColors.stream.withValues(alpha: 0.9))),
+                  const SizedBox(height: 4),
+                  Text(_recurrenceSummary(schedule), style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+                ],
+              ),
             ),
           ),
           const SizedBox(width: 8),
+          IconButton(
+            onPressed: () => _edit(schedule),
+            icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
+            tooltip: 'Edit',
+          ),
           Switch(
             value: enabled,
             onChanged: (_) => _toggle(schedule),

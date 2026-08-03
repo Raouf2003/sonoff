@@ -7,11 +7,13 @@ class ScheduleFormScreen extends StatefulWidget {
   final String deviceId;
   final String deviceName;
   final int maxChannel;
+  final Map<String, dynamic>? existing;
   const ScheduleFormScreen({
     super.key,
     required this.deviceId,
     required this.deviceName,
     this.maxChannel = 4,
+    this.existing,
   });
 
   @override
@@ -29,7 +31,59 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   final List<TimeOfDay> _rangeEnds = <TimeOfDay>[TimeOfDay(hour: 23, minute: 59)];
   bool _saving = false;
 
+  bool get _isEdit => widget.existing != null;
+
   static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    if (existing != null) _prefill(existing);
+  }
+
+  void _prefill(Map<String, dynamic> schedule) {
+    _nameCtl.text = (schedule['name'] as String?) ?? '';
+
+    final channels = (schedule['channels'] as List<dynamic>?) ?? [];
+    _channels.clear();
+    for (final c in channels) {
+      final v = c as int?;
+      if (v != null && v >= 1 && v <= widget.maxChannel) _channels.add(v);
+    }
+
+    final recurrence = schedule['recurrence'] as Map<String, dynamic>? ?? {};
+    _recurrenceType = (recurrence['type'] as String?) == 'custom' ? 'custom' : 'daily';
+    final days = (recurrence['daysOfWeek'] as List<dynamic>?) ?? [];
+    _daysOfWeek.clear();
+    for (final d in days) {
+      final v = d as int?;
+      if (v != null && v >= 0 && v <= 6) _daysOfWeek.add(v);
+    }
+
+    final ranges = (schedule['timeRanges'] as List<dynamic>?) ?? [];
+    _rangeStarts.clear();
+    _rangeEnds.clear();
+    if (ranges.isEmpty) {
+      _rangeStarts.add(TimeOfDay.now());
+      _rangeEnds.add(const TimeOfDay(hour: 23, minute: 59));
+    } else {
+      for (final r in ranges) {
+        _rangeStarts.add(_parseHhmm(r['start'] as String?));
+        _rangeEnds.add(_parseHhmm(r['end'] as String?));
+      }
+    }
+  }
+
+  TimeOfDay _parseHhmm(String? hhmm) {
+    if (hhmm == null) return TimeOfDay.now();
+    final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
+    if (m == null) return TimeOfDay.now();
+    return TimeOfDay(
+      hour: int.parse(m.group(1)!).clamp(0, 23),
+      minute: int.parse(m.group(2)!).clamp(0, 59),
+    );
+  }
 
   @override
   void dispose() {
@@ -97,18 +151,36 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
     setState(() => _saving = true);
     try {
-      await _api.createSchedule(
-        name: name,
-        deviceId: widget.deviceId,
-        channels: channels,
-        recurrence: {
-          'type': _recurrenceType,
-          'daysOfWeek': _recurrenceType == 'custom'
-              ? (_daysOfWeek.toList()..sort())
-              : const <int>[],
-        },
-        timeRanges: timeRanges,
-      );
+      if (_isEdit) {
+        await _api.updateSchedule(
+          widget.existing!['_id'] as String,
+          {
+            'name': name,
+            'deviceId': widget.deviceId,
+            'channels': channels,
+            'recurrence': {
+              'type': _recurrenceType,
+              'daysOfWeek': _recurrenceType == 'custom'
+                  ? (_daysOfWeek.toList()..sort())
+                  : const <int>[],
+            },
+            'timeRanges': timeRanges,
+          },
+        );
+      } else {
+        await _api.createSchedule(
+          name: name,
+          deviceId: widget.deviceId,
+          channels: channels,
+          recurrence: {
+            'type': _recurrenceType,
+            'daysOfWeek': _recurrenceType == 'custom'
+                ? (_daysOfWeek.toList()..sort())
+                : const <int>[],
+          },
+          timeRanges: timeRanges,
+        );
+      }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       _err(e.toString().replaceFirst('Exception: ', ''));
@@ -138,7 +210,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Add Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
+        title: Text(_isEdit ? 'Edit Schedule' : 'Add Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
         backgroundColor: AppColors.well,
         iconTheme: const IconThemeData(color: AppColors.mist),
       ),
@@ -302,7 +374,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                           ),
                           child: _saving
                               ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
-                              : Text('Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                              : Text(_isEdit ? 'Save Changes' : 'Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                         ),
                       ),
                     ],
