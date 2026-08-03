@@ -9,16 +9,6 @@ const runtimeState = require('./runtimeState');
 // fraction of the writes a 10s tick would.
 const SCHEDULE_CHECK_INTERVAL_MS = 30000;
 
-// [DIAG] high-resolution timing helper. Prints wall-clock (Date.now()) plus a
-// monotonic ns delta since the server ref was captured.
-const hrt = () => process.hrtime.bigint();
-let DIAG_HRT_START = hrt();
-let DIAG_T0 = Date.now();
-const diagNow = () => Date.now();
-const diagHrtMs = () => Number((hrt() - DIAG_HRT_START) / 1_000_000n).toFixed(2);
-const DIAG = (label, extra = '') =>
-  console.log(`[DIAG] ${label} wall=${diagNow()} rel=${diagHrtMs()}ms${extra ? ' ' + extra : ''}`);
-
 // "Now" in the app's timezone (Render runs in UTC by default). Fallback is
 // the author's timezone; override via APP_TIMEZONE env var.
 const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Africa/Algiers';
@@ -30,15 +20,11 @@ class ScheduleEngine {
     // scheduleId -> Map<channel -> lastAppliedState> read-through cache,
     // primed from the DB on startup and updated on every successful change.
     this.stateCache = new Map();
-    // [DIAG]
-    this._lastTickAt = null;
-    this._tickCount = 0;
   }
 
   init({ mqttGateway }) {
     this.mqttGateway = mqttGateway;
     if (this.timer) clearInterval(this.timer);
-    DIAG('setInterval.registered');
     this.timer = setInterval(() => this.evaluate(), SCHEDULE_CHECK_INTERVAL_MS);
     console.log(
       `[scheduleEngine] Started, checking every ${SCHEDULE_CHECK_INTERVAL_MS}ms in zone ${APP_TIMEZONE}`,
@@ -138,17 +124,6 @@ async release(schedule) {
   }
 
   async evaluate() {
-    this._tickCount++;
-    const tickStartWall = diagNow();
-    const driftSinceLast =
-      this._lastTickAt !== null ? tickStartWall - this._lastTickAt : null;
-    this._lastTickAt = tickStartWall;
-    DIAG(
-      `[tick] count=${this._tickCount}` +
-        (driftSinceLast !== null ? ` intervalSincePrev=${driftSinceLast - 1}ms` : ' (first)') +
-        ` expected=${SCHEDULE_CHECK_INTERVAL_MS}`,
-    );
-
     let schedules;
     try {
       schedules = await Schedule.find({ enabled: true });
@@ -156,7 +131,6 @@ async release(schedule) {
       console.error('[scheduleEngine] Query error:', err);
       return;
     }
-    DIAG(`[tick] db.query.done schedules=${schedules.length} dbLatency=${diagNow() - tickStartWall}ms`);
 
     this._primeCache(schedules);
 
@@ -171,14 +145,10 @@ async release(schedule) {
       for (const channel of schedule.channels || []) {
         const cache = this.stateCache.get(id);
         const lastState = cache.get(String(channel)) || 'OFF';
-        DIAG('schedule.check', `sched=${id.slice(-6)} ch=${channel} now=${now.toISO()} desired=${desired} last=${lastState} equal=${desired === lastState}`);
 
         if (desired === lastState) continue;
 
-        DIAG('decision.fire', `sched=${id.slice(-6)} ch=${channel} ${lastState}->${desired}`);
-        const onlineStart = diagNow();
         const online = runtimeState.isOnline(deviceId);
-        DIAG('online.check', `sched=${id.slice(-6)} ch=${channel} online=${online} took=${diagNow() - onlineStart}ms`);
 
         if (!online) {
           console.warn(
@@ -187,26 +157,21 @@ async release(schedule) {
           continue;
         }
 
-        DIAG('publish.before', `sched=${id.slice(-6)} device=${deviceId} ch=${channel} state=${desired}`);
         try {
           await this.mqttGateway.publishCommandNoWait(deviceId, channel, desired);
-          DIAG('publish.callbackAfter', `sched=${id.slice(-6)} device=${deviceId} ch=${channel} sent=${desired} publishPromiseResolved`);
         } catch (err) {
           console.error(
             `[scheduleEngine] Schedule "${name}" apply error on ${deviceId} channel ${channel}: ${err.message}`,
           );
         }
 
-        const persistBegin = diagNow();
         try {
           await this._setChannelState(schedule._id, channel, desired);
-          DIAG('persist.done', `sched=${id.slice(-6)} ch=${channel} db=${diagNow() - persistBegin}ms`);
         } catch (err) {
           console.error(`[scheduleEngine] Persist error on ${deviceId} channel ${channel}: ${err.message}`);
         }
       }
     }
-    DIAG('[tick] evaluate.done', `duration=${diagNow() - tickStartWall}ms`);
   }
 }
 
