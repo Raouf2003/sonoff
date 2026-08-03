@@ -61,12 +61,14 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
             colors: [Color(0xFF0B1922), Color(0xFF0F2332), Color(0xFF0B1922)],
           ),
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              Container(
+        child: SafeArea(
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              children: [
+                const SizedBox(height: 20),
+                Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1A2D3D),
@@ -112,7 +114,8 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
           ),
         ),
       ),
-    );
+    ),
+  );
   }
 }
 

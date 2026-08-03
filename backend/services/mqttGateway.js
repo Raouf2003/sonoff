@@ -6,6 +6,13 @@ const ACK_TIMEOUT_MS = 5000;
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
   if (!parsed || typeof parsed !== 'object') return updates;
+  // Single-relay devices report a bare POWER key (no number). Treat it as
+  // channel 1.
+  if (channelCount === 1) {
+    const v = parsed.POWER;
+    if (v === 'ON' || v === 'OFF') updates[1] = v;
+    return updates;
+  }
   for (let i = 1; i <= channelCount; i++) {
     const v = parsed[`POWER${i}`];
     if (v === 'ON' || v === 'OFF') updates[i] = v;
@@ -202,7 +209,7 @@ class MqttGateway {
 
     const channelUpdates = {};
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
-    const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER\d+$/.test(parts[2]));
+    const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER(\d*)$/.test(parts[2]));
 
     if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
@@ -211,9 +218,9 @@ class MqttGateway {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
     } else if (isResult) {
-      const m = topic.match(/POWER(\d+)$/);
+      const m = topic.match(/POWER(\d*)$/);
       if (m) {
-        const ch = parseInt(m[1], 10);
+        const ch = channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
         const st = payload.trim().toUpperCase();
         if (st === 'ON' || st === 'OFF') channelUpdates[ch] = st;
       }
@@ -236,9 +243,10 @@ class MqttGateway {
   _resolveAcks(deviceId, parsed) {
     if (!parsed || typeof parsed !== 'object') return;
     for (const key of Object.keys(parsed)) {
-      const m = key.match(/^POWER(\d+)$/);
+      const m = key.match(/^POWER(\d*)$/);
       if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
-        this._resolvePending(deviceId, parseInt(m[1], 10), parsed[key]);
+        const ch = m[1] ? parseInt(m[1], 10) : 1;
+        this._resolvePending(deviceId, ch, parsed[key]);
       }
     }
   }

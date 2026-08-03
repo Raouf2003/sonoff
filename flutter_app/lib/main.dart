@@ -504,14 +504,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         ),
       );
     }
+    final visibleSensors = _sensors
+        .where((s) => s['deviceId'] == _selectedDeviceId)
+        .toList();
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          if (_sensors.isNotEmpty) ...[
-            _buildSensorsHeader(),
+          if (visibleSensors.isNotEmpty) ...[
+            _buildSensorsHeader(count: visibleSensors.length),
             const SizedBox(height: 10),
-            ..._sensors.map(_buildSensorCard),
+            ...visibleSensors.map(_buildSensorCard),
             const SizedBox(height: 20),
           ],
           Expanded(
@@ -538,12 +541,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildSensorsHeader() {
+  Widget _buildSensorsHeader({int count = 0}) {
     return Row(
       children: [
         Text('SENSORS', style: GoogleFonts.sora(fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 2, color: AppColors.mist)),
         const Spacer(),
-        Text('${_sensors.length} linked', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.6))),
+        Text('$count linked', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.6))),
       ],
     );
   }
