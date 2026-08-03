@@ -340,16 +340,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   void _openSchedules() {
-    final id = _selectedDeviceId;
-    if (id == null || id.isEmpty) return;
     Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ScheduleListScreen(
-          deviceId: id,
-          deviceName: _deviceName(id),
-          maxChannel: _deviceChannels,
-        ),
-      ),
+      MaterialPageRoute(builder: (_) => const ScheduleListScreen()),
     );
   }
 

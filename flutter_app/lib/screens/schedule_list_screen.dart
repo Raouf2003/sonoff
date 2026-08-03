@@ -6,15 +6,7 @@ import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
 
 class ScheduleListScreen extends StatefulWidget {
-  final String deviceId;
-  final String deviceName;
-  final int maxChannel;
-  const ScheduleListScreen({
-    super.key,
-    required this.deviceId,
-    required this.deviceName,
-    this.maxChannel = 4,
-  });
+  const ScheduleListScreen({super.key});
 
   @override
   State<ScheduleListScreen> createState() => _ScheduleListScreenState();
@@ -22,10 +14,9 @@ class ScheduleListScreen extends StatefulWidget {
 
 class _ScheduleListScreenState extends State<ScheduleListScreen> {
   final _api = ApiService();
+  List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _schedules = [];
   bool _loading = true;
-
-  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   @override
   void initState() {
@@ -36,12 +27,11 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final schedules = await _api.getSchedules();
+      final results = await Future.wait([_api.getDevices(), _api.getSchedules()]);
       if (mounted) {
         setState(() {
-          _schedules = schedules.cast<Map<String, dynamic>>()
-              .where((s) => s['deviceId'] == widget.deviceId)
-              .toList();
+          _devices = results[0].cast<Map<String, dynamic>>();
+          _schedules = results[1].cast<Map<String, dynamic>>();
           _loading = false;
         });
       }
@@ -51,13 +41,27 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
     }
   }
 
-  Future<void> _add() async {
+  Map<String, dynamic> _deviceOf(String deviceId) {
+    for (final d in _devices) {
+      if (d['deviceId'] == deviceId) return d;
+    }
+    // Fallback for schedules whose device wasn't claimed/fetched.
+    return <String, dynamic>{'deviceId': deviceId, 'name': deviceId, 'channels': 4};
+  }
+
+  int _channelsOf(String deviceId) => _deviceOf(deviceId)['channels'] as int? ?? 4;
+  String _nameOf(String deviceId) => _deviceOf(deviceId)['name'] as String? ?? deviceId;
+
+  List<Map<String, dynamic>> _schedulesOf(String deviceId) =>
+      _schedules.where((s) => s['deviceId'] == deviceId).toList();
+
+  Future<void> _add(String deviceId) async {
     final created = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
-          deviceId: widget.deviceId,
-          deviceName: widget.deviceName,
-          maxChannel: widget.maxChannel,
+          deviceId: deviceId,
+          deviceName: _nameOf(deviceId),
+          maxChannel: _channelsOf(deviceId),
         ),
       ),
     );
@@ -65,12 +69,13 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
   }
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
+    final deviceId = schedule['deviceId'] as String;
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
-          deviceId: widget.deviceId,
-          deviceName: widget.deviceName,
-          maxChannel: widget.maxChannel,
+          deviceId: deviceId,
+          deviceName: _nameOf(deviceId),
+          maxChannel: _channelsOf(deviceId),
           existing: schedule,
         ),
       ),
@@ -144,68 +149,139 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
           ),
         ),
         child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(widget.deviceName, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                    const SizedBox(height: 2),
-                    Text('ID: ${widget.deviceId}', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-                child: SizedBox(
-                  width: double.infinity, height: 46,
-                  child: FilledButton.icon(
-                    onPressed: _add,
-                    icon: const Icon(Icons.add, size: 18),
-                    label: Text('Add Schedule', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.stream,
-                      foregroundColor: AppColors.well,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    ),
-                  ),
-                ),
-              ),
-              Expanded(
-                child: _loading
-                    ? const Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)))
-                    : _schedules.isEmpty
-                        ? Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.schedule, size: 48, color: AppColors.mist.withValues(alpha: 0.3)),
-                                const SizedBox(height: 12),
-                                Text('No schedules yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.mist)),
-                                const SizedBox(height: 4),
-                                Text('Add a schedule to auto-control a channel', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6))),
-                              ],
-                            ),
-                          )
-                        : ListView.separated(
-                            physics: const BouncingScrollPhysics(),
-                            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-                            itemCount: _schedules.length,
-                            separatorBuilder: (_, _) => const SizedBox(height: 10),
-                            itemBuilder: (_, i) => _buildTile(_schedules[i]),
+          child: _loading
+              ? const Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)))
+              : _devices.isEmpty
+                  ? const _EmptyDevices()
+                  : ListView(
+                      physics: const BouncingScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                      children: [
+                        for (final device in _devices)
+                          _DeviceSection(
+                            device: device,
+                            schedules: _schedulesOf(device['deviceId'] as String),
+                            canAdd: true,
+                            onAdd: () => _add(device['deviceId'] as String),
+                            onEdit: _edit,
+                            onToggle: _toggle,
+                            onDelete: _delete,
                           ),
-              ),
-            ],
-          ),
+                      ],
+                    ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildTile(Map<String, dynamic> schedule) {
+class _DeviceSection extends StatelessWidget {
+  final Map<String, dynamic> device;
+  final List<Map<String, dynamic>> schedules;
+  final bool canAdd;
+  final VoidCallback onAdd;
+  final void Function(Map<String, dynamic>) onEdit;
+  final void Function(Map<String, dynamic>) onToggle;
+  final void Function(Map<String, dynamic>) onDelete;
+
+  const _DeviceSection({
+    required this.device,
+    required this.schedules,
+    required this.canAdd,
+    required this.onAdd,
+    required this.onEdit,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final channels = device['channels'] as int? ?? 4;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(device['name'] as String? ?? 'Device', maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.foam)),
+                    const SizedBox(height: 2),
+                    Text('ID: ${device['deviceId']}', maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                height: 40,
+                child: FilledButton.icon(
+                  onPressed: canAdd ? onAdd : null,
+                  icon: const Icon(Icons.add, size: 17),
+                  label: Text('Add', style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700)),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.stream,
+                    foregroundColor: AppColors.well,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text('CH1–CH$channels', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+          const SizedBox(height: 12),
+          if (schedules.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+              decoration: BoxDecoration(
+                color: AppColors.submerged.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+              ),
+              child: Text('No schedules for this device', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
+            )
+          else
+            for (final (i, schedule) in schedules.indexed) ...[
+              _ScheduleTile(
+                schedule: schedule,
+                canEdit: true,
+                onEdit: () => onEdit(schedule),
+                onToggle: () => onToggle(schedule),
+                onDelete: () => onDelete(schedule),
+              ),
+              if (i < schedules.length - 1) const SizedBox(height: 10),
+            ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleTile extends StatelessWidget {
+  final Map<String, dynamic> schedule;
+  final bool canEdit;
+  final VoidCallback onEdit;
+  final VoidCallback onToggle;
+  final VoidCallback onDelete;
+
+  const _ScheduleTile({
+    required this.schedule,
+    required this.canEdit,
+    required this.onEdit,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  @override
+  Widget build(BuildContext context) {
     final enabled = (schedule['enabled'] as bool?) ?? false;
     final channels = (schedule['channels'] as List<dynamic>? ?? [])
         .map((c) => 'CH$c')
@@ -224,7 +300,7 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
-            onTap: () => _edit(schedule),
+            onTap: canEdit ? onEdit : null,
             borderRadius: BorderRadius.circular(12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -273,18 +349,18 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
               const SizedBox(width: 8),
               Switch(
                 value: enabled,
-                onChanged: (_) => _toggle(schedule),
+                onChanged: (_) => onToggle(),
                 activeTrackColor: AppColors.leaf,
                 activeThumbColor: AppColors.well,
               ),
               const SizedBox(width: 6),
               IconButton(
-                onPressed: () => _edit(schedule),
+                onPressed: canEdit ? onEdit : null,
                 icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
                 tooltip: 'Edit',
               ),
               IconButton(
-                onPressed: () => _delete(schedule),
+                onPressed: onDelete,
                 icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
                 tooltip: 'Delete',
               ),
@@ -322,6 +398,26 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       return 'Custom: $days';
     }
     return 'Every day';
+  }
+}
+
+class _EmptyDevices extends StatelessWidget {
+  const _EmptyDevices();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.devices_other, size: 48, color: AppColors.mist.withValues(alpha: 0.3)),
+          const SizedBox(height: 12),
+          Text('No devices yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.mist)),
+          const SizedBox(height: 4),
+          Text('Claim a device to start scheduling', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6))),
+        ],
+      ),
+    );
   }
 }
 
