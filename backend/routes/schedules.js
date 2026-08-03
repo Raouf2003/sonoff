@@ -4,6 +4,8 @@ const Device = require('../models/Device');
 
 const router = express.Router();
 
+const scheduleEngine = require('../services/scheduleEngine');
+
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function minutesFromHhmm(hhmm) {
@@ -178,11 +180,19 @@ router.patch('/:id/enable', async (req, res) => {
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
+    const wasEnabled = schedule.enabled;
     schedule.enabled = !schedule.enabled;
     // When re-enabled, reset applied state so channels are re-synced on the
     // next tick even if they were left ON/OFF while disabled.
     if (schedule.enabled) schedule.lastAppliedState = {};
     await schedule.save();
+    // Disabling must also revert any channels the schedule was holding ON,
+    // otherwise they stay stuck until the schedule is re-enabled.
+    if (wasEnabled && !schedule.enabled) {
+      scheduleEngine.release(schedule).catch((err) => {
+        console.error('[schedules] release on disable error:', err.message);
+      });
+    }
     res.json(schedule.toJSON());
   } catch (err) {
     console.error('Toggle schedule error:', err);
@@ -196,6 +206,10 @@ router.delete('/:id', async (req, res) => {
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
+    // Release channels the schedule was holding ON before removing it.
+    scheduleEngine.release(schedule).catch((err) => {
+      console.error('[schedules] release on delete error:', err.message);
+    });
     await schedule.deleteOne();
     res.json({ ok: true });
   } catch (err) {

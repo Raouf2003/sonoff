@@ -86,6 +86,43 @@ class ScheduleEngine {
     return 'OFF';
   }
 
+  // Revert any channels a schedule left ON so they don't stay stuck after the
+// schedule is deleted. Only channels recorded as ON in lastAppliedState are
+// reset, so channels the schedule never touched are left alone.
+async release(schedule) {
+    const deviceId = schedule.deviceId;
+    const applied = schedule.lastAppliedState;
+    const onChannels = [];
+    if (applied instanceof Map) {
+      for (const [ch, state] of applied.entries()) {
+        if (String(state).toUpperCase() === 'ON') onChannels.push(ch);
+      }
+    } else if (applied) {
+      for (const [ch, state] of Object.entries(applied)) {
+        if (String(state).toUpperCase() === 'ON') onChannels.push(ch);
+      }
+    }
+    if (!onChannels.length) return;
+    if (!runtimeState.isOnline(deviceId)) {
+      console.warn(
+        `[scheduleEngine] Skip release "${schedule.name}" — device ${deviceId} is offline`,
+      );
+      return;
+    }
+    for (const channel of onChannels) {
+      try {
+        await this.mqttGateway.publishCommandNoWait(deviceId, channel, 'OFF');
+        console.log(
+          `[scheduleEngine] Released schedule "${schedule.name}" -> ${deviceId} POWER${channel} OFF`,
+        );
+      } catch (err) {
+        console.error(
+          `[scheduleEngine] release error on ${deviceId} channel ${channel}: ${err.message}`,
+        );
+      }
+    }
+  }
+
   async evaluate() {
     let schedules;
     try {
