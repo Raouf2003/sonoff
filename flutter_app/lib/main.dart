@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'theme.dart';
@@ -132,24 +132,99 @@ class _SteesLogo extends StatelessWidget {
   }
 }
 
-class _HeaderIconButton extends StatelessWidget {
-  final IconData icon;
-  final Color color;
-  final VoidCallback onTap;
-  const _HeaderIconButton({required this.icon, required this.color, required this.onTap});
+class _ActionRail extends StatelessWidget {
+  final VoidCallback onAdd;
+  final VoidCallback onSensors;
+  final VoidCallback onSchedules;
+  final VoidCallback onLogout;
+  const _ActionRail({
+    required this.onAdd,
+    required this.onSensors,
+    required this.onSchedules,
+    required this.onLogout,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(7),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(color: color.withValues(alpha: 0.2)),
+    return Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: AppColors.submerged,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _RailCell(
+            icon: Icons.add,
+            color: AppColors.stream,
+            filled: true,
+            tooltip: 'Add device',
+            onTap: onAdd,
+          ),
+          _railDivider(),
+          _RailCell(
+            icon: Icons.sensors,
+            color: AppColors.leaf,
+            tooltip: 'Add sensor',
+            onTap: onSensors,
+          ),
+          _railDivider(),
+          _RailCell(
+            icon: Icons.schedule,
+            color: AppColors.sunlight,
+            tooltip: 'Schedules',
+            onTap: onSchedules,
+          ),
+          _railDivider(),
+          _RailCell(
+            icon: Icons.logout,
+            color: const Color(0xFFFF7A7A),
+            tooltip: 'Log out',
+            onTap: onLogout,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _railDivider() {
+    return Container(width: 1, height: 22, color: Colors.white.withValues(alpha: 0.08));
+  }
+}
+
+class _RailCell extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final bool filled;
+  final String tooltip;
+  final VoidCallback onTap;
+  const _RailCell({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onTap,
+    this.filled = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 500),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(11),
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: filled ? color.withValues(alpha: 0.18) : Colors.transparent,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon, size: 18, color: filled ? color : color.withValues(alpha: 0.9)),
         ),
-        child: Icon(icon, size: 16, color: color),
       ),
     );
   }
@@ -425,10 +500,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 12, 4),
+      padding: const EdgeInsets.fromLTRB(14, 12, 12, 6),
       child: Row(
         children: [
-          const _SteesLogo(size: 36),
+          const _SteesLogo(size: 32),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -436,53 +511,25 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text('STEES', maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam, letterSpacing: 2)),
+                  style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.foam, letterSpacing: 2)),
                 Text('Smart Irrigation', maxLines: 1, overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.inter(fontSize: 10, color: AppColors.mist, letterSpacing: 0.5)),
               ],
             ),
           ),
-          const SizedBox(width: 8),
-          _ConnectionDroplet(connected: _connected),
-          const SizedBox(width: 8),
-          Flexible(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              reverse: true,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _HeaderIconButton(
-                    icon: Icons.add,
-                    color: AppColors.stream,
-                    onTap: () async {
-                      final added = await Navigator.of(context).push<bool>(
-                        MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
-                      );
-                      if (added == true) _loadDevices();
-                    },
-                  ),
-                  const SizedBox(width: 6),
-                  _HeaderIconButton(
-                    icon: Icons.sensors,
-                    color: AppColors.leaf,
-                    onTap: _openAddSensor,
-                  ),
-                  const SizedBox(width: 6),
-                  _HeaderIconButton(
-                    icon: Icons.schedule,
-                    color: AppColors.sunlight,
-                    onTap: _openSchedules,
-                  ),
-                  const SizedBox(width: 6),
-                  _HeaderIconButton(
-                    icon: Icons.logout,
-                    color: AppColors.mist,
-                    onTap: _logout,
-                  ),
-                ],
-              ),
-            ),
+          const SizedBox(width: 10),
+          _ConnectionPip(connected: _connected),
+          const SizedBox(width: 10),
+          _ActionRail(
+            onAdd: () async {
+              final added = await Navigator.of(context).push<bool>(
+                MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
+              );
+              if (added == true) _loadDevices();
+            },
+            onSensors: _openAddSensor,
+            onSchedules: _openSchedules,
+            onLogout: _logout,
           ),
         ],
       ),
@@ -955,15 +1002,15 @@ class _WaterRippleIcon extends AnimatedWidget {
   }
 }
 
-class _ConnectionDroplet extends StatefulWidget {
+class _ConnectionPip extends StatefulWidget {
   final bool connected;
-  const _ConnectionDroplet({required this.connected});
+  const _ConnectionPip({required this.connected});
 
   @override
-  State<_ConnectionDroplet> createState() => _ConnectionDropletState();
+  State<_ConnectionPip> createState() => _ConnectionPipState();
 }
 
-class _ConnectionDropletState extends State<_ConnectionDroplet> with SingleTickerProviderStateMixin {
+class _ConnectionPipState extends State<_ConnectionPip> with SingleTickerProviderStateMixin {
   late AnimationController _pulse;
 
   @override
@@ -974,7 +1021,7 @@ class _ConnectionDropletState extends State<_ConnectionDroplet> with SingleTicke
   }
 
   @override
-  void didUpdateWidget(_ConnectionDroplet old) {
+  void didUpdateWidget(_ConnectionPip old) {
     super.didUpdateWidget(old);
     if (widget.connected && !old.connected) {
       _pulse.repeat(reverse: true);
@@ -992,8 +1039,8 @@ class _ConnectionDropletState extends State<_ConnectionDroplet> with SingleTicke
     return AnimatedBuilder(
       animation: _pulse,
       builder: (_, child) => Container(
-        width: 10 + _pulse.value * 4,
-        height: 10 + _pulse.value * 4,
+        width: 10 + (_pulse.value * (widget.connected ? 3 : 0)),
+        height: 10 + (_pulse.value * (widget.connected ? 3 : 0)),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: widget.connected ? AppColors.stream : AppColors.mist.withValues(alpha: 0.3),
