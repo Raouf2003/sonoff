@@ -367,7 +367,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
   Widget _buildRangeRow(int index) {
     return Container(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: AppColors.well,
         borderRadius: BorderRadius.circular(14),
@@ -383,8 +383,8 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
             ),
           ),
           Container(
-            margin: const EdgeInsets.symmetric(horizontal: 8),
-            height: 20,
+            margin: const EdgeInsets.symmetric(horizontal: 6),
+            height: 18,
             width: 1,
             color: Colors.white.withValues(alpha: 0.08),
           ),
@@ -403,6 +403,9 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
               }),
               icon: const Icon(Icons.close, size: 16, color: Color(0xFFFF7A7A)),
               tooltip: 'Remove window',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(),
+              padding: const EdgeInsets.all(4),
             ),
         ],
       ),
@@ -414,7 +417,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 12),
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: AppColors.stream.withValues(alpha: 0.3)),
@@ -423,7 +426,11 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(label, style: GoogleFonts.inter(fontSize: 10, color: AppColors.mist)),
-            Text(_hhmm(time), style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.foam)),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(_hhmm(time), overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.foam)),
+            ),
           ],
         ),
       ),
