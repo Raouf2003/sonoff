@@ -167,6 +167,10 @@ router.patch('/:id', async (req, res) => {
     schedule.lastAppliedState = {};
     await schedule.save();
 
+    // Clear the engine's in-memory cache too, otherwise the next tick still
+    // sees the pre-edit applied state and may skip firing the changed window.
+    scheduleEngine.invalidate(schedule._id);
+
     res.json(schedule.toJSON());
   } catch (err) {
     console.error('Update schedule error:', err);
@@ -184,7 +188,12 @@ router.patch('/:id/enable', async (req, res) => {
     schedule.enabled = !schedule.enabled;
     // When re-enabled, reset applied state so channels are re-synced on the
     // next tick even if they were left ON/OFF while disabled.
-    if (schedule.enabled) schedule.lastAppliedState = {};
+    if (schedule.enabled) {
+      schedule.lastAppliedState = {};
+      // Drop the engine's cached state too so re-enable doesn't inherit a
+      // stale lastAppliedState that suppresses the next intended change.
+      scheduleEngine.invalidate(schedule._id);
+    }
     await schedule.save();
     // Disabling must also revert any channels the schedule was holding ON,
     // otherwise they stay stuck until the schedule is re-enabled.

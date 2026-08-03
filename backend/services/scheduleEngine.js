@@ -46,9 +46,17 @@ class ScheduleEngine {
     }
   }
 
+  // Drop a schedule's in-memory applied-state cache so the next tick treats
+  // every channel as unknown (lastState = 'OFF') and re-syncs from the DB.
+  // Used after edits or a disable->enable cycle, where the DB lastAppliedState
+  // has been reset but the stale in-memory cache would otherwise suppress the
+  // next intended state change.
+  invalidate(scheduleId) {
+    this.stateCache.delete(String(scheduleId));
+  }
+
   // Push the new state for one channel to memory + MongoDB together.
-  async _setChannelState(scheduleId, channel, state) {
-    const id = String(scheduleId);
+  async _setChannelState(scheduleId, channel, state) {    const id = String(scheduleId);
     const map = this.stateCache.get(id);
     if (!map) return;
     map.set(String(channel), state);
@@ -72,7 +80,10 @@ class ScheduleEngine {
     const rec = schedule.recurrence || {};
     if (rec.type === 'custom') {
       const days = rec.daysOfWeek || [];
-      if (!days.includes(now.weekday % 7)) return 'OFF';
+      // daysOfWeek is stored as 0=Mon..6=Sun (same convention the form uses).
+      // luxon weekday is 1=Mon..7=Sun, so map to 0-based.
+      const today = (now.weekday + 6) % 7;
+      if (!days.includes(today)) return 'OFF';
     }
     const hhmm = now.toFormat('HH:mm');
     const nowMin = now.hour * 60 + now.minute;
