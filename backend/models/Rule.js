@@ -46,6 +46,13 @@ const ruleSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  // Internal edge-trigger state: true when the condition last evaluated true
+  // (and the command was fired). Persisted so a server restart never loses the
+  // false->true transition history. Not part of the public API contract.
+  lastConditionState: {
+    type: Boolean,
+    default: false,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
