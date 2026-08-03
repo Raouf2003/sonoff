@@ -3,6 +3,10 @@ const Sensor = require('../models/Sensor');
 
 const ACK_TIMEOUT_MS = 5000;
 
+// [DIAG]
+const DIAG_MQTT = (label, extra = '') =>
+  console.log(`[DIAG] ${label} wall=${Date.now()}${extra ? ' ' + extra : ''}`);
+
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
   if (!parsed || typeof parsed !== 'object') return updates;
@@ -123,12 +127,19 @@ class MqttGateway {
     return new Promise((resolve, reject) => {
       const c = this.client;
       if (!c || !c.connected) {
+        DIAG_MQTT('publish.aborted', `device=${deviceId} ch=${channel} notConnected`);
         return reject(new Error('MQTT not connected'));
       }
       const topic = `cmnd/${deviceId}/POWER${channel}`;
+      DIAG_MQTT('mqtt.publish.call', `device=${deviceId} ch=${channel} state=${String(state).toUpperCase()}`);
       c.publish(topic, String(state).toUpperCase(), { qos: 1, retain: false }, (err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {
+          DIAG_MQTT('mqtt.publish.error', `device=${deviceId} ch=${channel} err=${err.message}`);
+          reject(err);
+        } else {
+          DIAG_MQTT('mqtt.publish.callback', `device=${deviceId} ch=${channel} brokerAckReceived`);
+          resolve();
+        }
       });
     });
   }
@@ -236,6 +247,13 @@ class MqttGateway {
         const ch = channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
         const st = payload.trim().toUpperCase();
         if (st === 'ON' || st === 'OFF') channelUpdates[ch] = st;
+      }
+    }
+
+    // [DIAG] ground-truth: device confirmed the physical relay change.
+    if (isResult && Object.keys(channelUpdates).length) {
+      for (const [ch, st] of Object.entries(channelUpdates)) {
+        DIAG_MQTT('mqtt.resultReceived', `device=${deviceId} ch=${ch} state=${st} topic=${topic}`);
       }
     }
 
