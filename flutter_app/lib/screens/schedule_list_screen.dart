@@ -223,31 +223,59 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: InkWell(
-                  onTap: () => _edit(schedule),
-                  borderRadius: BorderRadius.circular(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(schedule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
+          InkWell(
+            onTap: () => _edit(schedule),
+            borderRadius: BorderRadius.circular(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(schedule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                      const SizedBox(height: 3),
-                      Row(
-                        children: [
-                          Icon(Icons.tune, size: 12, color: AppColors.mist.withValues(alpha: 0.8)),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
-                              style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                    ),
+                    _ActiveTag(enabled: enabled),
+                  ],
                 ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(Icons.tune, size: 12, color: AppColors.mist.withValues(alpha: 0.8)),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                WindowTimeline(windows: windows, compact: true),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9))),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+              const SizedBox(width: 8),
+              Switch(
+                value: enabled,
+                onChanged: (_) => _toggle(schedule),
+                activeTrackColor: AppColors.leaf,
+                activeThumbColor: AppColors.well,
               ),
               const SizedBox(width: 6),
               IconButton(
@@ -255,29 +283,10 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
                 icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
                 tooltip: 'Edit',
               ),
-              Switch(
-                value: enabled,
-                onChanged: (_) => _toggle(schedule),
-                activeTrackColor: AppColors.leaf,
-                activeThumbColor: AppColors.well,
-              ),
               IconButton(
                 onPressed: () => _delete(schedule),
                 icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
                 tooltip: 'Delete',
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          WindowTimeline(windows: windows, compact: true),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
-              const SizedBox(width: 5),
-              Expanded(
-                child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9))),
               ),
             ],
           ),
@@ -313,5 +322,31 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       return 'Custom: $days';
     }
     return 'Every day';
+  }
+}
+
+class _ActiveTag extends StatelessWidget {
+  final bool enabled;
+  const _ActiveTag({required this.enabled});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = enabled ? AppColors.leaf : AppColors.mist;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
+          const SizedBox(width: 5),
+          Text(enabled ? 'Active' : 'Off',
+            style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+        ],
+      ),
+    );
   }
 }
