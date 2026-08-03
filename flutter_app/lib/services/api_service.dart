@@ -207,11 +207,69 @@ class ApiService {
     return body;
   }
 
-  Future<void> deleteRule(String ruleId) async {
+Future<void> deleteRule(String ruleId) async {
     final res = await delete('/api/rules/$ruleId');
     if (res.statusCode != 200) {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       throw Exception(body['error'] ?? 'Failed to delete rule');
+    }
+  }
+
+  Future<List<dynamic>> getSchedules() async {
+    final res = await get('/api/schedules');
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch schedules');
+    }
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+
+  Future<Map<String, dynamic>> createSchedule({
+    required String name,
+    required String deviceId,
+    required List<int> channels,
+    required Map<String, dynamic> recurrence,
+    required List<Map<String, String>> timeRanges,
+  }) async {
+    final res = await post('/api/schedules', {
+      'name': name,
+      'deviceId': deviceId,
+      'channels': channels,
+      'recurrence': recurrence,
+      'timeRanges': timeRanges,
+    });
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 201) {
+      throw Exception(body['error'] ?? 'Failed to create schedule');
+    }
+    return body;
+  }
+
+  Future<Map<String, dynamic>> updateSchedule(
+    String id,
+    Map<String, dynamic> payload,
+  ) async {
+    final res = await patch('/api/schedules/$id', payload);
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(body['error'] ?? 'Failed to update schedule');
+    }
+    return body;
+  }
+
+  Future<Map<String, dynamic>> toggleSchedule(String id) async {
+    final res = await patch('/api/schedules/$id/enable', {});
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(body['error'] ?? 'Failed to toggle schedule');
+    }
+    return body;
+  }
+
+  Future<void> deleteSchedule(String id) async {
+    final res = await delete('/api/schedules/$id');
+    if (res.statusCode != 200) {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      throw Exception(body['error'] ?? 'Failed to delete schedule');
     }
   }
 }

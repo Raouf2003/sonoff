@@ -9,6 +9,7 @@ import 'screens/add_device_screen.dart';
 import 'screens/add_sensor_screen.dart';
 import 'screens/rule_form_screen.dart';
 import 'screens/sensor_rules_screen.dart';
+import 'screens/schedule_list_screen.dart';
 
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
@@ -263,6 +264,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (added == true) _loadSensors();
   }
 
+  void _openSchedules() {
+    final id = _selectedDeviceId;
+    if (id == null || id.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ScheduleListScreen(
+          deviceId: id,
+          deviceName: _deviceName(id),
+          maxChannel: _deviceChannels,
+        ),
+      ),
+    );
+  }
+
   void _connectSocket() {
     _socket = io.io('$kProtocol://$kServerIp', <String, dynamic>{
       'transports': ['websocket'], 'secure': true, 'autoConnect': false,
@@ -452,6 +467,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                     icon: Icons.sensors,
                     color: AppColors.leaf,
                     onTap: _openAddSensor,
+                  ),
+                  const SizedBox(width: 6),
+                  _HeaderIconButton(
+                    icon: Icons.schedule,
+                    color: AppColors.sunlight,
+                    onTap: _openSchedules,
                   ),
                   const SizedBox(width: 6),
                   _HeaderIconButton(
