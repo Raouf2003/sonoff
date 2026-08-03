@@ -88,10 +88,11 @@ class ApiService {
     return jsonDecode(res.body) as List<dynamic>;
   }
 
-  Future<Map<String, dynamic>> claimDevice(String deviceId, String name) async {
+  Future<Map<String, dynamic>> claimDevice(String deviceId, String name, {int channels = 4}) async {
     final res = await post('/api/devices/claim', {
       'deviceId': deviceId,
       'name': name,
+      'channels': channels,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 200) {

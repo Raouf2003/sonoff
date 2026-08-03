@@ -6,7 +6,8 @@ import '../services/api_service.dart';
 class RuleFormScreen extends StatefulWidget {
   final String sensorId;
   final String sensorName;
-  const RuleFormScreen({super.key, required this.sensorId, required this.sensorName});
+  final int maxChannel;
+  const RuleFormScreen({super.key, required this.sensorId, required this.sensorName, this.maxChannel = 4});
 
   @override
   State<RuleFormScreen> createState() => _RuleFormScreenState();
@@ -155,7 +156,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                   dropdownColor: AppColors.submerged,
                   icon: const Icon(Icons.expand_more, size: 18, color: AppColors.mist),
                   decoration: _inputDec('CH', '', Icons.tune),
-                  items: [for (int i = 1; i <= 4; i++) DropdownMenuItem<int>(value: i, child: Text('CH$i', style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam)))],
+                  items: [for (int i = 1; i <= widget.maxChannel; i++) DropdownMenuItem<int>(value: i, child: Text('CH$i', style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam)))],
                   onChanged: (v) { if (v != null) setState(() => _channel = v); },
                 ),
               ),

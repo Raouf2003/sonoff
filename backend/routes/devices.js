@@ -15,36 +15,46 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/claim', async (req, res) => {
-  try {
-    const { deviceId, name } = req.body;
+    try {
+      const { deviceId, name, channels } = req.body;
 
-    if (!deviceId || !name) {
-      return res.status(400).json({ error: 'deviceId and name are required' });
-    }
+      if (!deviceId || !name) {
+        return res.status(400).json({ error: 'deviceId and name are required' });
+      }
 
-    const tid = deviceId.trim();
-    let device = await Device.findOne({ deviceId: tid });
+      const tid = deviceId.trim();
+      const ch = channels === undefined ? 4 : Number(channels);
+      if (!Number.isInteger(ch) || ch < 1 || ch > 16) {
+        return res.status(400).json({ error: 'channels must be an integer between 1 and 16' });
+      }
+      const type = ch === 1 ? 'sonoff-1ch' : `sonoff-${ch}ch`;
 
-    if (device && device.ownerId) {
-      return res.status(409).json({ error: 'Device is already claimed by another user' });
-    }
+      let device = await Device.findOne({ deviceId: tid });
 
-    if (device) {
-      device.ownerId = req.userId;
-      device.name = name.trim();
-      device.claimedAt = new Date();
-    } else {
-      device = await Device.create({
-        deviceId: tid,
-        name: name.trim(),
-        ownerId: req.userId,
-        claimedAt: new Date(),
-      });
-    }
+      if (device && device.ownerId) {
+        return res.status(409).json({ error: 'Device is already claimed by another user' });
+      }
 
-    await device.save();
-    deviceRegistry.update(device);
-    res.json(device.toJSON());
+      if (device) {
+        device.ownerId = req.userId;
+        device.name = name.trim();
+        device.type = type;
+        device.channels = ch;
+        device.claimedAt = new Date();
+      } else {
+        device = await Device.create({
+          deviceId: tid,
+          name: name.trim(),
+          ownerId: req.userId,
+          type,
+          channels: ch,
+          claimedAt: new Date(),
+        });
+      }
+
+      await device.save();
+      deviceRegistry.update(device);
+      res.json(device.toJSON());
   } catch (err) {
     console.error('Claim device error:', err);
     res.status(500).json({ error: 'Internal server error' });

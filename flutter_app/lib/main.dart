@@ -189,6 +189,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _sensors = [];
   String? _selectedDeviceId;
+  int _deviceChannels = 4;
 
   @override
   void initState() {
@@ -221,6 +222,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           _devices = devices.cast<Map<String, dynamic>>();
           if (_devices.isNotEmpty) {
             _selectedDeviceId = _devices.first['deviceId'] as String;
+            _deviceChannels = _devices.first['channels'] as int? ?? 4;
           }
           _initialLoading = false;
         });
@@ -247,6 +249,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return deviceId;
   }
 
+  int _deviceChannelsOf(String deviceId) {
+    for (final d in _devices) {
+      if (d['deviceId'] == deviceId) return d['channels'] as int? ?? 4;
+    }
+    return 4;
+  }
+
   void _openAddSensor() async {
     final added = await Navigator.of(context).push<bool>(
       MaterialPageRoute(builder: (_) => const AddSensorScreen()),
@@ -269,8 +278,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final deviceId = map['deviceId'] as String?;
       if (deviceId != null && deviceId != _selectedDeviceId) return;
       final channel = map['channel'] as int;
-      final state = map['state'] as String;
       final index = channel - 1;
+      if (index < 0 || index >= _deviceChannels) return;
+      final state = map['state'] as String;
       final newState = state == 'ON';
       setState(() => channelStates[index] = newState);
       if (newState) {
@@ -289,7 +299,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     try {
       final data = await _api.getStatus(_selectedDeviceId!);
       setState(() {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < _deviceChannels; i++) {
           final on = data['POWER${i + 1}'] == 'ON';
           channelStates[i] = on;
           if (on) _rippleControllers[i].repeat(reverse: true);
@@ -450,7 +460,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             final name = d['name'] as String;
             final selected = id == _selectedDeviceId;
             return GestureDetector(
-              onTap: () { setState(() => _selectedDeviceId = id); _fetchStatus(); },
+              onTap: () { setState(() { _selectedDeviceId = id; _deviceChannels = d['channels'] as int? ?? 4; }); _fetchStatus(); },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 250),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -506,12 +516,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ],
           Expanded(
             child: GridView.count(
-              crossAxisCount: 2,
+              crossAxisCount: _deviceChannels == 1 ? 1 : 2,
               mainAxisSpacing: 14,
               crossAxisSpacing: 14,
-              childAspectRatio: 0.85,
+              childAspectRatio: _deviceChannels == 1 ? 1.0 : 0.85,
               physics: const BouncingScrollPhysics(),
-              children: List.generate(4, (i) => _WaterCard(
+              children: List.generate(_deviceChannels, (i) => _WaterCard(
                 index: i,
                 channel: i + 1,
                 config: channels[i],
@@ -633,8 +643,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               Expanded(
                 child: FilledButton.icon(
                   onPressed: () async {
+                    final ch = _deviceChannelsOf(s['deviceId'] as String? ?? '');
                     await Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => RuleFormScreen(sensorId: id, sensorName: name)),
+                      MaterialPageRoute(builder: (_) => RuleFormScreen(sensorId: id, sensorName: name, maxChannel: ch)),
                     );
                     _loadSensors();
                   },

@@ -13,10 +13,6 @@ router.post('/control', async (req, res) => {
       return res.status(400).json({ error: 'deviceId, channel, and state are required' });
     }
 
-    if (channel < 1 || channel > 4) {
-      return res.status(400).json({ error: 'channel must be between 1 and 4' });
-    }
-
     const validStates = ['ON', 'OFF', 'TOGGLE'];
     if (!validStates.includes(state.toUpperCase())) {
       return res.status(400).json({ error: 'state must be ON, OFF, or TOGGLE' });
@@ -29,6 +25,10 @@ router.post('/control', async (req, res) => {
 
     if (!device.ownerId || device.ownerId.toString() !== req.userId) {
       return res.status(403).json({ error: 'You do not own this device' });
+    }
+
+    if (!Number.isInteger(channel) || channel < 1 || channel > (device.channels || 4)) {
+      return res.status(400).json({ error: `channel must be between 1 and ${device.channels || 4}` });
     }
 
     if (!mqttGateway.isConnected()) {
@@ -68,9 +68,10 @@ router.get('/status', async (req, res) => {
 
     const deviceState = runtimeState.getDeviceState(deviceId);
     const channels = deviceState ? deviceState.channels : {};
+    const count = device.channels || 4;
 
     const status = {};
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= count; i++) {
       status[`POWER${i}`] = channels[i] || 'OFF';
     }
     res.json(status);

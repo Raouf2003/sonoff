@@ -14,6 +14,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
   final _nameCtl = TextEditingController();
   final _api = ApiService();
   bool _loading = false;
+  int _channels = 4;
 
   @override
   void dispose() {
@@ -28,7 +29,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     if (id.isEmpty || name.isEmpty) { _err('Fill in all fields'); return; }
     setState(() => _loading = true);
     try {
-      await _api.claimDevice(id, name);
+      await _api.claimDevice(id, name, channels: _channels);
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) { _err(e.toString().replaceFirst('Exception: ', '')); }
     finally { if (mounted) setState(() => _loading = false); }
@@ -83,7 +84,12 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                     const SizedBox(height: 24),
                     _Field(controller: _deviceIdCtl, hint: 'Device ID', subtitle: 'e.g. sonoff_8F9BC4', icon: Icons.devices, next: true),
                     const SizedBox(height: 14),
-                    _Field(controller: _nameCtl, hint: 'Device Name', subtitle: 'e.g. Garden Controller', icon: Icons.label_outline, onSubmit: () => _claim()),
+                    _Field(controller: _nameCtl, hint: 'Device Name', subtitle: 'e.g. Garden Controller', icon: Icons.label_outline, next: true),
+                    const SizedBox(height: 14),
+                    _DeviceTypePicker(
+                      channels: _channels,
+                      onChanged: (v) => setState(() => _channels = v),
+                    ),
                     const SizedBox(height: 24),
                     SizedBox(
                       width: double.infinity, height: 50,
@@ -106,6 +112,41 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _DeviceTypePicker extends StatelessWidget {
+  final int channels;
+  final ValueChanged<int> onChanged;
+  const _DeviceTypePicker({required this.channels, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text('RELAY COUNT', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: const Color(0xFF94A3B8))),
+        ),
+        SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(value: 1, icon: Icon(Icons.lightbulb_outline, size: 18), label: Text('1 Relay', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+            ButtonSegment(value: 4, icon: Icon(Icons.grid_view, size: 18), label: Text('4 Relays', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+          ],
+          selected: {channels},
+          style: SegmentedButton.styleFrom(
+            backgroundColor: const Color(0xFF0B1922),
+            selectedBackgroundColor: const Color(0xFF2DD4BF),
+            selectedForegroundColor: const Color(0xFF0B1922),
+            foregroundColor: const Color(0xFF94A3B8),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            textStyle: GoogleFonts.inter(fontWeight: FontWeight.w700),
+          ),
+          onSelectionChanged: (s) => onChanged(s.first),
+        ),
+      ],
     );
   }
 }

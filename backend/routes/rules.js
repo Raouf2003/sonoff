@@ -37,8 +37,8 @@ router.post('/', async (req, res) => {
     if (!name || !sensorId) {
       return res.status(400).json({ error: 'name and sensorId are required' });
     }
-    if (!channel || channel < 1 || channel > 4) {
-      return res.status(400).json({ error: 'channel must be between 1 and 4' });
+    if (!channel || channel < 1) {
+      return res.status(400).json({ error: 'channel must be a positive integer' });
     }
     if (condition !== 'above' && condition !== 'below') {
       return res.status(400).json({ error: 'condition must be above or below' });
@@ -59,6 +59,10 @@ router.post('/', async (req, res) => {
     const device = await Device.findOne({ deviceId: sensor.deviceId, ownerId: req.userId });
     if (!device) {
       return res.status(400).json({ error: 'The sensor device is not available' });
+    }
+
+    if (channel > (device.channels || 4)) {
+      return res.status(400).json({ error: `channel must be between 1 and ${device.channels || 4}` });
     }
 
     const rule = await Rule.create({
