@@ -148,15 +148,9 @@ async release(schedule) {
 
         if (desired === lastState) continue;
 
-        const online = runtimeState.isOnline(deviceId);
-
-        if (!online) {
-          console.warn(
-            `[scheduleEngine] Skipped schedule "${name}" channel ${channel} — device ${deviceId} is offline`,
-          );
-          continue;
-        }
-
+        // Schedules are time-driven and independent of whether the device has
+        // recently heartbeated on MQTT. Always publish; publishCommandNoWait
+        // rejects cleanly if the broker connection is actually down.
         try {
           await this.mqttGateway.publishCommandNoWait(deviceId, channel, desired);
         } catch (err) {
