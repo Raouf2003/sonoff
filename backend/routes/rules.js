@@ -89,6 +89,12 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: `channels ${invalid.join(',')} exceed device max of ${maxCh}` });
     }
 
+    // Enforce one rule per sensor.
+    const existing = await Rule.findOne({ sensorId: sensor.sensorId, ownerId: req.userId });
+    if (existing) {
+      return res.status(400).json({ error: 'This sensor already has a rule. Edit or delete the existing one.' });
+    }
+
     const rule = await Rule.create({
       ownerId: req.userId,
       name: String(name).trim(),

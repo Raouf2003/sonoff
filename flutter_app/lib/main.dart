@@ -7,7 +7,6 @@ import 'services/api_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/add_device_screen.dart';
 import 'screens/add_sensor_screen.dart';
-import 'screens/rule_form_screen.dart';
 import 'screens/sensor_rules_screen.dart';
 import 'screens/schedule_list_screen.dart';
 
@@ -325,12 +324,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return deviceId;
   }
 
-  int _deviceChannelsOf(String deviceId) {
-    for (final d in _devices) {
-      if (d['deviceId'] == deviceId) return d['channels'] as int? ?? 4;
-    }
-    return 4;
-  }
 
   void _openAddSensor() async {
     final added = await Navigator.of(context).push<bool>(
@@ -707,45 +700,23 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             ],
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () async {
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => SensorRulesScreen(sensorId: id, sensorName: name)),
-                    );
-                    _loadSensors();
-                  },
-                  icon: const Icon(Icons.rule, size: 16),
-                  label: Text('Rules', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.foam,
-                    side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => SensorRulesScreen(sensorId: id, sensorName: name)),
+                );
+                _loadSensors();
+              },
+              icon: const Icon(Icons.rule, size: 16),
+              label: Text('Rules', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.foam,
+                side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () async {
-                    final ch = _deviceChannelsOf(s['deviceId'] as String? ?? '');
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => RuleFormScreen(sensorId: id, sensorName: name, maxChannel: ch)),
-                    );
-                    _loadSensors();
-                  },
-                  icon: const Icon(Icons.add, size: 16),
-                  label: Text('Add Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.stream,
-                    foregroundColor: AppColors.well,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
