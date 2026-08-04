@@ -22,6 +22,14 @@ class RuleEngine {
     console.log(`[ruleEngine] Started, checking every ${CHECK_INTERVAL_MS}ms`);
   }
 
+  // Drop a rule's in-memory edge-state cache so the next tick re-reads the
+  // persisted lastConditionState from DB before evaluating. Used after edits
+  // or enable/disable toggles where the in-memory cache would otherwise
+  // suppress the next intended state change.
+  invalidate(ruleId) {
+    this.prev.delete(String(ruleId));
+  }
+
   // Persist the edge-trigger state to memory + MongoDB together.
   async _setConditionState(ruleId, state) {
     this.prev.set(ruleId, state);
@@ -31,7 +39,6 @@ class RuleEngine {
         { _id: ruleId },
         { $set: { lastConditionState: state } },
       );
-      console.log(`[ruleEngine] Persisted lastConditionState=${state} for rule ${ruleStr}`);
     } catch (err) {
       console.error(`[ruleEngine] DB update error for rule ${ruleStr}:`, err.message);
     }
@@ -48,6 +55,28 @@ class RuleEngine {
     }
   }
 
+  // Log any enabled rules whose in-memory cache says condition=true — these
+  // are candidates for being stuck (won't re-fire until condition flips false
+  // then true again). Called once after the first tick to surface the current
+  // state without spamming every 10s.
+  _logStuckCandidates(rules) {
+    const stuck = [];
+    for (const rule of rules) {
+      const id = String(rule._id);
+      if (this.prev.get(id)) {
+        stuck.push(`rule=${id.slice(-6)} "${rule.name}" sensor=${rule.sensorId} CH${rule.channel}`);
+      }
+    }
+    if (stuck.length) {
+      console.log(
+        `[ruleEngine] ${stuck.length} rule(s) have lastConditionState=true (will NOT re-fire ` +
+        `until condition flips false then true): ${stuck.join('; ')}`,
+      );
+    } else {
+      console.log('[ruleEngine] No stuck rules detected on startup');
+    }
+  }
+
   async evaluate() {
     let rules;
     try {
@@ -58,6 +87,12 @@ class RuleEngine {
     }
 
     this._primeCache(rules);
+
+    // Log stuck candidates once on the very first tick after startup.
+    if (!this._startupLogged) {
+      this._startupLogged = true;
+      this._logStuckCandidates(rules);
+    }
 
     // Latest live value for every sensor referenced by an enabled rule.
     const sensorMap = new Map();
@@ -73,11 +108,13 @@ class RuleEngine {
 
     for (const rule of rules) {
       const sensor = sensorMap.get(rule.sensorId);
+      const id = String(rule._id);
+
       if (!sensor || typeof sensor.lastValue !== 'number') {
         // No usable reading: reset edge state so a later true reading is a
         // fresh edge. Only write to DB if it actually changed.
-        const id = String(rule._id);
-        if (this.prev.get(id)) {
+        const wasTrue = this.prev.get(id) || false;
+        if (wasTrue) {
           await this._setConditionState(rule._id, false);
         } else {
           this.prev.set(id, false);
@@ -89,7 +126,6 @@ class RuleEngine {
       const conditionTrue =
         rule.condition === 'above' ? value > rule.threshold : value < rule.threshold;
 
-      const id = String(rule._id);
       const wasTrue = this.prev.get(id) || false;
 
       if (!conditionTrue) {

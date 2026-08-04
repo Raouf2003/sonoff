@@ -2,6 +2,7 @@ const express = require('express');
 const Rule = require('../models/Rule');
 const Sensor = require('../models/Sensor');
 const Device = require('../models/Device');
+const ruleEngine = require('../services/ruleEngine');
 
 const router = express.Router();
 
@@ -91,6 +92,9 @@ router.patch('/:id/enable', async (req, res) => {
     }
     rule.enabled = !rule.enabled;
     await rule.save();
+    // Clear the engine's in-memory edge-state cache so the next tick re-reads
+    // the persisted lastConditionState from DB instead of reusing a stale value.
+    ruleEngine.invalidate(rule._id);
     res.json(rule.toJSON());
   } catch (err) {
     console.error('Toggle rule error:', err);
@@ -104,6 +108,8 @@ router.delete('/:id', async (req, res) => {
     if (!rule) {
       return res.status(404).json({ error: 'Rule not found' });
     }
+    // Clear the engine's cache entry for this rule to keep memory clean.
+    ruleEngine.invalidate(rule._id);
     await rule.deleteOne();
     res.json({ ok: true });
   } catch (err) {
