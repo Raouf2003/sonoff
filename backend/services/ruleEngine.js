@@ -4,12 +4,18 @@ const runtimeState = require('./runtimeState');
 
 const CHECK_INTERVAL_MS = 10000;
 
+function oppositeAction(action) {
+  return action === 'ON' ? 'OFF' : 'ON';
+}
+
 class RuleEngine {
   constructor() {
     this.mqttGateway = null;
     this.timer = null;
     // ruleId -> whether the condition was true on the last tick. A rule fires
-    // only once when its condition flips from false to true, never on every tick.
+    // only once when its condition flips, never on every tick.
+    // false -> true: publish the configured action to every channel.
+    // true  -> false: publish the opposite action to every channel.
     // This is a read-through cache: on restart it is initialized from each
     // rule's persisted lastConditionState (never from a fresh `false`).
     this.prev = new Map();
@@ -64,7 +70,8 @@ class RuleEngine {
     for (const rule of rules) {
       const id = String(rule._id);
       if (this.prev.get(id)) {
-        stuck.push(`rule=${id.slice(-6)} "${rule.name}" sensor=${rule.sensorId} CH${rule.channel}`);
+        const chs = (rule.channels || []).join(',');
+        stuck.push(`rule=${id.slice(-6)} "${rule.name}" sensor=${rule.sensorId} CH[${chs}]`);
       }
     }
     if (stuck.length) {
@@ -75,6 +82,21 @@ class RuleEngine {
     } else {
       console.log('[ruleEngine] No stuck rules detected on startup');
     }
+  }
+
+  // Publish an action to every channel in the list. Returns true if all
+  // publishes succeeded.
+  async _publishToChannels(deviceId, channels, action) {
+    let allOk = true;
+    for (const ch of channels) {
+      try {
+        await this.mqttGateway.publishCommandNoWait(deviceId, ch, action);
+      } catch (err) {
+        console.error(`[ruleEngine] Publish error on ${deviceId} CH${ch} ${action}: ${err.message}`);
+        allOk = false;
+      }
+    }
+    return allOk;
   }
 
   async evaluate() {
@@ -110,6 +132,16 @@ class RuleEngine {
       const sensor = sensorMap.get(rule.sensorId);
       const id = String(rule._id);
 
+      // Backward compat: ensure channels is populated.
+      const channels = rule.channels && rule.channels.length > 0
+        ? rule.channels
+        : (typeof rule.channel === 'number' ? [rule.channel] : []);
+
+      if (channels.length === 0) {
+        console.warn(`[ruleEngine] Rule "${rule.name}" has no channels, skipping`);
+        continue;
+      }
+
       if (!sensor || typeof sensor.lastValue !== 'number') {
         // No usable reading: reset edge state so a later true reading is a
         // fresh edge. Only write to DB if it actually changed.
@@ -128,46 +160,40 @@ class RuleEngine {
 
       const wasTrue = this.prev.get(id) || false;
 
-      if (!conditionTrue) {
-        // Reset edge state so the next true reading is detected as a fresh edge.
-        if (wasTrue) {
-          await this._setConditionState(rule._id, false);
-        } else {
-          this.prev.set(id, false);
-        }
+      // No state change — do nothing.
+      if (conditionTrue === wasTrue) {
+        this.prev.set(id, conditionTrue);
         continue;
       }
 
-      // condition is now true.
-      if (wasTrue) {
-        // Already fired while the condition has remained true - do nothing.
-        this.prev.set(id, true);
-        continue;
-      }
+      // ---- State transition detected ----
 
-      // ---- false -> true edge ----
       // Only fire against an online device. If offline, do NOT change the
       // edge state, so the rule can still fire once the device returns.
       if (!runtimeState.isOnline(rule.deviceId)) {
         console.warn(
-          `[ruleEngine] Skipped rule "${rule.name}" — device ${rule.deviceId} is offline (channel ${rule.channel})`,
+          `[ruleEngine] Skipped rule "${rule.name}" — device ${rule.deviceId} is offline (channels [${channels}])`,
         );
-        this.prev.set(id, false);
+        this.prev.set(id, wasTrue);
         continue;
       }
 
+      // Determine which action to send based on the new condition state.
+      const actionToSend = conditionTrue ? rule.action : oppositeAction(rule.action);
+
       try {
-        await this.mqttGateway.publishCommandNoWait(rule.deviceId, rule.channel, rule.action);
+        await this._publishToChannels(rule.deviceId, channels, actionToSend);
+        const chStr = channels.join(',');
         console.log(
-          `[ruleEngine] Rule fired: ${rule.name} -> ${rule.deviceId} POWER${rule.channel} ${rule.action}`,
+          `[ruleEngine] Rule "${rule.name}": condition=${conditionTrue} -> ${rule.deviceId} CH[${chStr}] ${actionToSend}`,
         );
-        await this._setConditionState(rule._id, true);
+        await this._setConditionState(rule._id, conditionTrue);
       } catch (err) {
         console.error(
-          `[ruleEngine] Rule "${rule.name}" fire error on ${rule.deviceId} channel ${rule.channel}: ${err.message}`,
+          `[ruleEngine] Rule "${rule.name}" fire error on ${rule.deviceId} channels [${channels}]: ${err.message}`,
         );
         // Do not flip the edge state; allow a retry on the next tick.
-        this.prev.set(id, false);
+        this.prev.set(id, wasTrue);
       }
     }
   }

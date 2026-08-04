@@ -178,7 +178,7 @@ class ApiService {
   Future<Map<String, dynamic>> createRule({
     required String name,
     required String sensorId,
-    required int channel,
+    required List<int> channels,
     required String condition,
     required double threshold,
     required String action,
@@ -186,7 +186,7 @@ class ApiService {
     final res = await post('/api/rules', {
       'name': name,
       'sensorId': sensorId,
-      'channel': channel,
+      'channels': channels,
       'condition': condition,
       'threshold': threshold,
       'action': action,
@@ -207,7 +207,7 @@ class ApiService {
     return body;
   }
 
-Future<void> deleteRule(String ruleId) async {
+  Future<void> deleteRule(String ruleId) async {
     final res = await delete('/api/rules/$ruleId');
     if (res.statusCode != 200) {
       final body = jsonDecode(res.body) as Map<String, dynamic>;

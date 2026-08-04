@@ -18,7 +18,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   final _thresholdCtl = TextEditingController();
   final _api = ApiService();
 
-  int _channel = 1;
+  Set<int> _channels = {1};
   String _condition = 'below';
   String _action = 'ON';
   bool _saving = false;
@@ -34,6 +34,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
     final name = _nameCtl.text.trim();
     final threshold = double.tryParse(_thresholdCtl.text.trim());
     if (name.isEmpty) { _err('Enter a rule name'); return; }
+    if (_channels.isEmpty) { _err('Select at least one channel'); return; }
     if (threshold == null) { _err('Enter a numeric threshold'); return; }
 
     setState(() => _saving = true);
@@ -41,7 +42,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
       await _api.createRule(
         name: name,
         sensorId: widget.sensorId,
-        channel: _channel,
+        channels: _channels.toList()..sort(),
         condition: _condition,
         threshold: threshold,
         action: _action,
@@ -134,7 +135,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
           Text('Rule details', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
           const SizedBox(height: 4),
           Text(
-            'Turns a channel on the linked Sonoff device ON/OFF based on the sensor value. The device is always taken from the sensor.',
+            'Turns selected channels ON/OFF based on the sensor value. When the condition is true the configured action is sent; when false the opposite action is sent automatically.',
             style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.7)),
           ),
           const SizedBox(height: 18),
@@ -145,41 +146,29 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
             decoration: _inputDec('Rule name', 'e.g. Water when dry', Icons.label_outline),
           ),
           const SizedBox(height: 14),
-          _label('CHANNEL'),
-          Row(
-            children: [
-              Expanded(
-                child: DropdownButtonFormField<int>(
-                  initialValue: _channel,
-                  isExpanded: false,
-                  style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
-                  dropdownColor: AppColors.submerged,
-                  icon: const Icon(Icons.expand_more, size: 18, color: AppColors.mist),
-                  decoration: _inputDec('CH', '', Icons.tune),
-                  items: [for (int i = 1; i <= widget.maxChannel; i++) DropdownMenuItem<int>(value: i, child: Text('CH$i', style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam)))],
-                  onChanged: (v) { if (v != null) setState(() => _channel = v); },
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'ON', label: Text('ON', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                    ButtonSegment(value: 'OFF', label: Text('OFF', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                  ],
-                  selected: {_action},
-                  style: SegmentedButton.styleFrom(
-                    backgroundColor: AppColors.well,
-                    selectedBackgroundColor: _action == 'ON' ? AppColors.leaf : AppColors.sunlight,
-                    selectedForegroundColor: AppColors.well,
-                    foregroundColor: AppColors.mist,
-                    side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-                  ),
-                  onSelectionChanged: (s) => setState(() => _action = s.first),
-                ),
-              ),
+          _label('CHANNELS'),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [for (int i = 1; i <= widget.maxChannel; i++) _channelChip(i)],
+          ),
+          const SizedBox(height: 14),
+          _label('ACTION (when condition is true)'),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'ON', label: Text('ON', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+              ButtonSegment(value: 'OFF', label: Text('OFF', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
             ],
+            selected: {_action},
+            style: SegmentedButton.styleFrom(
+              backgroundColor: AppColors.well,
+              selectedBackgroundColor: _action == 'ON' ? AppColors.leaf : AppColors.sunlight,
+              selectedForegroundColor: AppColors.well,
+              foregroundColor: AppColors.mist,
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            ),
+            onSelectionChanged: (s) => setState(() => _action = s.first),
           ),
           const SizedBox(height: 14),
           _label('WHEN VALUE IS'),
@@ -205,6 +194,13 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
             style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
             decoration: _inputDec('Threshold value', 'e.g. 30', Icons.pin_outlined),
           ),
+          const SizedBox(height: 8),
+          Text(
+            _action == 'ON'
+                ? 'True: channels ON | False: channels OFF'
+                : 'True: channels OFF | False: channels ON',
+            style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.5)),
+          ),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity, height: 50,
@@ -222,6 +218,36 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _channelChip(int ch) {
+    final selected = _channels.contains(ch);
+    return FilterChip(
+      label: Text('CH$ch', style: GoogleFonts.inter(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: selected ? AppColors.well : AppColors.mist,
+      )),
+      selected: selected,
+      onSelected: (v) {
+        setState(() {
+          if (v) {
+            _channels.add(ch);
+          } else {
+            _channels.remove(ch);
+          }
+        });
+      },
+      selectedColor: AppColors.stream,
+      backgroundColor: AppColors.well,
+      checkmarkColor: AppColors.well,
+      side: BorderSide(
+        color: selected ? AppColors.stream : Colors.white.withValues(alpha: 0.1),
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
   }
 

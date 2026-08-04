@@ -22,11 +22,15 @@ const ruleSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
-  channel: {
-    type: Number,
+  channels: {
+    type: [Number],
     required: true,
-    min: 1,
-    max: 4,
+    validate: {
+      validator(v) {
+        return Array.isArray(v) && v.length > 0 && v.every((n) => Number.isInteger(n) && n >= 1 && n <= 4) && new Set(v).size === v.length;
+      },
+      message: 'channels must be a non-empty array of unique integers between 1 and 4',
+    },
   },
   condition: {
     type: String,
@@ -59,11 +63,31 @@ const ruleSchema = new mongoose.Schema({
   },
 });
 
+// Backward compat: if an old document has `channel` (Number) but no `channels`,
+// expose it as a single-element array via a virtual getter.
+ruleSchema.virtual('channelsCompat').get(function () {
+  if (this.channels && this.channels.length > 0) return this.channels;
+  if (typeof this.channel === 'number') return [this.channel];
+  return [];
+});
+
 ruleSchema.set('toJSON', {
+  virtuals: true,
   transform: (doc, ret) => {
     delete ret.__v;
+    // Ensure old `channel` field is stripped from output; clients use `channels`.
+    delete ret.channel;
     return ret;
   },
+});
+
+// Migration hook: before saving, if `channels` is missing but `channel` exists,
+// copy it into `channels`.
+ruleSchema.pre('save', function (next) {
+  if ((!this.channels || this.channels.length === 0) && typeof this.channel === 'number') {
+    this.channels = [this.channel];
+  }
+  next();
 });
 
 module.exports = mongoose.model('Rule', ruleSchema);

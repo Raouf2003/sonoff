@@ -19,11 +19,17 @@ router.get('/', async (req, res) => {
     const deviceMap = new Map(devices.map((d) => [d.deviceId, d.name]));
 
     res.json(
-      rules.map((r) => ({
-        ...r.toJSON(),
-        sensorName: sensorMap.get(r.sensorId) || null,
-        deviceName: deviceMap.get(r.deviceId) || null,
-      })),
+      rules.map((r) => {
+        const json = r.toJSON();
+        // Backward compat: ensure `channels` is always present in the response.
+        if (!json.channels || json.channels.length === 0) {
+          json.channels = typeof json.channel === 'number' ? [json.channel] : [];
+        }
+        delete json.channel;
+        json.sensorName = sensorMap.get(r.sensorId) || null;
+        json.deviceName = deviceMap.get(r.deviceId) || null;
+        return json;
+      }),
     );
   } catch (err) {
     console.error('List rules error:', err);
@@ -33,13 +39,10 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, sensorId, channel, condition, threshold, action } = req.body;
+    const { name, sensorId, channels, channel, condition, threshold, action } = req.body;
 
     if (!name || !sensorId) {
       return res.status(400).json({ error: 'name and sensorId are required' });
-    }
-    if (!channel || channel < 1) {
-      return res.status(400).json({ error: 'channel must be a positive integer' });
     }
     if (condition !== 'above' && condition !== 'below') {
       return res.status(400).json({ error: 'condition must be above or below' });
@@ -49,6 +52,24 @@ router.post('/', async (req, res) => {
     }
     if (action !== 'ON' && action !== 'OFF') {
       return res.status(400).json({ error: 'action must be ON or OFF' });
+    }
+
+    // Normalize channels: accept `channels` (array) or `channel` (single number).
+    let channelList;
+    if (Array.isArray(channels) && channels.length > 0) {
+      channelList = channels.map(Number);
+    } else if (typeof channel === 'number' && channel >= 1) {
+      channelList = [channel];
+    } else {
+      return res.status(400).json({ error: 'channels must be a non-empty array of positive integers' });
+    }
+
+    // Validate: all integers, all >= 1, no duplicates.
+    if (!channelList.every((n) => Number.isInteger(n) && n >= 1)) {
+      return res.status(400).json({ error: 'channels must contain only positive integers' });
+    }
+    if (new Set(channelList).size !== channelList.length) {
+      return res.status(400).json({ error: 'channels must not contain duplicates' });
     }
 
     const sensor = await Sensor.findOne({ sensorId: String(sensorId).trim(), ownerId: req.userId });
@@ -62,8 +83,10 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'The sensor device is not available' });
     }
 
-    if (channel > (device.channels || 4)) {
-      return res.status(400).json({ error: `channel must be between 1 and ${device.channels || 4}` });
+    const maxCh = device.channels || 4;
+    const invalid = channelList.filter((ch) => ch > maxCh);
+    if (invalid.length > 0) {
+      return res.status(400).json({ error: `channels ${invalid.join(',')} exceed device max of ${maxCh}` });
     }
 
     const rule = await Rule.create({
@@ -71,7 +94,7 @@ router.post('/', async (req, res) => {
       name: String(name).trim(),
       sensorId: sensor.sensorId,
       deviceId: device.deviceId,
-      channel,
+      channels: channelList,
       condition,
       threshold,
       action,

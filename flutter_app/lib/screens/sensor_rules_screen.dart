@@ -101,13 +101,32 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     );
   }
 
+  String _channelsLabel(Map<String, dynamic> rule) {
+    final raw = rule['channels'];
+    List<int> chs;
+    if (raw is List) {
+      chs = raw.whereType<int>().toList();
+    } else if (raw is int) {
+      chs = [raw];
+    } else {
+      // Fallback to old single `channel` field.
+      final ch = rule['channel'];
+      chs = (ch is int) ? [ch] : [];
+    }
+    chs.sort();
+    if (chs.isEmpty) return '—';
+    return chs.map((c) => 'CH$c').join(', ');
+  }
+
   String _describe(Map<String, dynamic> rule) {
     final cond = rule['condition'] == 'above' ? 'above' : 'below';
     final threshold = rule['threshold'];
     final ts = threshold is double && threshold == threshold.roundToDouble()
         ? threshold.toInt().toString()
         : threshold.toString();
-    return 'CH${rule['channel']}  ->  $cond $ts  ->  ${rule['action']}';
+    final action = rule['action'] ?? 'ON';
+    final opposite = action == 'ON' ? 'OFF' : 'ON';
+    return '${_channelsLabel(rule)}  ->  $cond $ts  ->  $action (else $opposite)';
   }
 
   @override
