@@ -42,6 +42,19 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     }
   }
 
+  Future<void> _editRule(Map<String, dynamic> rule) async {
+    final updated = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => RuleFormScreen(
+          sensorId: widget.sensorId,
+          sensorName: widget.sensorName,
+          existing: rule,
+        ),
+      ),
+    );
+    if (updated == true) _load();
+  }
+
   Future<void> _addRule() async {
     final created = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
@@ -235,6 +248,11 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
             onChanged: (_) => _toggle(rule),
             activeTrackColor: AppColors.leaf,
             activeThumbColor: AppColors.well,
+          ),
+          IconButton(
+            onPressed: () => _editRule(rule),
+            icon: Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
+            tooltip: 'Edit',
           ),
           IconButton(
             onPressed: () => _delete(rule),

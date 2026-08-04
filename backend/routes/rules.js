@@ -107,6 +107,74 @@ router.post('/', async (req, res) => {
   }
 });
 
+router.patch('/:id', async (req, res) => {
+  try {
+    const rule = await Rule.findOne({ _id: req.params.id, ownerId: req.userId });
+    if (!rule) {
+      return res.status(404).json({ error: 'Rule not found' });
+    }
+
+    const { name, channels, channel, condition, threshold, action } = req.body;
+
+    if (name !== undefined) rule.name = String(name).trim();
+    if (condition !== undefined) {
+      if (condition !== 'above' && condition !== 'below') {
+        return res.status(400).json({ error: 'condition must be above or below' });
+      }
+      rule.condition = condition;
+    }
+    if (threshold !== undefined) {
+      if (typeof threshold !== 'number') {
+        return res.status(400).json({ error: 'threshold must be a number' });
+      }
+      rule.threshold = threshold;
+    }
+    if (action !== undefined) {
+      if (action !== 'ON' && action !== 'OFF') {
+        return res.status(400).json({ error: 'action must be ON or OFF' });
+      }
+      rule.action = action;
+    }
+
+    // Normalize channels if provided.
+    if (channels !== undefined || channel !== undefined) {
+      let channelList;
+      if (Array.isArray(channels) && channels.length > 0) {
+        channelList = channels.map(Number);
+      } else if (typeof channel === 'number' && channel >= 1) {
+        channelList = [channel];
+      } else {
+        return res.status(400).json({ error: 'channels must be a non-empty array of positive integers' });
+      }
+
+      if (!channelList.every((n) => Number.isInteger(n) && n >= 1)) {
+        return res.status(400).json({ error: 'channels must contain only positive integers' });
+      }
+      if (new Set(channelList).size !== channelList.length) {
+        return res.status(400).json({ error: 'channels must not contain duplicates' });
+      }
+
+      const device = await Device.findOne({ deviceId: rule.deviceId, ownerId: req.userId });
+      if (device) {
+        const maxCh = device.channels || 4;
+        const invalid = channelList.filter((ch) => ch > maxCh);
+        if (invalid.length > 0) {
+          return res.status(400).json({ error: `channels ${invalid.join(',')} exceed device max of ${maxCh}` });
+        }
+      }
+
+      rule.channels = channelList;
+    }
+
+    await rule.save();
+    ruleEngine.invalidate(rule._id);
+    res.json(rule.toJSON());
+  } catch (err) {
+    console.error('Update rule error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.patch('/:id/enable', async (req, res) => {
   try {
     const rule = await Rule.findOne({ _id: req.params.id, ownerId: req.userId });

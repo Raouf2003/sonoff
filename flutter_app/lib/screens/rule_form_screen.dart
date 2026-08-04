@@ -7,7 +7,8 @@ class RuleFormScreen extends StatefulWidget {
   final String sensorId;
   final String sensorName;
   final int maxChannel;
-  const RuleFormScreen({super.key, required this.sensorId, required this.sensorName, this.maxChannel = 4});
+  final Map<String, dynamic>? existing;
+  const RuleFormScreen({super.key, required this.sensorId, required this.sensorName, this.maxChannel = 4, this.existing});
 
   @override
   State<RuleFormScreen> createState() => _RuleFormScreenState();
@@ -22,6 +23,38 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   String _condition = 'below';
   String _action = 'ON';
   bool _saving = false;
+
+  bool get _isEdit => widget.existing != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    if (e != null) _prefill(e);
+  }
+
+  void _prefill(Map<String, dynamic> rule) {
+    _nameCtl.text = (rule['name'] as String?) ?? '';
+    final rawThreshold = rule['threshold'];
+    if (rawThreshold is num) {
+      _thresholdCtl.text = rawThreshold == rawThreshold.roundToDouble()
+          ? rawThreshold.toInt().toString()
+          : rawThreshold.toString();
+    }
+    _condition = (rule['condition'] as String?) ?? 'below';
+    _action = (rule['action'] as String?) ?? 'ON';
+
+    final rawChannels = rule['channels'];
+    _channels = {};
+    if (rawChannels is List) {
+      for (final c in rawChannels) {
+        if (c is int) _channels.add(c);
+      }
+    } else if (rawChannels is int) {
+      _channels.add(rawChannels);
+    }
+    if (_channels.isEmpty) _channels = {1};
+  }
 
   @override
   void dispose() {
@@ -51,14 +84,25 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
 
     setState(() => _saving = true);
     try {
-      await _api.createRule(
-        name: name,
-        sensorId: widget.sensorId,
-        channels: _channels.toList()..sort(),
-        condition: _condition,
-        threshold: threshold,
-        action: _action,
-      );
+      if (_isEdit) {
+        await _api.updateRule(
+          widget.existing!['_id'] as String,
+          name: name,
+          channels: _channels.toList()..sort(),
+          condition: _condition,
+          threshold: threshold,
+          action: _action,
+        );
+      } else {
+        await _api.createRule(
+          name: name,
+          sensorId: widget.sensorId,
+          channels: _channels.toList()..sort(),
+          condition: _condition,
+          threshold: threshold,
+          action: _action,
+        );
+      }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       _err(e.toString().replaceFirst('Exception: ', ''));
@@ -85,7 +129,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('New Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
+        title: Text(_isEdit ? 'Edit Rule' : 'New Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
         backgroundColor: AppColors.well,
         iconTheme: const IconThemeData(color: AppColors.mist),
       ),
@@ -218,7 +262,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                     ),
                     child: _saving
                         ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
-                        : Text('Create Rule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                        : Text(_isEdit ? 'Save Changes' : 'Create Rule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                   ),
                 ),
               ],

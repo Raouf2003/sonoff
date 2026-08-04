@@ -198,6 +198,27 @@ class ApiService {
     return body;
   }
 
+  Future<Map<String, dynamic>> updateRule(String ruleId, {
+    String? name,
+    List<int>? channels,
+    String? condition,
+    double? threshold,
+    String? action,
+  }) async {
+    final body = <String, dynamic>{};
+    if (name != null) body['name'] = name;
+    if (channels != null) body['channels'] = channels;
+    if (condition != null) body['condition'] = condition;
+    if (threshold != null) body['threshold'] = threshold;
+    if (action != null) body['action'] = action;
+    final res = await patch('/api/rules/$ruleId', body);
+    final json = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(json['error'] ?? 'Failed to update rule');
+    }
+    return json;
+  }
+
   Future<Map<String, dynamic>> toggleRule(String ruleId) async {
     final res = await patch('/api/rules/$ruleId/enable', {});
     final body = jsonDecode(res.body) as Map<String, dynamic>;
