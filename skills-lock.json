@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "flutter-ui": {
+      "source": "dhruvanbhalara/skills",
+      "sourceType": "github",
+      "skillPath": "skills/flutter/flutter-ui/SKILL.md",
+      "computedHash": "520c95231554b25ed052b0e5b9c9ce43185d73ad845955bc28e7f0ab7eaafe0e"
+    }
+  }
+}

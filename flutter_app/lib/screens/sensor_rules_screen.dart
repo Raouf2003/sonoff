@@ -185,7 +185,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _SensorHeader(sensorName: widget.sensorName, sensorId: widget.sensorId, enabled: enabled),
+          _SensorHeader(sensorName: widget.sensorName, sensorId: widget.sensorId),
           const SizedBox(height: 18),
 
           // ── Rule Card ──
@@ -219,13 +219,18 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                           ],
                         ),
                         const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 6,
-                          crossAxisAlignment: WrapCrossAlignment.center,
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _LogicPill(label: 'When $condWord $threshold', color: AppColors.stream),
-                            Icon(Icons.arrow_forward_rounded, size: 16, color: AppColors.mist.withValues(alpha: 0.5)),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                _LogicPill(label: 'When $condWord $threshold', color: AppColors.stream),
+                                const SizedBox(height: 6),
+                                Icon(Icons.arrow_downward_rounded, size: 16, color: AppColors.mist.withValues(alpha: 0.4)),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
                             _LogicPill(label: '$chLabel → $action', color: actionColor),
                           ],
                         ),
@@ -335,8 +340,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 class _SensorHeader extends StatelessWidget {
   final String sensorName;
   final String sensorId;
-  final bool enabled;
-  const _SensorHeader({required this.sensorName, required this.sensorId, required this.enabled});
+  const _SensorHeader({required this.sensorName, required this.sensorId});
 
   @override
   Widget build(BuildContext context) {
@@ -371,7 +375,6 @@ class _SensorHeader extends StatelessWidget {
               ],
             ),
           ),
-          _ActiveTag(enabled: enabled),
         ],
       ),
     );
