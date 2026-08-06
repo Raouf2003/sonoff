@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../widgets/stees_widgets.dart';
 import 'add_sensor_screen.dart';
-import 'sensor_rules_screen.dart';
 
 class SensorsPage extends StatefulWidget {
-  const SensorsPage({super.key});
+  final ValueChanged<int> onNavigateToTab;
+  const SensorsPage({super.key, required this.onNavigateToTab});
 
   @override
   State<SensorsPage> createState() => _SensorsPageState();
@@ -55,66 +56,31 @@ class _SensorsPageState extends State<SensorsPage> {
   }
 
   void _openSensorRules(Map<String, dynamic> sensor) async {
-    final id = sensor['sensorId'] as String? ?? '';
-    final name = sensor['name'] as String? ?? id;
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SensorRulesScreen(sensorId: id, sensorName: name)),
-    );
-    _load();
+    widget.onNavigateToTab(3);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream),
-        ),
-      );
-    }
-    return _sensors.isEmpty ? _buildEmpty() : _buildSensorList();
+    if (_loading) return const SteesLoading();
+    if (_sensors.isEmpty) return _buildEmpty();
+    return _buildSensorList();
   }
 
   Widget _buildEmpty() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 80,
-            height: 80,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.stream.withValues(alpha: 0.08),
-              border: Border.all(color: AppColors.stream.withValues(alpha: 0.15)),
-            ),
-            child: Icon(Icons.sensors, size: 36, color: AppColors.stream.withValues(alpha: 0.5)),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'No sensors yet',
-            style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Add a soil moisture sensor to monitor\nyour irrigation zones.',
-            textAlign: TextAlign.center,
-            style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist.withValues(alpha: 0.7)),
-          ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: _openAddSensor,
-            icon: const Icon(Icons.add, size: 18),
-            label: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.stream,
-              foregroundColor: AppColors.well,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-          ),
-        ],
+    return SteesEmpty(
+      icon: Icons.sensors,
+      title: 'No sensors yet',
+      subtitle: 'Add a soil moisture sensor to\nmonitor your irrigation zones.',
+      action: FilledButton.icon(
+        onPressed: _openAddSensor,
+        icon: const Icon(Icons.add, size: 18),
+        label: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+        style: FilledButton.styleFrom(
+          backgroundColor: AppColors.stream,
+          foregroundColor: AppColors.well,
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+        ),
       ),
     );
   }
@@ -122,163 +88,155 @@ class _SensorsPageState extends State<SensorsPage> {
   Widget _buildSensorList() {
     return Column(
       children: [
-        _buildHeader(),
+        SteesSectionHeader(
+          title: 'SENSORS',
+          count: _sensors.length,
+          trailing: _AddButton(onTap: _openAddSensor),
+        ),
+        const SizedBox(height: AppSpacing.md),
         Expanded(
-          child: ListView.builder(
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-            itemCount: _sensors.length,
-            itemBuilder: (_, i) => _buildSensorCard(_sensors[i]),
+          child: RefreshIndicator(
+            onRefresh: _load,
+            color: AppColors.stream,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+              padding: const EdgeInsets.fromLTRB(AppSpacing.xl, 0, AppSpacing.xl, AppSpacing.xxxl),
+              itemCount: _sensors.length,
+              itemBuilder: (_, i) => Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                child: _SensorCard(
+                  sensor: _sensors[i],
+                  deviceName: _deviceName(_sensors[i]['deviceId'] as String? ?? ''),
+                  onTap: () => _openSensorRules(_sensors[i]),
+                ),
+              ),
+            ),
           ),
         ),
       ],
     );
   }
+}
 
-  Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'SENSORS',
-                  style: GoogleFonts.sora(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.8,
-                    color: AppColors.mist,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${_sensors.length} linked',
-                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6)),
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            onPressed: _openAddSensor,
-            icon: const Icon(Icons.add_circle_outline, size: 22, color: AppColors.stream),
-            tooltip: 'Add sensor',
-          ),
-        ],
+class _AddButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AddButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+        decoration: BoxDecoration(
+          color: AppColors.stream.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: AppColors.stream.withValues(alpha: 0.2)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.add, size: 14, color: AppColors.stream),
+            const SizedBox(width: AppSpacing.xs),
+            Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.stream)),
+          ],
+        ),
       ),
     );
   }
+}
 
-  Widget _buildSensorCard(Map<String, dynamic> s) {
+class _SensorCard extends StatefulWidget {
+  final Map<String, dynamic> sensor;
+  final String deviceName;
+  final VoidCallback onTap;
+
+  const _SensorCard({required this.sensor, required this.deviceName, required this.onTap});
+
+  @override
+  State<_SensorCard> createState() => _SensorCardState();
+}
+
+class _SensorCardState extends State<_SensorCard> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.sensor;
     final id = s['sensorId'] as String? ?? '';
     final name = s['name'] as String? ?? id;
     final online = s['status'] == 'online';
     final value = s['lastValue'];
-    final deviceName = _deviceName(s['deviceId'] as String? ?? '');
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
-      decoration: BoxDecoration(
-        color: AppColors.submerged,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: online ? AppColors.leaf.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.06),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) { setState(() => _pressed = false); widget.onTap(); },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.98 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: SteesCard(
+          active: online,
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.leaf.withValues(alpha: 0.12),
-                ),
-                child: const Icon(Icons.agriculture, size: 18, color: AppColors.leaf),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
+              Row(
+                children: [
+                  SteesAvatar(icon: Icons.agriculture, color: AppColors.leaf),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'ID: $id',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7)),
+                        ),
+                      ],
                     ),
-                    Text(
-                      'ID: $id',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist),
-                    ),
-                  ],
-                ),
+                  ),
+                  _StatusBadge(online: online),
+                ],
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: online ? AppColors.leaf.withValues(alpha: 0.12) : AppColors.mist.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  online ? 'Online' : 'Offline',
-                  style: GoogleFonts.inter(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: online ? AppColors.leaf : AppColors.mist,
+              const SizedBox(height: AppSpacing.md),
+              SteesInfoRow(
+                icon: Icons.settings_input_hdmi,
+                label: 'Device: ${widget.deviceName}',
+                value: value != null
+                    ? Text(
+                        _fmtValue(value),
+                        style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.stream),
+                      )
+                    : null,
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: widget.onTap,
+                  icon: const Icon(Icons.rule, size: 15),
+                  label: Text('Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.foam,
+                    side: BorderSide(color: AppColors.border),
+                    padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm + 2),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Icon(Icons.settings_input_hdmi, size: 13, color: AppColors.mist.withValues(alpha: 0.7)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Device: $deviceName',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.8)),
-                ),
-              ),
-              if (value != null) ...[
-                Text(
-                  'Value: ',
-                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.8)),
-                ),
-                Text(
-                  _fmtValue(value),
-                  style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.stream),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => _openSensorRules(s),
-              icon: const Icon(Icons.rule, size: 16),
-              label: Text('Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.foam,
-                side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -289,5 +247,33 @@ class _SensorsPageState extends State<SensorsPage> {
       return '$rounded%';
     }
     return '$value%';
+  }
+}
+
+class _StatusBadge extends StatelessWidget {
+  final bool online;
+  const _StatusBadge({required this.online});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = online ? AppColors.leaf : AppColors.mist;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(width: 5, height: 5, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
+          const SizedBox(width: 4),
+          Text(
+            online ? 'Online' : 'Offline',
+            style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+          ),
+        ],
+      ),
+    );
   }
 }

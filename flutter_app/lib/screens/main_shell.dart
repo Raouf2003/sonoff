@@ -20,17 +20,26 @@ class _MainShellState extends State<MainShell> {
   final _auth = AuthService();
 
   late final List<Widget> _pages = [
-    const DevicesPage(),
-    const SensorsPage(),
+    DevicesPage(onNavigateToTab: (i) => _switchTab(i)),
+    SensorsPage(onNavigateToTab: (i) => _switchTab(i)),
     const SchedulesPage(),
     const RulesPage(),
   ];
 
+  void _switchTab(int index) {
+    setState(() => _currentIndex = index);
+  }
+
   Future<void> _logout() async {
     await _auth.clear();
     if (mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      Navigator.of(context).pushAndRemoveUntil(
+        PageRouteBuilder(
+          pageBuilder: (_, _, _) => const LoginScreen(),
+          transitionsBuilder: (_, anim, _, child) => FadeTransition(opacity: anim, child: child),
+          transitionDuration: const Duration(milliseconds: 300),
+        ),
+        (route) => false,
       );
     }
   }
@@ -38,6 +47,7 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.well,
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -47,29 +57,65 @@ class _MainShellState extends State<MainShell> {
           ),
         ),
         child: SafeArea(
+          bottom: false,
           child: Column(
             children: [
               _buildHeader(),
-              Expanded(child: _pages[_currentIndex]),
+              const SizedBox(height: AppSpacing.sm),
+              Expanded(
+                child: IndexedStack(
+                  index: _currentIndex,
+                  children: _pages,
+                ),
+              ),
             ],
           ),
         ),
       ),
-      bottomNavigationBar: _BottomNav(
-        currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
+      bottomNavigationBar: NavigationBarTheme(
+        data: NavigationBarThemeData(
+          backgroundColor: AppColors.submerged,
+          surfaceTintColor: Colors.transparent,
+          height: 68,
+          labelTextStyle: WidgetStateProperty.resolveWith<TextStyle>((states) {
+            final active = states.contains(WidgetState.selected);
+            return GoogleFonts.inter(
+              fontSize: 11,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              color: active ? AppColors.stream : AppColors.mist.withValues(alpha: 0.7),
+            );
+          }),
+          iconTheme: WidgetStateProperty.resolveWith<IconThemeData>((states) {
+            final active = states.contains(WidgetState.selected);
+            return IconThemeData(
+              size: 24,
+              color: active ? AppColors.stream : AppColors.mist.withValues(alpha: 0.7),
+            );
+          }),
+          indicatorColor: AppColors.stream.withValues(alpha: 0.12),
+        ),
+        child: NavigationBar(
+          selectedIndex: _currentIndex,
+          onDestinationSelected: (i) => setState(() => _currentIndex = i),
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.water_drop_outlined), selectedIcon: Icon(Icons.water_drop), label: 'Devices'),
+            NavigationDestination(icon: Icon(Icons.sensors), label: 'Sensors'),
+            NavigationDestination(icon: Icon(Icons.schedule_outlined), selectedIcon: Icon(Icons.schedule), label: 'Schedules'),
+            NavigationDestination(icon: Icon(Icons.rule_outlined), selectedIcon: Icon(Icons.rule), label: 'Rules'),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 12, 6),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
       child: Row(
         children: [
           Container(
-            width: 32,
-            height: 32,
+            width: 34,
+            height: 34,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: const LinearGradient(
@@ -78,17 +124,14 @@ class _MainShellState extends State<MainShell> {
                 colors: [AppColors.stream, AppColors.leaf],
               ),
               boxShadow: [
-                BoxShadow(color: AppColors.stream.withValues(alpha: 0.3), blurRadius: 20, spreadRadius: 0),
+                BoxShadow(color: AppColors.stream.withValues(alpha: 0.3), blurRadius: 12),
               ],
             ),
             child: Center(
-              child: Text(
-                'S',
-                style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.well),
-              ),
+              child: Text('S', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.well)),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: AppSpacing.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -96,10 +139,8 @@ class _MainShellState extends State<MainShell> {
               children: [
                 Text(
                   'STEES',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.sora(
-                    fontSize: 17,
+                    fontSize: 18,
                     fontWeight: FontWeight.w700,
                     color: AppColors.foam,
                     letterSpacing: 2,
@@ -107,123 +148,25 @@ class _MainShellState extends State<MainShell> {
                 ),
                 Text(
                   'Smart Irrigation',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.inter(
-                    fontSize: 10,
-                    color: AppColors.mist,
+                    fontSize: 11,
+                    color: AppColors.mist.withValues(alpha: 0.7),
                     letterSpacing: 0.5,
                   ),
                 ),
               ],
             ),
           ),
-          IconButton(
-            onPressed: _logout,
-            icon: const Icon(Icons.logout_rounded, size: 20, color: AppColors.mist),
-            tooltip: 'Log out',
+          GestureDetector(
+            onTap: _logout,
+            child: Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.md)),
+              child: const Icon(Icons.logout_rounded, size: 20, color: AppColors.mist),
+            ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _BottomNav extends StatelessWidget {
-  final int currentIndex;
-  final ValueChanged<int> onTap;
-
-  const _BottomNav({required this.currentIndex, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.submerged,
-        border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.06), width: 0.5),
-        ),
-      ),
-      child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          child: Row(
-            children: [
-              _NavTab(
-                icon: Icons.water_drop_outlined,
-                label: 'Devices',
-                isActive: currentIndex == 0,
-                onTap: () => onTap(0),
-              ),
-              _NavTab(
-                icon: Icons.sensors,
-                label: 'Sensors',
-                isActive: currentIndex == 1,
-                onTap: () => onTap(1),
-              ),
-              _NavTab(
-                icon: Icons.schedule,
-                label: 'Schedules',
-                isActive: currentIndex == 2,
-                onTap: () => onTap(2),
-              ),
-              _NavTab(
-                icon: Icons.rule,
-                label: 'Rules',
-                isActive: currentIndex == 3,
-                onTap: () => onTap(3),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _NavTab extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isActive;
-  final VoidCallback onTap;
-
-  const _NavTab({
-    required this.icon,
-    required this.label,
-    required this.isActive,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = isActive ? AppColors.stream : AppColors.mist;
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            color: isActive ? AppColors.stream.withValues(alpha: 0.1) : Colors.transparent,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 22, color: color),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                style: GoogleFonts.inter(
-                  fontSize: 10,
-                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
-                  color: color,
-                ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

@@ -1,14 +1,16 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme.dart';
 import '../services/api_service.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
+import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
-import 'schedule_list_screen.dart';
 
 class DevicesPage extends StatefulWidget {
-  const DevicesPage({super.key});
+  final ValueChanged<int> onNavigateToTab;
+  const DevicesPage({super.key, required this.onNavigateToTab});
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -23,11 +25,30 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   io.Socket? _socket;
   bool _connected = false;
+  Timer? _statusTimer;
 
   final List<bool> channelStates = [false, false, false, false];
   final List<bool> _channelLoading = [false, false, false, false];
   final List<AnimationController> _rippleControllers = [];
   final List<AnimationController> _entranceControllers = [];
+
+  void _setConnected(bool connected) {
+    if (!mounted || _connected == connected) return;
+    setState(() => _connected = connected);
+  }
+
+  void _setChannelState(int index, bool newState, {bool applyRipple = true}) {
+    if (index < 0 || index >= _deviceChannels) return;
+    setState(() => channelStates[index] = newState);
+    if (applyRipple) {
+      if (newState) {
+        _rippleControllers[index].repeat(reverse: true);
+      } else {
+        _rippleControllers[index].stop();
+        _rippleControllers[index].reset();
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -36,15 +57,17 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
       _rippleControllers.add(AnimationController(vsync: this, duration: const Duration(milliseconds: 1500)));
       _entranceControllers.add(AnimationController(
         vsync: this,
-        duration: Duration(milliseconds: 500 + i * 120),
+        duration: Duration(milliseconds: 400 + i * 100),
       )..forward());
     }
     _loadDevices();
     _connectSocket();
+    _statusTimer = Timer.periodic(const Duration(seconds: 15), (_) => _fetchStatus());
   }
 
   @override
   void dispose() {
+    _statusTimer?.cancel();
     for (final c in _rippleControllers) { c.dispose(); }
     for (final c in _entranceControllers) { c.dispose(); }
     _socket?.disconnect();
@@ -81,11 +104,15 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
     _fetchStatus();
   }
 
-  String _deviceName(String deviceId) {
-    for (final d in _devices) {
-      if (d['deviceId'] == deviceId) return d['name'] as String? ?? deviceId;
+  Map<String, dynamic> _getDevice(String deviceId) {    return _devices.firstWhere((d) => d['deviceId'] == deviceId, orElse: () => _devices.first);
+  }
+
+  int get _activeCount {
+    var n = 0;
+    for (int i = 0; i < _deviceChannels; i++) {
+      if (channelStates[i]) n++;
     }
-    return deviceId;
+    return n;
   }
 
   void _connectSocket() {
@@ -95,9 +122,20 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
       'autoConnect': false,
     });
 
-    _socket?.onConnect((_) { if (mounted) setState(() => _connected = true); });
-    _socket?.onDisconnect((_) { if (mounted) setState(() => _connected = false); });
-    _socket?.onConnectError((_) { if (mounted) setState(() => _connected = false); });
+    _socket?.onConnect((_) {
+      if (mounted) setState(() { /* socket to backend is up, but device status determines the pill */ });
+    });
+    _socket?.onDisconnect((_) => _setConnected(false));
+    _socket?.onConnectError((_) => _setConnected(false));
+
+    _socket?.on('device_status', (data) {
+      if (!mounted) return;
+      final map = data as Map<String, dynamic>;
+      final deviceId = map['deviceId'] as String?;
+      if (deviceId != null && deviceId != _selectedDeviceId) return;
+      final online = map['online'] == true;
+      _setConnected(online);
+    });
 
     _socket?.on('device_update', (data) {
       if (!mounted) return;
@@ -108,14 +146,7 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
       final index = channel - 1;
       if (index < 0 || index >= _deviceChannels) return;
       final state = map['state'] as String;
-      final newState = state == 'ON';
-      setState(() => channelStates[index] = newState);
-      if (newState) {
-        _rippleControllers[index].repeat(reverse: true);
-      } else {
-        _rippleControllers[index].stop();
-        _rippleControllers[index].reset();
-      }
+      _setChannelState(index, state == 'ON');
     });
 
     _socket?.connect();
@@ -125,6 +156,7 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
     if (_selectedDeviceId == null) return;
     try {
       final data = await _api.getStatus(_selectedDeviceId!);
+      _setConnected(data['online'] == true);
       setState(() {
         for (int i = 0; i < _deviceChannels; i++) {
           final on = data['POWER${i + 1}'] == 'ON';
@@ -133,6 +165,7 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
         }
       });
     } catch (e) {
+      _setConnected(false);
       _showError('Failed to fetch status');
     }
   }
@@ -141,29 +174,17 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
     if (_selectedDeviceId == null) return;
     final index = channel - 1;
     final prev = channelStates[index];
-    setState(() {
-      channelStates[index] = targetState;
-      _channelLoading[index] = true;
-      if (targetState) {
-        _rippleControllers[index].repeat(reverse: true);
-      } else {
-        _rippleControllers[index].stop();
-        _rippleControllers[index].reset();
-      }
-    });
+    _setChannelState(index, targetState);
+    setState(() => _channelLoading[index] = true);
     try {
       await _api.control(_selectedDeviceId!, channel, targetState ? 'ON' : 'OFF');
     } catch (e) {
-      setState(() {
-        channelStates[index] = prev;
-        if (prev) {
-          _rippleControllers[index].repeat(reverse: true);
-        } else {
-          _rippleControllers[index].stop();
-          _rippleControllers[index].reset();
-        }
-      });
-      _showError(e.toString().replaceFirst('Exception: ', ''));
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      if (msg.toLowerCase().contains('not connected') || msg.toLowerCase().contains('offline') || msg.toLowerCase().contains('powered off')) {
+        _setConnected(false);
+      }
+      _setChannelState(index, prev);
+      _showError(msg);
     } finally {
       if (mounted) setState(() => _channelLoading[index] = false);
     }
@@ -176,8 +197,8 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
         content: Text(msg, style: const TextStyle(fontSize: 13)),
         backgroundColor: Colors.redAccent.shade200,
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+        margin: const EdgeInsets.all(AppSpacing.lg),
         duration: const Duration(seconds: 3),
       ),
     );
@@ -191,171 +212,238 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
   }
 
   void _openSchedules() {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const ScheduleListScreen()),
-    );
+    widget.onNavigateToTab(2);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream),
-        ),
-      );
-    }
-    return _devices.isEmpty ? _buildEmpty() : _buildDeviceView();
+    if (_loading) return const SteesLoading();
+    if (_devices.isEmpty) return _buildEmpty();
+    return _buildDeviceView();
   }
 
   Widget _buildEmpty() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.water_drop_outlined, size: 64, color: AppColors.mist.withValues(alpha: 0.3)),
-          const SizedBox(height: 16),
-          Text(
-            'No irrigation devices yet',
-            style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.mist),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Tap + to add your first controller',
-            style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist.withValues(alpha: 0.6)),
-          ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: _openAddDevice,
-            icon: const Icon(Icons.add, size: 18),
-            label: Text('Add Device', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.stream,
-              foregroundColor: AppColors.well,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-          ),
-        ],
+    return SteesEmpty(
+      icon: Icons.water_drop_outlined,
+      title: 'No devices yet',
+      subtitle: 'Claim a Sonoff controller to start\nmanaging your irrigation zones.',
+      action: FilledButton.icon(
+        onPressed: _openAddDevice,
+        icon: const Icon(Icons.add, size: 18),
+        label: Text('Add Device', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+        style: FilledButton.styleFrom(
+          backgroundColor: AppColors.stream,
+          foregroundColor: AppColors.well,
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+        ),
       ),
     );
   }
 
   Widget _buildDeviceView() {
-    return Column(
-      children: [
-        _buildDeviceHeader(),
-        _buildDeviceSelector(),
-        if (_devices.length <= 1)
-          const SizedBox(height: 8)
-        else
-          const SizedBox.shrink(),
-        Expanded(child: _buildRelayGrid()),
-        _buildBottomActions(),
-      ],
-    );
-  }
-
-  Widget _buildDeviceHeader() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 16, 4),
-      child: Row(
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'DEVICES',
-                  style: GoogleFonts.sora(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.8,
-                    color: AppColors.mist,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  _selectedDeviceId != null ? _deviceName(_selectedDeviceId!) : '',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam),
-                ),
-              ],
-            ),
-          ),
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _connected ? AppColors.stream : AppColors.mist.withValues(alpha: 0.3),
-            ),
-          ),
-          const SizedBox(width: 10),
-          IconButton(
-            onPressed: _openAddDevice,
-            icon: const Icon(Icons.add_circle_outline, size: 22, color: AppColors.stream),
-            tooltip: 'Add device',
-          ),
+          _buildPageTitle(),
+          _buildDeviceRow(),
+          const SizedBox(height: AppSpacing.lg),
+          _buildHeroCard(),
+          const SizedBox(height: AppSpacing.lg),
+          _buildGridHeader(),
+          const SizedBox(height: AppSpacing.md),
+          _buildRelayGrid(),
+          const SizedBox(height: AppSpacing.lg),
+          _buildBottomActions(),
         ],
       ),
     );
   }
 
-  Widget _buildDeviceSelector() {
-    if (_devices.length <= 1) return const SizedBox.shrink();
+  Widget _buildPageTitle() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
-      child: SizedBox(
-        height: 34,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          itemCount: _devices.length,
-          separatorBuilder: (_, _) => const SizedBox(width: 8),
-          itemBuilder: (_, i) {
-            final d = _devices[i];
-            final id = d['deviceId'] as String;
-            final name = d['name'] as String;
-            final selected = id == _selectedDeviceId;
-            return GestureDetector(
-              onTap: () => _selectDevice(id),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 250),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  color: selected ? AppColors.stream : Colors.transparent,
-                  border: Border.all(
-                    color: selected ? AppColors.stream : AppColors.mist.withValues(alpha: 0.2),
-                  ),
-                ),
-                child: Text(
-                  name,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: selected ? AppColors.well : AppColors.mist,
-                  ),
-                ),
-              ),
-            );
-          },
+      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
+      child: Text(
+        'DEVICES',
+        style: GoogleFonts.sora(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.8,
+          color: AppColors.mist,
         ),
+      ),
+    );
+  }
+
+  Widget _buildDeviceRow() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+      child: Row(
+        children: [
+          Expanded(child: _buildSelectorList()),
+          const SizedBox(width: AppSpacing.sm),
+          _buildAddButton(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectorList() {
+    if (_devices.length <= 1) return const SizedBox.shrink();
+    return SizedBox(
+      height: 38,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: _devices.length,
+        separatorBuilder: (_, _) => const SizedBox(width: AppSpacing.sm),
+        itemBuilder: (_, i) {
+          final d = _devices[i];
+          final id = d['deviceId'] as String;
+          final name = d['name'] as String;
+          final ch = d['channels'] as int? ?? 4;
+          final selected = id == _selectedDeviceId;
+          return GestureDetector(
+            onTap: () => _selectDevice(id),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadius.xl),
+                color: selected ? AppColors.surfaceLight : AppColors.surface,
+                border: Border.all(
+                  color: selected ? AppColors.stream.withValues(alpha: 0.6) : AppColors.border,
+                  width: selected ? 1.5 : 1,
+                ),
+                boxShadow: selected ? [BoxShadow(color: AppColors.stream.withValues(alpha: 0.15), blurRadius: 10)] : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.sensors, size: 14, color: selected ? AppColors.stream : AppColors.mist),
+                  const SizedBox(width: AppSpacing.xs + 2),
+                  Text(
+                    '$name · $ch',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: selected ? AppColors.foam : AppColors.mist,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildAddButton() {
+    return GestureDetector(
+      onTap: _openAddDevice,
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppColors.stream.withValues(alpha: 0.1),
+          border: Border.all(color: AppColors.stream.withValues(alpha: 0.4)),
+        ),
+        child: const Icon(Icons.add, size: 18, color: AppColors.stream),
+      ),
+    );
+  }
+
+  Widget _buildHeroCard() {
+    final device = _getDevice(_selectedDeviceId ?? _devices.first['deviceId'] as String);
+    final name = device['name'] as String? ?? _selectedDeviceId ?? '';
+    final channelsCount = device['channels'] as int? ?? _deviceChannels;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppRadius.xxl),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_connected ? AppColors.stream.withValues(alpha: 0.14) : AppColors.submerged, AppColors.surface],
+        ),
+        border: Border.all(color: _connected ? AppColors.stream.withValues(alpha: 0.25) : AppColors.border),
+        boxShadow: _connected ? AppShadows.glow : AppShadows.card,
+      ),
+      child: Row(
+        children: [
+          _HeroIcon(connected: _connected),
+          const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Text(
+                  '$channelsCount zones · $_activeCount flowing',
+                  style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.mist),
+                ),
+              ],
+            ),
+          ),
+          _StatusPill(connected: _connected),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGridHeader() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+      child: Row(
+        children: [
+          Text(
+            'ZONES',
+            style: GoogleFonts.sora(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.8,
+              color: AppColors.mist,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceLight,
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+            ),
+            child: Text(
+              '$_deviceChannels',
+              style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: AppColors.mist),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildRelayGrid() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
       child: GridView.count(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
         crossAxisCount: _deviceChannels == 1 ? 1 : 2,
-        mainAxisSpacing: 14,
-        crossAxisSpacing: 14,
-        childAspectRatio: _deviceChannels == 1 ? 1.0 : 0.85,
-        physics: const BouncingScrollPhysics(),
+        mainAxisSpacing: AppSpacing.lg,
+        crossAxisSpacing: AppSpacing.lg,
+        childAspectRatio: _deviceChannels == 1 ? 1.25 : 1.05,
         children: List.generate(
           _deviceChannels,
           (i) => _WaterCard(
@@ -375,7 +463,7 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   Widget _buildBottomActions() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.lg),
       child: SizedBox(
         width: double.infinity,
         height: 44,
@@ -385,10 +473,75 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
           label: Text('Schedules', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
           style: OutlinedButton.styleFrom(
             foregroundColor: AppColors.foam,
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            side: BorderSide(color: AppColors.stream.withValues(alpha: 0.35)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _HeroIcon extends StatelessWidget {
+  final bool connected;
+  const _HeroIcon({required this.connected});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 46,
+      height: 46,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: connected
+              ? [AppColors.stream.withValues(alpha: 0.25), AppColors.leaf.withValues(alpha: 0.05)]
+              : [AppColors.submerged, AppColors.surface],
+        ),
+        border: Border.all(color: connected ? AppColors.stream.withValues(alpha: 0.35) : AppColors.border),
+      ),
+      child: Icon(
+        connected ? Icons.water_drop : Icons.water_drop_outlined,
+        size: 22,
+        color: connected ? AppColors.stream : AppColors.mist,
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final bool connected;
+  const _StatusPill({required this.connected});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = connected ? AppColors.leaf : AppColors.mist;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color,
+              boxShadow: connected ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 5)] : null,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            connected ? 'Online' : 'Offline',
+            style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+          ),
+        ],
       ),
     );
   }
@@ -421,22 +574,16 @@ class _WaterCard extends AnimatedWidget {
 
   @override
   Widget build(BuildContext context) {
-    final anim = entrance;
-    final scale = Curves.easeOutBack.transform(anim.value);
-    final opacity = anim.value;
-
+    final scale = Curves.easeOutBack.transform(entrance.value);
     return Transform.scale(
       scale: scale,
-      child: Opacity(
-        opacity: opacity,
-        child: _WaterCardBody(
-          channel: channel,
-          config: config,
-          isOn: isOn,
-          loading: loading,
-          ripple: ripple,
-          onToggle: onToggle,
-        ),
+      child: _WaterCardBody(
+        channel: channel,
+        config: config,
+        isOn: isOn,
+        loading: loading,
+        ripple: ripple,
+        onToggle: onToggle,
       ),
     );
   }
@@ -464,43 +611,51 @@ class _WaterCardBody extends StatefulWidget {
 }
 
 class _WaterCardBodyState extends State<_WaterCardBody> with SingleTickerProviderStateMixin {
-  late AnimationController _hover;
+  late AnimationController _press;
 
   @override
   void initState() {
     super.initState();
-    _hover = AnimationController(vsync: this, duration: const Duration(milliseconds: 200));
+    _press = AnimationController(vsync: this, duration: const Duration(milliseconds: 120));
   }
 
   @override
-  void dispose() { _hover.dispose(); super.dispose(); }
+  void dispose() { _press.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
     final c = widget.config;
+    final isOn = widget.isOn;
 
-    return AnimatedBuilder(
-      animation: _hover,
-      builder: (_, child) => Transform.scale(scale: 1.0 + _hover.value * 0.02, child: child),
-      child: GestureDetector(
-        onTapDown: (_) => _hover.forward(),
-        onTapUp: (_) => _hover.reverse(),
-        onTapCancel: () => _hover.reverse(),
+    return GestureDetector(
+      onTapDown: (_) => _press.forward(),
+      onTapUp: (_) { _press.reverse(); widget.onToggle(!isOn); },
+      onTapCancel: () => _press.reverse(),
+      child: AnimatedScale(
+        scale: 1.0 - _press.value * 0.03,
+        duration: const Duration(milliseconds: 120),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 400),
+          duration: const Duration(milliseconds: 350),
           curve: Curves.easeInOut,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            color: widget.isOn ? c.color.withValues(alpha: 0.1) : AppColors.submerged,
+            borderRadius: BorderRadius.circular(AppRadius.xxl),
+            gradient: isOn
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [c.color.withValues(alpha: 0.12), c.color.withValues(alpha: 0.04)],
+                  )
+                : null,
+            color: isOn ? null : AppColors.surface,
             border: Border.all(
-              color: widget.isOn ? c.color.withValues(alpha: 0.35) : Colors.white.withValues(alpha: 0.06),
+              color: isOn ? c.color.withValues(alpha: 0.3) : AppColors.border,
               width: 1.5,
             ),
-            boxShadow: widget.isOn
-                ? [BoxShadow(color: c.color.withValues(alpha: 0.15), blurRadius: 24, spreadRadius: 0)]
-                : [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 10, offset: const Offset(0, 4))],
+            boxShadow: isOn
+                ? [BoxShadow(color: c.color.withValues(alpha: 0.12), blurRadius: 20, spreadRadius: -2)]
+                : AppShadows.card,
           ),
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -510,48 +665,39 @@ class _WaterCardBodyState extends State<_WaterCardBody> with SingleTickerProvide
                   Text(
                     c.subtitle,
                     style: GoogleFonts.inter(
-                      fontSize: 10,
+                      fontSize: 9,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 1.2,
-                      color: widget.isOn ? c.color.withValues(alpha: 0.8) : AppColors.mist.withValues(alpha: 0.6),
+                      color: isOn ? c.color.withValues(alpha: 0.8) : AppColors.mist.withValues(alpha: 0.5),
                     ),
                   ),
                   _DropletToggle(
-                    isOn: widget.isOn,
+                    isOn: isOn,
                     loading: widget.loading,
                     activeColor: c.color,
-                    onTap: () => widget.onToggle(!widget.isOn),
+                    onTap: () => widget.onToggle(!isOn),
                   ),
                 ],
               ),
               const Spacer(),
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
-                child: widget.isOn
-                    ? _WaterRippleIcon(icon: c.icon, color: c.color, ripple: widget.ripple)
-                    : Icon(c.icon, key: const ValueKey('off'), size: 34, color: AppColors.mist.withValues(alpha: 0.4)),
+                child: isOn
+                    ? _RippleIcon(icon: c.icon, color: c.color, ripple: widget.ripple)
+                    : Icon(c.icon, key: const ValueKey('off'), size: 24, color: AppColors.mist.withValues(alpha: 0.3)),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.sm),
               AnimatedDefaultTextStyle(
                 duration: const Duration(milliseconds: 300),
                 style: GoogleFonts.sora(
-                  fontSize: 14,
+                  fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: widget.isOn ? c.color : AppColors.foam,
+                  color: isOn ? c.color : AppColors.foam,
                 ),
                 child: Text(c.name, maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
-              const SizedBox(height: 2),
-              AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 300),
-                style: GoogleFonts.inter(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.2,
-                  color: widget.isOn ? c.color.withValues(alpha: 0.7) : AppColors.mist.withValues(alpha: 0.5),
-                ),
-                child: Text(widget.isOn ? 'FLOWING' : 'DRY'),
-              ),
+              const SizedBox(height: 4),
+              _FlowPill(isOn: isOn, color: c.color),
             ],
           ),
         ),
@@ -570,47 +716,34 @@ class _DropletToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final w = 44.0;
-    final h = 26.0;
-
     return GestureDetector(
       onTap: loading ? null : onTap,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
+        duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
-        width: w,
-        height: h,
+        width: 36,
+        height: 21,
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(h / 2),
-          color: isOn ? activeColor : Colors.white.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(11),
+          color: isOn ? activeColor : AppColors.surfaceLight,
+          boxShadow: isOn ? [BoxShadow(color: activeColor.withValues(alpha: 0.3), blurRadius: 8)] : null,
         ),
-        padding: const EdgeInsets.all(3),
+        padding: const EdgeInsets.all(2.5),
         child: AnimatedAlign(
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 250),
           curve: Curves.easeInOut,
           alignment: isOn ? Alignment.centerRight : Alignment.centerLeft,
           child: Container(
-            width: h - 6,
-            height: h - 6,
+            width: 16,
+            height: 16,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isOn ? AppColors.well : AppColors.mist.withValues(alpha: 0.6),
-              boxShadow: isOn
-                  ? [BoxShadow(color: activeColor.withValues(alpha: 0.4), blurRadius: 8)]
-                  : null,
+              color: isOn ? AppColors.well : AppColors.mist.withValues(alpha: 0.5),
             ),
             child: Center(
               child: loading
-                  ? SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: isOn ? activeColor : AppColors.mist),
-                    )
-                  : Icon(
-                      isOn ? Icons.water_drop : Icons.water_drop_outlined,
-                      size: 11,
-                      color: isOn ? activeColor : AppColors.well,
-                    ),
+                  ? SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.6, color: isOn ? activeColor : AppColors.mist))
+                  : Icon(isOn ? Icons.water_drop : Icons.water_drop_outlined, size: 9, color: isOn ? activeColor : AppColors.well),
             ),
           ),
         ),
@@ -619,16 +752,16 @@ class _DropletToggle extends StatelessWidget {
   }
 }
 
-class _WaterRippleIcon extends AnimatedWidget {
+class _RippleIcon extends AnimatedWidget {
   final IconData icon;
   final Color color;
-  const _WaterRippleIcon({required this.icon, required this.color, required AnimationController ripple})
+  const _RippleIcon({required this.icon, required this.color, required AnimationController ripple})
       : super(listenable: ripple);
 
   @override
   Widget build(BuildContext context) {
     final ctrl = listenable as AnimationController;
-    final scale = 1.0 + ctrl.value * 0.1;
+    final scale = 1.0 + ctrl.value * 0.08;
     final opacity = 0.6 + ctrl.value * 0.4;
     return Stack(
       alignment: Alignment.center,
@@ -637,19 +770,54 @@ class _WaterRippleIcon extends AnimatedWidget {
           Transform.scale(
             scale: 1.0 + ctrl.value * 0.4,
             child: Opacity(
-              opacity: (1.0 - ctrl.value) * 0.3,
+              opacity: (1.0 - ctrl.value) * 0.25,
               child: Container(
-                width: 46,
-                height: 46,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: color, width: 2)),
               ),
             ),
           ),
-        Transform.scale(
-          scale: scale,
-          child: Opacity(opacity: opacity, child: Icon(icon, size: 34, color: color)),
-        ),
+        Transform.scale(scale: scale, child: Opacity(opacity: opacity, child: Icon(icon, size: 24, color: color))),
       ],
+    );
+  }
+}
+
+class _FlowPill extends StatelessWidget {
+  final bool isOn;
+  final Color color;
+  const _FlowPill({required this.isOn, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = isOn ? color.withValues(alpha: 0.14) : AppColors.surfaceLight;
+    final fg = isOn ? color : AppColors.mist.withValues(alpha: 0.5);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: fg,
+              boxShadow: isOn ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 4)] : null,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isOn ? 'FLOWING' : 'DRY',
+            style: GoogleFonts.sora(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.8, color: fg),
+          ),
+        ],
+      ),
     );
   }
 }

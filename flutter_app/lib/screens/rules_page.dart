@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../widgets/stees_widgets.dart';
+import 'rule_form_screen.dart';
 import 'sensor_rules_screen.dart';
 
 class RulesPage extends StatefulWidget {
@@ -61,22 +63,16 @@ class _RulesPageState extends State<RulesPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.submerged,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
         title: Text('Delete rule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
         content: Text(
           '"${rule['name']}" will be removed permanently.',
           style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFFF7A7A))),
-          ),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.danger))),
         ],
       ),
     );
@@ -97,6 +93,115 @@ class _RulesPageState extends State<RulesPage> {
     ).then((_) => _load());
   }
 
+  void _addRule() {
+    if (_sensors.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('No sensors available. Add a sensor first.', style: TextStyle(fontSize: 13)),
+          backgroundColor: AppColors.danger,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+          margin: const EdgeInsets.all(AppSpacing.lg),
+        ),
+      );
+      return;
+    }
+    if (_sensors.length == 1) {
+      _openRuleForm(_sensors.first);
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xxl)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.lg),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppColors.mist.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              Text(
+                'Choose a sensor',
+                style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                'Rules control relays based on this sensor\'s readings.',
+                style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              ..._sensors.map(
+                (s) => Padding(
+                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                  child: SteesCard(
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      _openRuleForm(s);
+                    },
+                    child: Row(
+                      children: [
+                        SteesAvatar(icon: Icons.sensors, color: AppColors.stream),
+                        const SizedBox(width: AppSpacing.md),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                s['name'] as String? ?? s['sensorId'] as String,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.foam),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                s['sensorId'] as String,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.chevron_right_rounded, size: 20, color: AppColors.mist),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openRuleForm(Map<String, dynamic> sensor) async {
+    final sensorId = sensor['sensorId'] as String;
+    final created = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => RuleFormScreen(
+          sensorId: sensorId,
+          sensorName: sensor['name'] as String? ?? sensorId,
+        ),
+      ),
+    );
+    if (created == true) _load();
+  }
+
   List<int> _channelsOf(Map<String, dynamic> rule) {
     final raw = rule['channels'];
     List<int> chs;
@@ -114,55 +219,112 @@ class _RulesPageState extends State<RulesPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(
-        child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)),
-      );
-    }
+    if (_loading) return const SteesLoading();
     if (_rules.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: AppColors.stream.withValues(alpha: 0.08),
-                border: Border.all(color: AppColors.stream.withValues(alpha: 0.15)),
-              ),
-              child: Icon(Icons.rule_outlined, size: 36, color: AppColors.stream.withValues(alpha: 0.5)),
+      return Column(
+        children: [
+          _buildHeader(),
+          Expanded(
+            child: const SteesEmpty(
+              icon: Icons.rule_outlined,
+              title: 'No rules yet',
+              subtitle: 'Tap "Add Rule" to control a relay\nbased on a sensor\'s readings.',
             ),
-            const SizedBox(height: 20),
-            Text('No rules yet', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
-            const SizedBox(height: 8),
-            Text(
-              'Create rules from sensor details\nin the Sensors tab.',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist.withValues(alpha: 0.7)),
-            ),
-          ],
-        ),
+          ),
+        ],
       );
     }
-    return RefreshIndicator(
-      onRefresh: _load,
-      color: AppColors.stream,
-      child: ListView.builder(
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-        itemCount: _rules.length,
-        itemBuilder: (_, i) => _buildRuleCard(_rules[i]),
-      ),
+    return Column(
+      children: [
+        _buildHeader(),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: _load,
+            color: AppColors.stream,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+              padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.xxxl),
+              itemCount: _rules.length,
+              itemBuilder: (_, i) => Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.md),
+                child: _RuleCard(
+                  rule: _rules[i],
+                  sensorName: _sensorName(_rules[i]['sensorId'] as String? ?? ''),
+                  channelsOf: _channelsOf,
+                  onTap: () => _openRule(_rules[i]),
+                  onToggle: () => _toggleRule(_rules[i]),
+                  onDelete: () => _deleteRule(_rules[i]),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _buildRuleCard(Map<String, dynamic> rule) {
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
+      child: Row(
+        children: [
+          Text(
+            'RULES',
+            style: GoogleFonts.sora(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.8,
+              color: AppColors.mist,
+            ),
+          ),
+          const Spacer(),
+          FilledButton.icon(
+            onPressed: _addRule,
+            icon: const Icon(Icons.add, size: 16),
+            label: Text('Add Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.stream,
+              foregroundColor: AppColors.well,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 0),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RuleCard extends StatefulWidget {
+  final Map<String, dynamic> rule;
+  final String sensorName;
+  final List<int> Function(Map<String, dynamic>) channelsOf;
+  final VoidCallback onTap;
+  final VoidCallback onToggle;
+  final VoidCallback onDelete;
+
+  const _RuleCard({
+    required this.rule,
+    required this.sensorName,
+    required this.channelsOf,
+    required this.onTap,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  @override
+  State<_RuleCard> createState() => _RuleCardState();
+}
+
+class _RuleCardState extends State<_RuleCard> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final rule = widget.rule;
     final enabled = (rule['enabled'] as bool?) ?? false;
     final name = rule['name'] as String? ?? '';
-    final sensorId = rule['sensorId'] as String? ?? '';
-    final channels = _channelsOf(rule);
+    final channels = widget.channelsOf(rule);
     final chLabel = channels.map((c) => 'CH$c').join(' + ');
     final condition = (rule['condition'] as String?) ?? 'below';
     final action = (rule['action'] as String?) ?? 'ON';
@@ -174,134 +336,107 @@ class _RulesPageState extends State<RulesPage> {
         : threshold?.toString() ?? '...';
 
     return GestureDetector(
-      onTap: () => _openRule(rule),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: AppColors.submerged,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: enabled ? AppColors.leaf.withValues(alpha: 0.25) : Colors.white.withValues(alpha: 0.06),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: AppColors.sunlight.withValues(alpha: 0.12),
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) { setState(() => _pressed = false); widget.onTap(); },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.98 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: SteesCard(
+          active: enabled,
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  SteesAvatar(icon: Icons.rule, color: AppColors.sunlight),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Sensor: ${widget.sensorName}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist),
+                        ),
+                      ],
+                    ),
                   ),
-                  child: const Icon(Icons.rule, size: 18, color: AppColors.sunlight),
+                  SteesActiveTag(active: enabled),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              // Logic preview
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(AppSpacing.md),
+                decoration: BoxDecoration(
+                  color: AppColors.well.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  border: Border.all(color: AppColors.border),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
-                      ),
-                      Text(
-                        'Sensor: ${_sensorName(sensorId)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist),
-                      ),
-                    ],
-                  ),
-                ),
-                _ActiveTag(enabled: enabled),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _LogicPill(label: 'When $condWord $thresholdLabel', color: AppColors.stream),
-                    const SizedBox(height: 6),
-                    Icon(Icons.arrow_downward_rounded, size: 16, color: AppColors.mist.withValues(alpha: 0.4)),
+                    Row(
+                      children: [
+                        _LogicPill(label: 'When $condWord $thresholdLabel', color: AppColors.stream),
+                        const Spacer(),
+                        Icon(Icons.arrow_forward_rounded, size: 14, color: AppColors.mist.withValues(alpha: 0.4)),
+                        const Spacer(),
+                        _LogicPill(label: '$chLabel → $action', color: AppColors.leaf),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Row(
+                      children: [
+                        Icon(Icons.swap_horiz_rounded, size: 13, color: AppColors.mist.withValues(alpha: 0.4)),
+                        const SizedBox(width: AppSpacing.xs),
+                        Flexible(
+                          child: Text(
+                            'Otherwise → $chLabel → $opposite',
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.6)),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                _LogicPill(label: '$chLabel → $action', color: AppColors.leaf),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.swap_horiz_rounded, size: 13, color: AppColors.mist.withValues(alpha: 0.5)),
-                const SizedBox(width: 5),
-                Flexible(
-                  child: Text(
-                    'Else → $chLabel → $opposite',
-                    overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6)),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                  const SizedBox(width: AppSpacing.sm),
+                  Switch(
+                    value: enabled,
+                    onChanged: (_) => widget.onToggle(),
+                    activeTrackColor: AppColors.leaf,
+                    activeThumbColor: AppColors.well,
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                const SizedBox(width: 8),
-                Switch(
-                  value: enabled,
-                  onChanged: (_) => _toggleRule(rule),
-                  activeTrackColor: AppColors.leaf,
-                  activeThumbColor: AppColors.well,
-                ),
-                const SizedBox(width: 2),
-                IconButton(
-                  onPressed: () => _deleteRule(rule),
-                  icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
-                  tooltip: 'Delete',
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ActiveTag extends StatelessWidget {
-  final bool enabled;
-  const _ActiveTag({required this.enabled});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = enabled ? AppColors.leaf : AppColors.mist;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 5, height: 5, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
-          const SizedBox(width: 4),
-          Text(
-            enabled ? 'Active' : 'Off',
-            style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+                  const SizedBox(width: AppSpacing.xs),
+                  IconButton(
+                    onPressed: widget.onDelete,
+                    icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.danger),
+                    tooltip: 'Delete',
+                  ),
+                ],
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -315,14 +450,14 @@ class _LogicPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
       ),
       child: Text(
         label,
-        style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: color),
+        style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: color),
       ),
     );
   }

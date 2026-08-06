@@ -213,6 +213,9 @@ class MqttGateway {
       const up = payload.trim().toLowerCase() === 'online';
       this.runtimeState.ensureDeviceState(deviceId, channelCount);
       this.runtimeState.setOnline(deviceId, up);
+      if (this.io && this.deviceRegistry.isOwned(deviceId)) {
+        this.io.emit('device_status', { deviceId, online: up });
+      }
       return;
     }
 
@@ -252,6 +255,7 @@ class MqttGateway {
         for (const [ch, st] of Object.entries(channelUpdates)) {
           this.io.emit('device_update', { deviceId, channel: Number(ch), state: st });
         }
+        this.io.emit('device_status', { deviceId, online: true });
       }
     }
   }

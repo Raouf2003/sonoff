@@ -78,6 +78,7 @@ router.get('/status', async (req, res) => {
     for (let i = 1; i <= count; i++) {
       status[`POWER${i}`] = channels[i] || 'OFF';
     }
+    status.online = runtimeState.isOnline(deviceId);
     res.json(status);
   } catch (err) {
     console.error('Status error:', err);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../widgets/stees_widgets.dart';
 import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
 
@@ -97,13 +98,13 @@ class _SchedulesPageState extends State<SchedulesPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.submerged,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
         title: Text('Delete schedule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
         content: Text('"${schedule['name']}" will be removed.', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
         actions: [
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFFF7A7A)))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.danger))),
         ],
       ),
     );
@@ -116,7 +117,243 @@ class _SchedulesPageState extends State<SchedulesPage> {
     }
   }
 
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return const SteesLoading();
+    if (_devices.isEmpty) {
+      return const SteesEmpty(
+        icon: Icons.devices_other,
+        title: 'No devices yet',
+        subtitle: 'Claim a device to start scheduling.',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: AppColors.stream,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.xxxl),
+        itemCount: _devices.length,
+        itemBuilder: (_, i) => _DeviceSection(
+          device: _devices[i],
+          schedules: _schedulesOf(_devices[i]['deviceId'] as String),
+          onAdd: () => _add(_devices[i]['deviceId'] as String),
+          onEdit: _edit,
+          onToggle: _toggle,
+          onDelete: _delete,
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceSection extends StatelessWidget {
+  final Map<String, dynamic> device;
+  final List<Map<String, dynamic>> schedules;
+  final VoidCallback onAdd;
+  final void Function(Map<String, dynamic>) onEdit;
+  final void Function(Map<String, dynamic>) onToggle;
+  final void Function(Map<String, dynamic>) onDelete;
+
+  const _DeviceSection({
+    required this.device,
+    required this.schedules,
+    required this.onAdd,
+    required this.onEdit,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final channels = device['channels'] as int? ?? 4;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              SteesAvatar(icon: Icons.water_drop, color: AppColors.stream),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      device['name'] as String? ?? 'Device',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam),
+                    ),
+                    Text(
+                      'CH1–CH$channels',
+                      style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7)),
+                    ),
+                  ],
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: onAdd,
+                icon: const Icon(Icons.add, size: 16),
+                label: Text('Add', style: GoogleFonts.sora(fontSize: 12, fontWeight: FontWeight.w700)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.stream,
+                  foregroundColor: AppColors.well,
+                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          if (schedules.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
+              decoration: BoxDecoration(
+                color: AppColors.surface.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Text(
+                'No schedules for this device',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist.withValues(alpha: 0.6)),
+              ),
+            )
+          else
+            for (final (i, schedule) in schedules.indexed) ...[
+              _ScheduleTile(
+                schedule: schedule,
+                onEdit: () => onEdit(schedule),
+                onToggle: () => onToggle(schedule),
+                onDelete: () => onDelete(schedule),
+              ),
+              if (i < schedules.length - 1) const SizedBox(height: AppSpacing.sm),
+            ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleTile extends StatefulWidget {
+  final Map<String, dynamic> schedule;
+  final VoidCallback onEdit;
+  final VoidCallback onToggle;
+  final VoidCallback onDelete;
+
+  const _ScheduleTile({
+    required this.schedule,
+    required this.onEdit,
+    required this.onToggle,
+    required this.onDelete,
+  });
+
+  @override
+  State<_ScheduleTile> createState() => _ScheduleTileState();
+}
+
+class _ScheduleTileState extends State<_ScheduleTile> {
   static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.schedule;
+    final enabled = (s['enabled'] as bool?) ?? false;
+    final channels = (s['channels'] as List<dynamic>? ?? []).map((c) => 'CH$c').join(', ');
+    final windows = _scheduleWindows(s);
+
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) { setState(() => _pressed = false); widget.onEdit(); },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.98 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: SteesCard(
+          active: enabled,
+          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.sm),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  SteesAvatar(icon: Icons.schedule, color: AppColors.stream),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          s['name'] as String? ?? '',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Channels: $channels',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SteesActiveTag(active: enabled),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.md),
+              WindowTimeline(windows: windows, compact: true),
+              const SizedBox(height: AppSpacing.sm),
+              Row(
+                children: [
+                  Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
+                  const SizedBox(width: AppSpacing.xs),
+                  Expanded(
+                    child: Text(
+                      _recurrenceSummary(s),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                  const SizedBox(width: AppSpacing.sm),
+                  Switch(
+                    value: enabled,
+                    onChanged: (_) => widget.onToggle(),
+                    activeTrackColor: AppColors.leaf,
+                    activeThumbColor: AppColors.well,
+                  ),
+                  const SizedBox(width: AppSpacing.xs),
+                  IconButton(
+                    onPressed: widget.onEdit,
+                    icon: const Icon(Icons.edit_outlined, size: 18, color: AppColors.stream),
+                    tooltip: 'Edit',
+                  ),
+                  IconButton(
+                    onPressed: widget.onDelete,
+                    icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.danger),
+                    tooltip: 'Delete',
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   String _recurrenceSummary(Map<String, dynamic> schedule) {
     final recurrence = schedule['recurrence'] as Map<String, dynamic>? ?? {};
@@ -145,219 +382,5 @@ class _SchedulesPageState extends State<SchedulesPage> {
     final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
     if (m == null) return 0;
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(
-        child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)),
-      );
-    }
-    if (_devices.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.devices_other, size: 48, color: AppColors.mist.withValues(alpha: 0.3)),
-            const SizedBox(height: 12),
-            Text('No devices yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.mist)),
-            const SizedBox(height: 4),
-            Text('Claim a device to start scheduling', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6))),
-          ],
-        ),
-      );
-    }
-    return RefreshIndicator(
-      onRefresh: _load,
-      color: AppColors.stream,
-      child: ListView(
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-        children: [
-          for (final device in _devices)
-            _buildDeviceSection(device),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDeviceSection(Map<String, dynamic> device) {
-    final deviceId = device['deviceId'] as String;
-    final channels = device['channels'] as int? ?? 4;
-    final deviceSchedules = _schedulesOf(deviceId);
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(device['name'] as String? ?? 'Device', maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.foam)),
-                    const SizedBox(height: 2),
-                    Text('ID: $deviceId', maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                height: 40,
-                child: FilledButton.icon(
-                  onPressed: () => _add(deviceId),
-                  icon: const Icon(Icons.add, size: 17),
-                  label: Text('Add', style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700)),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.stream,
-                    foregroundColor: AppColors.well,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 2),
-          Text('CH1–CH$channels', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
-          const SizedBox(height: 12),
-          if (deviceSchedules.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-              decoration: BoxDecoration(
-                color: AppColors.submerged.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-              ),
-              child: Text('No schedules for this device', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
-            )
-          else
-            for (final (i, schedule) in deviceSchedules.indexed) ...[
-              _buildScheduleTile(schedule),
-              if (i < deviceSchedules.length - 1) const SizedBox(height: 10),
-            ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildScheduleTile(Map<String, dynamic> schedule) {
-    final enabled = (schedule['enabled'] as bool?) ?? false;
-    final channels = (schedule['channels'] as List<dynamic>? ?? []).map((c) => 'CH$c').join(', ');
-    final windows = _scheduleWindows(schedule);
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
-      decoration: BoxDecoration(
-        color: AppColors.submerged,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: enabled ? AppColors.leaf.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.06),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            onTap: () => _edit(schedule),
-            borderRadius: BorderRadius.circular(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(schedule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
-                    ),
-                    _ActiveTag(enabled: enabled),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Icon(Icons.tune, size: 12, color: AppColors.mist.withValues(alpha: 0.8)),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                WindowTimeline(windows: windows, compact: true),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
-                    const SizedBox(width: 5),
-                    Expanded(
-                      child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9))),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
-              const SizedBox(width: 8),
-              Switch(
-                value: enabled,
-                onChanged: (_) => _toggle(schedule),
-                activeTrackColor: AppColors.leaf,
-                activeThumbColor: AppColors.well,
-              ),
-              const SizedBox(width: 6),
-              IconButton(
-                onPressed: () => _edit(schedule),
-                icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
-                tooltip: 'Edit',
-              ),
-              IconButton(
-                onPressed: () => _delete(schedule),
-                icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
-                tooltip: 'Delete',
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActiveTag extends StatelessWidget {
-  final bool enabled;
-  const _ActiveTag({required this.enabled});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = enabled ? AppColors.leaf : AppColors.mist;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
-          const SizedBox(width: 5),
-          Text(enabled ? 'Active' : 'Off',
-            style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
-        ],
-      ),
-    );
   }
 }
