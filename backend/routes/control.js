@@ -39,14 +39,21 @@ router.post('/control', async (req, res) => {
       return res.status(503).json({ error: 'MQTT broker not connected' });
     }
 
+    let acked = false;
     try {
-      await mqttGateway.publishCommandNoWait(device.deviceId, channel, state.toUpperCase());
+      acked = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
     } catch (err) {
-      return res.status(502).json({ error: `Failed to publish command: ${err.message}` });
+      if (err.code === 'ACK_TIMEOUT') {
+        return res.status(504).json({ error: 'Device did not acknowledge the command' });
+      }
+      if (err.code === 'MQTT_DISCONNECTED' || /not connected|connection closed|connection reset/i.test(err.message || '')) {
+        return res.status(503).json({ error: 'MQTT broker not connected' });
+      }
+      return res.status(500).json({ error: `Failed to publish command: ${err.message}` });
     }
 
     const key = `POWER${channel}`;
-    res.json({ [key]: state.toUpperCase(), acked: null });
+    res.json({ [key]: state.toUpperCase(), acked });
   } catch (err) {
     console.error('Control error:', err);
     res.status(500).json({ error: 'Internal server error' });

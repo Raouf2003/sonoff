@@ -92,27 +92,50 @@ class MqttGateway {
     console.log('MQTT subscriptions (re)registered');
   }
 
+  // ACK-based command. Publishes to MQTT, registers a pending command, and
+  // resolves only when the matching stat/.../RESULT (or tele/STATE) ack
+  // arrives. Rejects on timeout, publish failure, or disconnect so callers
+  // never mistake a silent device for success.
   publishCommand(deviceId, channel, state) {
     return new Promise((resolve, reject) => {
       const c = this.client;
       if (!c || !c.connected) {
-        return reject(new Error('MQTT not connected'));
+        const err = new Error('MQTT not connected');
+        err.code = 'MQTT_DISCONNECTED';
+        return reject(err);
       }
       const topic = `cmnd/${deviceId}/POWER${channel}`;
       const key = `${deviceId}:${channel}`;
+      const expected = String(state).toUpperCase();
       const prev = this.pending.get(key);
       if (prev) clearTimeout(prev.timer);
 
       const timer = setTimeout(() => {
         this.pending.delete(key);
-        resolve(false);
+        const err = new Error(`ACK timeout waiting for ${deviceId} channel ${channel}`);
+        err.code = 'ACK_TIMEOUT';
+        console.log(`ACK timeout: ${deviceId} POWER${channel} (pending: ${this.pending.size})`);
+        reject(err);
       }, ACK_TIMEOUT_MS);
-      this.pending.set(key, { state: String(state).toUpperCase(), timer, resolve, reject });
 
-      c.publish(topic, String(state).toUpperCase(), { qos: 1, retain: false }, (err) => {
+      this.pending.set(key, {
+        deviceId,
+        channel,
+        state: expected,
+        timestamp: Date.now(),
+        timer,
+        resolve,
+        reject,
+      });
+
+      console.log(`MQTT command published: cmnd/${deviceId}/POWER${channel} = ${expected}`);
+      console.log(`Waiting for ACK... (pending: ${this.pending.size})`);
+
+      c.publish(topic, expected, { qos: 1, retain: false }, (err) => {
         if (err) {
           clearTimeout(timer);
           this.pending.delete(key);
+          console.error(`MQTT publish failed: ${deviceId} POWER${channel}: ${err.message}`);
           reject(err);
         }
       });
@@ -178,15 +201,20 @@ class MqttGateway {
     clearTimeout(p.timer);
     this.pending.delete(key);
     const acked = String(observed).toUpperCase() === p.state;
+    console.log(`ACK received: ${deviceId} POWER${channel} = ${observed} (expected ${p.state}, acked: ${acked})`);
+    console.log(`Pending commands: ${this.pending.size}`);
     if (p.resolve) p.resolve(acked);
   }
 
   _failPending(reason) {
+    const err = new Error(`MQTT ${reason}`);
+    err.code = 'MQTT_DISCONNECTED';
     for (const [key, p] of this.pending) {
       clearTimeout(p.timer);
       this.pending.delete(key);
-      if (p.reject) p.reject(new Error(`MQTT ${reason}`));
+      if (p.reject) p.reject(err);
     }
+    console.log(`Pending commands cleared (${reason}): ${this.pending.size}`);
   }
 
   _handle(topic, payload) {
