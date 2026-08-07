@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
@@ -96,17 +96,18 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
   }
 
   Future<void> _delete(Map<String, dynamic> schedule) async {
+    final colors = context.steesColors;
     final id = schedule['_id'] as String;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.submerged,
+        backgroundColor: colors.submerged,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Text('Delete schedule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        content: Text('"${schedule['name']}" will be removed.', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
+        title: Text('Delete schedule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text('"${schedule['name']}" will be removed.', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFFF7A7A)))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -121,10 +122,11 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200,
+        backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
@@ -135,22 +137,23 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Schedules', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        backgroundColor: AppColors.well,
-        iconTheme: const IconThemeData(color: AppColors.mist),
+        title: Text('Schedules', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        backgroundColor: colors.well,
+        iconTheme: IconThemeData(color: colors.mist),
       ),
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
           child: _loading
-              ? const Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)))
+              ? Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream)))
               : _devices.isEmpty
                   ? const _EmptyDevices()
                   : ListView(
@@ -196,6 +199,7 @@ class _DeviceSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final channels = device['channels'] as int? ?? 4;
     return Padding(
       padding: const EdgeInsets.only(bottom: 18),
@@ -209,10 +213,10 @@ class _DeviceSection extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(device['name'] as String? ?? 'Device', maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.foam)),
+                      style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: colors.foam)),
                     const SizedBox(height: 2),
                     Text('ID: ${device['deviceId']}', maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                      style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                   ],
                 ),
               ),
@@ -224,8 +228,8 @@ class _DeviceSection extends StatelessWidget {
                   icon: const Icon(Icons.add, size: 17),
                   label: Text('Add', style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700)),
                   style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.stream,
-                    foregroundColor: AppColors.well,
+                    backgroundColor: colors.stream,
+                    foregroundColor: colors.well,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
@@ -233,18 +237,18 @@ class _DeviceSection extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 2),
-          Text('CH1–CH$channels', style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+          Text('CH1–CH$channels', style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
           const SizedBox(height: 12),
           if (schedules.isEmpty)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
               decoration: BoxDecoration(
-                color: AppColors.submerged.withValues(alpha: 0.5),
+                color: colors.submerged.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                border: Border.all(color: colors.border),
               ),
-              child: Text('No schedules for this device', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
+              child: Text('No schedules for this device', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
             )
           else
             for (final (i, schedule) in schedules.indexed) ...[
@@ -282,6 +286,7 @@ class _ScheduleTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final enabled = (schedule['enabled'] as bool?) ?? false;
     final channels = (schedule['channels'] as List<dynamic>? ?? [])
         .map((c) => 'CH$c')
@@ -290,10 +295,10 @@ class _ScheduleTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
       decoration: BoxDecoration(
-        color: AppColors.submerged,
+        color: colors.submerged,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: enabled ? AppColors.leaf.withValues(alpha: 0.3) : Colors.white.withValues(alpha: 0.06),
+          color: enabled ? colors.leaf.withValues(alpha: 0.3) : colors.border,
         ),
       ),
       child: Column(
@@ -309,7 +314,7 @@ class _ScheduleTile extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(schedule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                        style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam)),
                     ),
                     _ActiveTag(enabled: enabled),
                   ],
@@ -317,11 +322,11 @@ class _ScheduleTile extends StatelessWidget {
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    Icon(Icons.tune, size: 12, color: AppColors.mist.withValues(alpha: 0.8)),
+                    Icon(Icons.tune, size: 12, color: colors.mist.withValues(alpha: 0.8)),
                     const SizedBox(width: 4),
                     Flexible(
                       child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                        style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                     ),
                   ],
                 ),
@@ -330,11 +335,11 @@ class _ScheduleTile extends StatelessWidget {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    Icon(Icons.event_repeat, size: 12, color: AppColors.sunlight),
+                    Icon(Icons.event_repeat, size: 12, color: colors.sunlight),
                     const SizedBox(width: 5),
                     Expanded(
                       child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.9))),
+                        style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.9))),
                     ),
                   ],
                 ),
@@ -345,23 +350,23 @@ class _ScheduleTile extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+              Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
               const SizedBox(width: 8),
               Switch(
                 value: enabled,
                 onChanged: (_) => onToggle(),
-                activeTrackColor: AppColors.leaf,
-                activeThumbColor: AppColors.well,
+                activeTrackColor: colors.leaf,
+                activeThumbColor: colors.well,
               ),
               const SizedBox(width: 6),
               IconButton(
                 onPressed: canEdit ? onEdit : null,
-                icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
+                icon: Icon(Icons.edit_outlined, size: 19, color: colors.stream),
                 tooltip: 'Edit',
               ),
               IconButton(
                 onPressed: onDelete,
-                icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
+                icon: Icon(Icons.delete_outline, size: 19, color: colors.danger),
                 tooltip: 'Delete',
               ),
             ],
@@ -406,15 +411,16 @@ class _EmptyDevices extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.devices_other, size: 48, color: AppColors.mist.withValues(alpha: 0.3)),
+          Icon(Icons.devices_other, size: 48, color: colors.mist.withValues(alpha: 0.3)),
           const SizedBox(height: 12),
-          Text('No devices yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.mist)),
+          Text('No devices yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: colors.mist)),
           const SizedBox(height: 4),
-          Text('Claim a device to start scheduling', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6))),
+          Text('Claim a device to start scheduling', style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6))),
         ],
       ),
     );
@@ -427,7 +433,8 @@ class _ActiveTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = enabled ? AppColors.leaf : AppColors.mist;
+    final colors = context.steesColors;
+    final color = enabled ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(

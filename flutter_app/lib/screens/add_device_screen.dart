@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/api_service.dart';
+import '../theme/app_theme.dart';
 
 class AddDeviceScreen extends StatefulWidget {
   const AddDeviceScreen({super.key});
@@ -37,9 +38,10 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200, behavior: SnackBarBehavior.floating,
+        backgroundColor: colors.danger, behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
       ),
@@ -48,17 +50,18 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Add Device', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFFF1F5F9))),
-        backgroundColor: const Color(0xFF0B1922),
-        iconTheme: const IconThemeData(color: Color(0xFF94A3B8)),
+        title: Text('Add Device', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        backgroundColor: colors.well,
+        iconTheme: IconThemeData(color: colors.mist),
       ),
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [Color(0xFF0B1922), Color(0xFF0F2332), Color(0xFF0B1922)],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
@@ -71,16 +74,16 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                 Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1A2D3D),
+                  color: colors.submerged,
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Column(
                   children: [
-                    Icon(Icons.water_drop_outlined, size: 40, color: const Color(0xFF2DD4BF).withValues(alpha: 0.5)),
+                    Icon(Icons.water_drop_outlined, size: 40, color: colors.stream.withValues(alpha: 0.5)),
                     const SizedBox(height: 12),
                     Text(
                       'Enter the Device ID from your Tasmota controller.',
-                      style: GoogleFonts.inter(fontSize: 13, color: const Color(0xFF94A3B8)),
+                      style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 24),
@@ -98,12 +101,12 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                       child: FilledButton(
                         onPressed: _loading ? null : _claim,
                         style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFF2DD4BF),
-                          foregroundColor: const Color(0xFF0B1922),
+                          backgroundColor: colors.stream,
+                          foregroundColor: colors.well,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                         ),
                         child: _loading
-                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF0B1922)))
+                            ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                             : Text('Claim Device', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                       ),
                     ),
@@ -126,12 +129,13 @@ class _DeviceTypePicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: Text('RELAY COUNT', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: const Color(0xFF94A3B8))),
+          child: Text('RELAY COUNT', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: colors.mist)),
         ),
         SegmentedButton<int>(
           segments: const [
@@ -140,11 +144,11 @@ class _DeviceTypePicker extends StatelessWidget {
           ],
           selected: {channels},
           style: SegmentedButton.styleFrom(
-            backgroundColor: const Color(0xFF0B1922),
-            selectedBackgroundColor: const Color(0xFF2DD4BF),
-            selectedForegroundColor: const Color(0xFF0B1922),
-            foregroundColor: const Color(0xFF94A3B8),
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            backgroundColor: colors.well,
+            selectedBackgroundColor: colors.stream,
+            selectedForegroundColor: colors.well,
+            foregroundColor: colors.mist,
+            side: BorderSide(color: colors.border),
             textStyle: GoogleFonts.inter(fontWeight: FontWeight.w700),
           ),
           onSelectionChanged: (s) => onChanged(s.first),
@@ -165,22 +169,23 @@ class _Field extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return TextField(
       controller: controller,
-      style: GoogleFonts.inter(fontSize: 14, color: const Color(0xFFF1F5F9)),
+      style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       textInputAction: next ? TextInputAction.next : TextInputAction.done,
       decoration: InputDecoration(
         hintText: hint,
         helperText: subtitle,
-        helperStyle: GoogleFonts.inter(fontSize: 11, color: const Color(0xFF94A3B8).withValues(alpha: 0.5)),
-        prefixIcon: Icon(icon, size: 18, color: const Color(0xFF94A3B8)),
+        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+        prefixIcon: Icon(icon, size: 18, color: colors.mist),
         filled: true,
-        fillColor: const Color(0xFF0B1922),
+        fillColor: colors.well,
         contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Color(0xFF2DD4BF), width: 1.5),
+          borderSide: BorderSide(color: colors.stream, width: 1.5),
         ),
       ),
     );

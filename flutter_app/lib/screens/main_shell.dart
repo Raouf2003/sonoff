@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 import '../services/auth_service.dart';
 import 'devices_page.dart';
 import 'sensors_page.dart';
@@ -9,7 +9,8 @@ import 'rules_page.dart';
 import 'login_screen.dart';
 
 class MainShell extends StatefulWidget {
-  const MainShell({super.key});
+  final dynamic themeController;
+  const MainShell({super.key, this.themeController});
 
   @override
   State<MainShell> createState() => _MainShellState();
@@ -44,16 +45,25 @@ class _MainShellState extends State<MainShell> {
     }
   }
 
+  void _openAppearance() {
+    final tc = widget.themeController;
+    if (tc == null) return;
+    setState(() {});
+    tc.toggle();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: AppColors.well,
+      backgroundColor: colors.well,
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+            colors: [colors.well, scheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
@@ -72,43 +82,21 @@ class _MainShellState extends State<MainShell> {
           ),
         ),
       ),
-      bottomNavigationBar: NavigationBarTheme(
-        data: NavigationBarThemeData(
-          backgroundColor: AppColors.submerged,
-          surfaceTintColor: Colors.transparent,
-          height: 68,
-          labelTextStyle: WidgetStateProperty.resolveWith<TextStyle>((states) {
-            final active = states.contains(WidgetState.selected);
-            return GoogleFonts.inter(
-              fontSize: 11,
-              fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-              color: active ? AppColors.stream : AppColors.mist.withValues(alpha: 0.7),
-            );
-          }),
-          iconTheme: WidgetStateProperty.resolveWith<IconThemeData>((states) {
-            final active = states.contains(WidgetState.selected);
-            return IconThemeData(
-              size: 24,
-              color: active ? AppColors.stream : AppColors.mist.withValues(alpha: 0.7),
-            );
-          }),
-          indicatorColor: AppColors.stream.withValues(alpha: 0.12),
-        ),
-        child: NavigationBar(
-          selectedIndex: _currentIndex,
-          onDestinationSelected: (i) => setState(() => _currentIndex = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.water_drop_outlined), selectedIcon: Icon(Icons.water_drop), label: 'Devices'),
-            NavigationDestination(icon: Icon(Icons.sensors), label: 'Sensors'),
-            NavigationDestination(icon: Icon(Icons.schedule_outlined), selectedIcon: Icon(Icons.schedule), label: 'Schedules'),
-            NavigationDestination(icon: Icon(Icons.rule_outlined), selectedIcon: Icon(Icons.rule), label: 'Rules'),
-          ],
-        ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (i) => setState(() => _currentIndex = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.water_drop_outlined), selectedIcon: Icon(Icons.water_drop), label: 'Devices'),
+          NavigationDestination(icon: Icon(Icons.sensors), label: 'Sensors'),
+          NavigationDestination(icon: Icon(Icons.schedule_outlined), selectedIcon: Icon(Icons.schedule), label: 'Schedules'),
+          NavigationDestination(icon: Icon(Icons.rule_outlined), selectedIcon: Icon(Icons.rule), label: 'Rules'),
+        ],
       ),
     );
   }
 
   Widget _buildHeader() {
+    final colors = context.steesColors;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
       child: Row(
@@ -118,17 +106,17 @@ class _MainShellState extends State<MainShell> {
             height: 34,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: const LinearGradient(
+              gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [AppColors.stream, AppColors.leaf],
+                colors: [colors.stream, colors.leaf],
               ),
               boxShadow: [
-                BoxShadow(color: AppColors.stream.withValues(alpha: 0.3), blurRadius: 12),
+                BoxShadow(color: colors.stream.withValues(alpha: 0.3), blurRadius: 12),
               ],
             ),
             child: Center(
-              child: Text('S', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.well)),
+              child: Text('S', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: colors.well)),
             ),
           ),
           const SizedBox(width: AppSpacing.md),
@@ -142,7 +130,7 @@ class _MainShellState extends State<MainShell> {
                   style: GoogleFonts.sora(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color: AppColors.foam,
+                    color: colors.foam,
                     letterSpacing: 2,
                   ),
                 ),
@@ -150,21 +138,32 @@ class _MainShellState extends State<MainShell> {
                   'Smart Irrigation',
                   style: GoogleFonts.inter(
                     fontSize: 11,
-                    color: AppColors.mist.withValues(alpha: 0.7),
+                    color: colors.mist.withValues(alpha: 0.7),
                     letterSpacing: 0.5,
                   ),
                 ),
               ],
             ),
           ),
-          GestureDetector(
-            onTap: _logout,
-            child: Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.md)),
-              child: const Icon(Icons.logout_rounded, size: 20, color: AppColors.mist),
+          IconButton(
+            onPressed: _openAppearance,
+            icon: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
+              child: Icon(
+                Theme.of(context).brightness == Brightness.dark
+                    ? Icons.light_mode_outlined
+                    : Icons.dark_mode_outlined,
+                key: ValueKey(Theme.of(context).brightness),
+                size: 20,
+              ),
             ),
+            tooltip: 'Toggle theme',
+          ),
+          IconButton(
+            onPressed: _logout,
+            icon: const Icon(Icons.logout_rounded, size: 20),
+            tooltip: 'Logout',
           ),
         ],
       ),

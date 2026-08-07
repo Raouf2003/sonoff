@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
 import 'add_sensor_screen.dart';
@@ -76,8 +76,8 @@ class _SensorsPageState extends State<SensorsPage> {
         icon: const Icon(Icons.add, size: 18),
         label: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
         style: FilledButton.styleFrom(
-          backgroundColor: AppColors.stream,
-          foregroundColor: AppColors.well,
+          backgroundColor: context.steesColors.stream,
+          foregroundColor: context.steesColors.well,
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
         ),
@@ -97,7 +97,7 @@ class _SensorsPageState extends State<SensorsPage> {
         Expanded(
           child: RefreshIndicator(
             onRefresh: _load,
-            color: AppColors.stream,
+            color: context.steesColors.stream,
             child: ListView.builder(
               physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
               padding: const EdgeInsets.fromLTRB(AppSpacing.xl, 0, AppSpacing.xl, AppSpacing.xxxl),
@@ -124,21 +124,22 @@ class _AddButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         decoration: BoxDecoration(
-          color: AppColors.stream.withValues(alpha: 0.1),
+          color: colors.stream.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(AppRadius.md),
-          border: Border.all(color: AppColors.stream.withValues(alpha: 0.2)),
+          border: Border.all(color: colors.stream.withValues(alpha: 0.2)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.add, size: 14, color: AppColors.stream),
+            Icon(Icons.add, size: 14, color: colors.stream),
             const SizedBox(width: AppSpacing.xs),
-            Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.stream)),
+            Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: colors.stream)),
           ],
         ),
       ),
@@ -162,6 +163,7 @@ class _SensorCardState extends State<_SensorCard> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final s = widget.sensor;
     final id = s['sensorId'] as String? ?? '';
     final name = s['name'] as String? ?? id;
@@ -183,7 +185,7 @@ class _SensorCardState extends State<_SensorCard> {
             children: [
               Row(
                 children: [
-                  SteesAvatar(icon: Icons.agriculture, color: AppColors.leaf),
+                  SteesAvatar(icon: Icons.agriculture, color: colors.leaf),
                   const SizedBox(width: AppSpacing.md),
                   Expanded(
                     child: Column(
@@ -193,14 +195,14 @@ class _SensorCardState extends State<_SensorCard> {
                           name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam),
+                          style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
                         ),
                         const SizedBox(height: 2),
                         Text(
                           'ID: $id',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7)),
+                          style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
                         ),
                       ],
                     ),
@@ -215,7 +217,7 @@ class _SensorCardState extends State<_SensorCard> {
                 value: value != null
                     ? Text(
                         _fmtValue(value),
-                        style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.stream),
+                        style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: colors.stream),
                       )
                     : null,
               ),
@@ -227,8 +229,8 @@ class _SensorCardState extends State<_SensorCard> {
                   icon: const Icon(Icons.rule, size: 15),
                   label: Text('Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.foam,
-                    side: BorderSide(color: AppColors.border),
+                    foregroundColor: colors.foam,
+                    side: BorderSide(color: colors.border),
                     padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm + 2),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
                   ),
@@ -256,7 +258,8 @@ class _StatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = online ? AppColors.leaf : AppColors.mist;
+    final colors = context.steesColors;
+    final color = online ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(

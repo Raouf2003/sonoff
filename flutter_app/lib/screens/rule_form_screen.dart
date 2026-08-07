@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 
 class RuleFormScreen extends StatefulWidget {
@@ -113,10 +113,11 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200,
+        backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
@@ -127,17 +128,18 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEdit ? 'Edit Rule' : 'New Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        backgroundColor: AppColors.well,
-        iconTheme: const IconThemeData(color: AppColors.mist),
+        title: Text(_isEdit ? 'Edit Rule' : 'New Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        backgroundColor: colors.well,
+        iconTheme: IconThemeData(color: colors.mist),
       ),
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
@@ -154,7 +156,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                   eyebrow: 'IDENTITY',
                   child: TextField(
                     controller: _nameCtl,
-                    style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+                    style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                     textInputAction: TextInputAction.next,
                     decoration: _inputDec('Rule name', 'e.g. Auto-water when dry', Icons.label_outline),
                   ),
@@ -170,7 +172,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                     children: [for (int i = 1; i <= widget.maxChannel; i++) _ChannelChip(
                       label: 'CH$i',
                       selected: _channels.contains(i),
-                      color: AppColors.stream,
+                      color: colors.stream,
                       onTap: () {
                         setState(() {
                           if (_channels.contains(i)) {
@@ -198,11 +200,11 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                         ],
                         selected: {_condition},
                         style: SegmentedButton.styleFrom(
-                          backgroundColor: AppColors.well,
-                          selectedBackgroundColor: AppColors.stream,
-                          selectedForegroundColor: AppColors.well,
-                          foregroundColor: AppColors.mist,
-                          side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+                          backgroundColor: colors.well,
+                          selectedBackgroundColor: colors.stream,
+                          selectedForegroundColor: colors.well,
+                          foregroundColor: colors.mist,
+                          side: BorderSide(color: colors.border),
                         ),
                         onSelectionChanged: (s) => setState(() => _condition = s.first),
                       ),
@@ -210,7 +212,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                       TextField(
                         controller: _thresholdCtl,
                         keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+                        style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                         onChanged: (_) => setState(() {}),
                         decoration: _inputDec('Threshold value', 'e.g. 30', Icons.pin_outlined),
                       ),
@@ -229,11 +231,11 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                     ],
                     selected: {_action},
                     style: SegmentedButton.styleFrom(
-                      backgroundColor: AppColors.well,
-                      selectedBackgroundColor: _action == 'ON' ? AppColors.leaf : AppColors.sunlight,
-                      selectedForegroundColor: AppColors.well,
-                      foregroundColor: AppColors.mist,
-                      side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+                      backgroundColor: colors.well,
+                      selectedBackgroundColor: _action == 'ON' ? colors.leaf : colors.sunlight,
+                      selectedForegroundColor: colors.well,
+                      foregroundColor: colors.mist,
+                      side: BorderSide(color: colors.border),
                     ),
                     onSelectionChanged: (s) => setState(() => _action = s.first),
                   ),
@@ -255,13 +257,13 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                   child: FilledButton(
                     onPressed: _saving ? null : _save,
                     style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.stream,
-                      foregroundColor: AppColors.well,
+                      backgroundColor: colors.stream,
+                      foregroundColor: colors.well,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                       elevation: 0,
                     ),
                     child: _saving
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
+                        ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                         : Text(_isEdit ? 'Save Changes' : 'Create Rule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                   ),
                 ),
@@ -274,19 +276,20 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   }
 
   InputDecoration _inputDec(String hint, String helper, IconData icon) {
+    final colors = context.steesColors;
     return InputDecoration(
       hintText: hint,
       helperText: helper,
-      helperStyle: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.5)),
-      hintStyle: GoogleFonts.inter(fontSize: 14, color: AppColors.mist.withValues(alpha: 0.6)),
-      prefixIcon: Icon(icon, size: 18, color: AppColors.mist),
+      helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+      hintStyle: GoogleFonts.inter(fontSize: 14, color: colors.mist.withValues(alpha: 0.6)),
+      prefixIcon: Icon(icon, size: 18, color: colors.mist),
       filled: true,
-      fillColor: AppColors.well,
+      fillColor: colors.well,
       contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.stream, width: 1.5),
+        borderSide: BorderSide(color: colors.stream, width: 1.5),
       ),
     );
   }
@@ -303,13 +306,14 @@ class _SensorBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: AppColors.stream.withValues(alpha: 0.08),
+        color: colors.stream.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+        border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
       ),
       child: Row(
         children: [
@@ -317,9 +321,9 @@ class _SensorBanner extends StatelessWidget {
             width: 38, height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppColors.stream.withValues(alpha: 0.15),
+              color: colors.stream.withValues(alpha: 0.15),
             ),
-            child: const Icon(Icons.sensors, size: 20, color: AppColors.stream),
+            child: Icon(Icons.sensors, size: 20, color: colors.stream),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -327,10 +331,10 @@ class _SensorBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(sensorName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam)),
                 const SizedBox(height: 2),
                 Text(sensorId, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist)),
+                  style: GoogleFonts.inter(fontSize: 11, color: colors.mist)),
               ],
             ),
           ),
@@ -352,29 +356,30 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.submerged,
+        color: colors.submerged,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Container(width: 20, height: 2, decoration: BoxDecoration(color: AppColors.stream, borderRadius: BorderRadius.circular(2))),
+              Container(width: 20, height: 2, decoration: BoxDecoration(color: colors.stream, borderRadius: BorderRadius.circular(2))),
               const SizedBox(width: 8),
-              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: AppColors.stream)),
+              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
             ],
           ),
           if (description != null) ...[
             const SizedBox(height: 4),
             Padding(
               padding: const EdgeInsets.only(left: 28),
-              child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+              child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
             ),
           ],
           const SizedBox(height: 14),
@@ -398,6 +403,7 @@ class _ChannelChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -405,17 +411,17 @@ class _ChannelChip extends StatelessWidget {
         duration: const Duration(milliseconds: 160),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
-          color: selected ? color : AppColors.well,
+          color: selected ? color : colors.well,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected ? color : Colors.white.withValues(alpha: 0.1),
+            color: selected ? color : colors.border,
             width: selected ? 0 : 1,
           ),
           boxShadow: selected ? [BoxShadow(color: color.withValues(alpha: 0.3), blurRadius: 8)] : null,
         ),
         child: Text(
           label,
-          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? AppColors.well : AppColors.foam),
+          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? colors.well : colors.foam),
         ),
       ),
     );
@@ -442,27 +448,28 @@ class _LogicPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final chLabel = channels.map((c) => 'CH$c').join(' + ');
     final condWord = condition == 'above' ? 'above' : 'below';
-    final actionColor = action == 'ON' ? AppColors.leaf : AppColors.sunlight;
-    final oppositeColor = opposite == 'ON' ? AppColors.leaf : AppColors.sunlight;
+    final actionColor = action == 'ON' ? colors.leaf : colors.sunlight;
+    final oppositeColor = opposite == 'ON' ? colors.leaf : colors.sunlight;
 
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.submerged,
+        color: colors.submerged,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.stream.withValues(alpha: 0.2)),
+        border: Border.all(color: colors.stream.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.preview, size: 16, color: AppColors.stream.withValues(alpha: 0.7)),
+              Icon(Icons.preview, size: 16, color: colors.stream.withValues(alpha: 0.7)),
               const SizedBox(width: 6),
-              Text('LOGIC', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: AppColors.stream)),
+              Text('LOGIC', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
             ],
           ),
           const SizedBox(height: 14),
@@ -494,6 +501,7 @@ class _LogicRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Row(
       children: [
         Icon(icon, size: 16, color: color),
@@ -502,7 +510,7 @@ class _LogicRow extends StatelessWidget {
           child: RichText(
             text: TextSpan(
               children: [
-                TextSpan(text: '$label  ', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                TextSpan(text: '$label  ', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: colors.foam)),
                 TextSpan(text: detail, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
               ],
             ),

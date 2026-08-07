@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/auth_service.dart';
 import '../services/api_service.dart';
+import '../theme/app_theme.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -46,9 +47,10 @@ class _SignupScreenState extends State<SignupScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200, behavior: SnackBarBehavior.floating,
+        backgroundColor: colors.danger, behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
       ),
@@ -57,12 +59,13 @@ class _SignupScreenState extends State<SignupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [Color(0xFF0B1922), Color(0xFF0F2332), Color(0xFF0B1922)],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
@@ -72,9 +75,9 @@ class _SignupScreenState extends State<SignupScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('Create Account', style: GoogleFonts.sora(fontSize: 24, fontWeight: FontWeight.w700, color: const Color(0xFFF1F5F9))),
+                  Text('Create Account', style: GoogleFonts.sora(fontSize: 24, fontWeight: FontWeight.w700, color: colors.foam)),
                   const SizedBox(height: 6),
-                  Text('Join STEES', style: GoogleFonts.inter(fontSize: 13, color: const Color(0xFF94A3B8))),
+                  Text('Join STEES', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
                   const SizedBox(height: 36),
                   _Field(controller: _usernameCtl, hint: 'Username', icon: Icons.person_outline, next: true),
                   const SizedBox(height: 14),
@@ -83,7 +86,7 @@ class _SignupScreenState extends State<SignupScreen> {
                   _Field(
                     controller: _confirmCtl, hint: 'Confirm Password', icon: Icons.lock_outline, obscure: _obscure,
                     suffix: IconButton(
-                      icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18, color: const Color(0xFF94A3B8)),
+                      icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18, color: colors.mist),
                       onPressed: () => setState(() => _obscure = !_obscure),
                     ),
                     onSubmit: () => _signup(),
@@ -94,12 +97,12 @@ class _SignupScreenState extends State<SignupScreen> {
                     child: FilledButton(
                       onPressed: _loading ? null : _signup,
                       style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF2DD4BF),
-                        foregroundColor: const Color(0xFF0B1922),
+                        backgroundColor: colors.stream,
+                        foregroundColor: colors.well,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                       ),
                       child: _loading
-                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF0B1922)))
+                          ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                           : Text('Create Account', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                     ),
                   ),
@@ -109,8 +112,8 @@ class _SignupScreenState extends State<SignupScreen> {
                     child: RichText(
                       text: TextSpan(
                         text: 'Already have an account?  ',
-                        style: GoogleFonts.inter(fontSize: 13, color: const Color(0xFF94A3B8)),
-                        children: const [TextSpan(text: 'Sign In', style: TextStyle(color: Color(0xFF2DD4BF), fontWeight: FontWeight.w600))],
+                        style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+                        children: [TextSpan(text: 'Sign In', style: TextStyle(color: colors.stream, fontWeight: FontWeight.w600))],
                       ),
                     ),
                   ),
@@ -137,24 +140,25 @@ class _Field extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return TextField(
       controller: controller,
       obscureText: obscure,
-      style: GoogleFonts.inter(fontSize: 14, color: const Color(0xFFF1F5F9)),
+      style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       textInputAction: next ? TextInputAction.next : TextInputAction.done,
       onSubmitted: (_) => onSubmit?.call(),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: GoogleFonts.inter(fontSize: 14, color: const Color(0xFF94A3B8).withValues(alpha: 0.6)),
-        prefixIcon: Icon(icon, size: 18, color: const Color(0xFF94A3B8)),
+        hintStyle: GoogleFonts.inter(fontSize: 14, color: colors.mist.withValues(alpha: 0.6)),
+        prefixIcon: Icon(icon, size: 18, color: colors.mist),
         suffixIcon: suffix,
         filled: true,
-        fillColor: const Color(0xFF1A2D3D),
+        fillColor: colors.submerged,
         contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Color(0xFF2DD4BF), width: 1.5),
+          borderSide: BorderSide(color: colors.stream, width: 1.5),
         ),
       ),
     );

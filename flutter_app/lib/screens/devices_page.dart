@@ -2,7 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
-import '../theme.dart';
+import '../theme/app_theme.dart';
+import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
@@ -233,10 +234,11 @@ class _DevicesPageState extends State<DevicesPage>
 
   void _showError(String msg) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200,
+        backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -261,11 +263,11 @@ class _DevicesPageState extends State<DevicesPage>
   @override
   Widget build(BuildContext context) {
     if (_loading) return const SteesLoading();
-    if (_devices.isEmpty) return _buildEmpty();
-    return _buildDeviceView();
+    if (_devices.isEmpty) return _buildEmpty(context.steesColors);
+    return _buildDeviceView(context.steesColors);
   }
 
-  Widget _buildEmpty() {
+  Widget _buildEmpty(SteesColors colors) {
     return SteesEmpty(
       icon: Icons.water_drop_outlined,
       title: 'No devices yet',
@@ -279,8 +281,8 @@ class _DevicesPageState extends State<DevicesPage>
           style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
         ),
         style: FilledButton.styleFrom(
-          backgroundColor: AppColors.stream,
-          foregroundColor: AppColors.well,
+          backgroundColor: colors.stream,
+          foregroundColor: colors.well,
           padding: const EdgeInsets.symmetric(
             horizontal: AppSpacing.xl,
             vertical: AppSpacing.md,
@@ -293,29 +295,29 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 
-  Widget _buildDeviceView() {
+  Widget _buildDeviceView(SteesColors colors) {
     return SingleChildScrollView(
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AppSpacing.xl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildPageTitle(),
-          _buildDeviceRow(),
+          _buildPageTitle(colors),
+          _buildDeviceRow(colors),
           const SizedBox(height: AppSpacing.lg),
-          _buildHeroCard(),
+          _buildHeroCard(colors),
           const SizedBox(height: AppSpacing.lg),
-          _buildGridHeader(),
+          _buildGridHeader(colors),
           const SizedBox(height: AppSpacing.md),
           _buildRelayGrid(),
           const SizedBox(height: AppSpacing.lg),
-          _buildBottomActions(),
+          _buildBottomActions(colors),
         ],
       ),
     );
   }
 
-  Widget _buildPageTitle() {
+  Widget _buildPageTitle(SteesColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AppSpacing.xl,
@@ -329,26 +331,26 @@ class _DevicesPageState extends State<DevicesPage>
           fontSize: 11,
           fontWeight: FontWeight.w700,
           letterSpacing: 1.8,
-          color: AppColors.mist,
+          color: colors.mist,
         ),
       ),
     );
   }
 
-  Widget _buildDeviceRow() {
+  Widget _buildDeviceRow(SteesColors colors) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
       child: Row(
         children: [
-          Expanded(child: _buildSelectorList()),
+          Expanded(child: _buildSelectorList(colors)),
           const SizedBox(width: AppSpacing.sm),
-          _buildAddButton(),
+          _buildAddButton(colors),
         ],
       ),
     );
   }
 
-  Widget _buildSelectorList() {
+  Widget _buildSelectorList(SteesColors colors) {
     if (_devices.length <= 1) return const SizedBox.shrink();
     return SizedBox(
       height: 38,
@@ -370,17 +372,17 @@ class _DevicesPageState extends State<DevicesPage>
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(AppRadius.xl),
-                color: selected ? AppColors.surfaceLight : AppColors.surface,
+                color: selected ? colors.surfaceLight : colors.surface,
                 border: Border.all(
                   color: selected
-                      ? AppColors.stream.withValues(alpha: 0.6)
-                      : AppColors.border,
+                      ? colors.stream.withValues(alpha: 0.6)
+                      : colors.border,
                   width: selected ? 1.5 : 1,
                 ),
                 boxShadow: selected
                     ? [
                         BoxShadow(
-                          color: AppColors.stream.withValues(alpha: 0.15),
+                          color: colors.stream.withValues(alpha: 0.15),
                           blurRadius: 10,
                         ),
                       ]
@@ -392,7 +394,7 @@ class _DevicesPageState extends State<DevicesPage>
                   Icon(
                     Icons.sensors,
                     size: 14,
-                    color: selected ? AppColors.stream : AppColors.mist,
+                    color: selected ? colors.stream : colors.mist,
                   ),
                   const SizedBox(width: AppSpacing.xs + 2),
                   Text(
@@ -400,7 +402,7 @@ class _DevicesPageState extends State<DevicesPage>
                     style: GoogleFonts.inter(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
-                      color: selected ? AppColors.foam : AppColors.mist,
+                      color: selected ? colors.foam : colors.mist,
                     ),
                   ),
                 ],
@@ -412,7 +414,7 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 
-  Widget _buildAddButton() {
+  Widget _buildAddButton(SteesColors colors) {
     return GestureDetector(
       onTap: _openAddDevice,
       child: Container(
@@ -420,15 +422,15 @@ class _DevicesPageState extends State<DevicesPage>
         height: 38,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: AppColors.stream.withValues(alpha: 0.1),
-          border: Border.all(color: AppColors.stream.withValues(alpha: 0.4)),
+          color: colors.stream.withValues(alpha: 0.1),
+          border: Border.all(color: colors.stream.withValues(alpha: 0.4)),
         ),
-        child: const Icon(Icons.add, size: 18, color: AppColors.stream),
+        child: Icon(Icons.add, size: 18, color: colors.stream),
       ),
     );
   }
 
-  Widget _buildHeroCard() {
+  Widget _buildHeroCard(SteesColors colors) {
     final device = _getDevice(
       _selectedDeviceId ?? _devices.first['deviceId'] as String,
     );
@@ -443,18 +445,18 @@ class _DevicesPageState extends State<DevicesPage>
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            _connected
-                ? AppColors.stream.withValues(alpha: 0.14)
-                : AppColors.submerged,
-            AppColors.surface,
+            colors.submerged,
+            colors.surface,
           ],
         ),
         border: Border.all(
           color: _connected
-              ? AppColors.stream.withValues(alpha: 0.25)
-              : AppColors.border,
+              ? colors.stream.withValues(alpha: 0.25)
+              : colors.border,
         ),
-        boxShadow: _connected ? AppShadows.glow : AppShadows.card,
+        boxShadow: _connected
+            ? [AppShadows.glow(colors.stream)]
+            : [AppShadows.cardShadow(colors.border)],
       ),
       child: Row(
         children: [
@@ -471,7 +473,7 @@ class _DevicesPageState extends State<DevicesPage>
                   style: GoogleFonts.sora(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color: AppColors.foam,
+                    color: colors.foam,
                   ),
                 ),
                 const SizedBox(height: AppSpacing.xs),
@@ -480,7 +482,7 @@ class _DevicesPageState extends State<DevicesPage>
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
-                    color: AppColors.mist,
+                    color: colors.mist,
                   ),
                 ),
               ],
@@ -492,7 +494,7 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 
-  Widget _buildGridHeader() {
+  Widget _buildGridHeader(SteesColors colors) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
       child: Row(
@@ -503,14 +505,14 @@ class _DevicesPageState extends State<DevicesPage>
               fontSize: 11,
               fontWeight: FontWeight.w700,
               letterSpacing: 1.8,
-              color: AppColors.mist,
+              color: colors.mist,
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
             decoration: BoxDecoration(
-              color: AppColors.surfaceLight,
+              color: colors.surfaceLight,
               borderRadius: BorderRadius.circular(AppRadius.sm),
             ),
             child: Text(
@@ -518,7 +520,7 @@ class _DevicesPageState extends State<DevicesPage>
               style: GoogleFonts.inter(
                 fontSize: 10,
                 fontWeight: FontWeight.w600,
-                color: AppColors.mist,
+                color: colors.mist,
               ),
             ),
           ),
@@ -554,7 +556,7 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 
-  Widget _buildBottomActions() {
+  Widget _buildBottomActions(SteesColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AppSpacing.lg,
@@ -573,8 +575,8 @@ class _DevicesPageState extends State<DevicesPage>
             style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
           ),
           style: OutlinedButton.styleFrom(
-            foregroundColor: AppColors.foam,
-            side: BorderSide(color: AppColors.stream.withValues(alpha: 0.35)),
+            foregroundColor: colors.foam,
+            side: BorderSide(color: colors.stream.withValues(alpha: 0.35)),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AppRadius.lg),
             ),
@@ -591,6 +593,7 @@ class _HeroIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: 46,
       height: 46,
@@ -601,21 +604,21 @@ class _HeroIcon extends StatelessWidget {
           end: Alignment.bottomRight,
           colors: connected
               ? [
-                  AppColors.stream.withValues(alpha: 0.25),
-                  AppColors.leaf.withValues(alpha: 0.05),
+                  colors.stream.withValues(alpha: 0.25),
+                  colors.leaf.withValues(alpha: 0.05),
                 ]
-              : [AppColors.submerged, AppColors.surface],
+              : [colors.submerged, colors.surface],
         ),
         border: Border.all(
           color: connected
-              ? AppColors.stream.withValues(alpha: 0.35)
-              : AppColors.border,
+              ? colors.stream.withValues(alpha: 0.35)
+              : colors.border,
         ),
       ),
       child: Icon(
         connected ? Icons.water_drop : Icons.water_drop_outlined,
         size: 22,
-        color: connected ? AppColors.stream : AppColors.mist,
+        color: connected ? colors.stream : colors.mist,
       ),
     );
   }
@@ -627,7 +630,8 @@ class _StatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = connected ? AppColors.leaf : AppColors.mist;
+    final colors = context.steesColors;
+    final color = connected ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.sm + 2,
@@ -757,6 +761,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
   Widget build(BuildContext context) {
     final c = widget.config;
     final isOn = widget.isOn;
+    final colors = context.steesColors;
 
     return GestureDetector(
       onTapDown: widget.loading ? null : (_) => _press.forward(),
@@ -788,9 +793,9 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                       ],
                     )
                   : null,
-              color: isOn ? null : AppColors.surface,
+              color: isOn ? null : colors.surface,
               border: Border.all(
-                color: isOn ? c.color.withValues(alpha: 0.3) : AppColors.border,
+                color: isOn ? c.color.withValues(alpha: 0.3) : colors.border,
                 width: 1.5,
               ),
               boxShadow: isOn
@@ -801,7 +806,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                         spreadRadius: -2,
                       ),
                     ]
-                  : AppShadows.card,
+                  : [AppShadows.cardShadow(colors.border)],
             ),
             padding: const EdgeInsets.all(AppSpacing.md),
             child: Column(
@@ -818,7 +823,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                         letterSpacing: 1.2,
                         color: isOn
                             ? c.color.withValues(alpha: 0.8)
-                            : AppColors.mist.withValues(alpha: 0.5),
+                            : colors.mist.withValues(alpha: 0.5),
                       ),
                     ),
                     _DropletToggle(
@@ -842,7 +847,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                           c.icon,
                           key: const ValueKey('off'),
                           size: 24,
-                          color: AppColors.mist.withValues(alpha: 0.3),
+                          color: colors.mist.withValues(alpha: 0.3),
                         ),
                 ),
                 const SizedBox(height: AppSpacing.sm),
@@ -851,7 +856,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                   style: GoogleFonts.sora(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: isOn ? c.color : AppColors.foam,
+                    color: isOn ? c.color : colors.foam,
                   ),
                   child: Text(
                     c.name,
@@ -885,6 +890,7 @@ class _DropletToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return GestureDetector(
       onTap: loading ? null : onTap,
       child: AnimatedContainer(
@@ -894,7 +900,7 @@ class _DropletToggle extends StatelessWidget {
         height: 21,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(11),
-          color: isOn ? activeColor : AppColors.surfaceLight,
+          color: isOn ? activeColor : colors.surfaceLight,
           boxShadow: isOn
               ? [
                   BoxShadow(
@@ -915,8 +921,8 @@ class _DropletToggle extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: isOn
-                  ? AppColors.well
-                  : AppColors.mist.withValues(alpha: 0.5),
+                  ? colors.well
+                  : colors.mist.withValues(alpha: 0.5),
             ),
             child: Center(
               child: loading
@@ -925,13 +931,13 @@ class _DropletToggle extends StatelessWidget {
                       height: 10,
                       child: CircularProgressIndicator(
                         strokeWidth: 1.6,
-                        color: isOn ? activeColor : AppColors.mist,
+                        color: isOn ? activeColor : colors.mist,
                       ),
                     )
                   : Icon(
                       isOn ? Icons.water_drop : Icons.water_drop_outlined,
                       size: 9,
-                      color: isOn ? activeColor : AppColors.well,
+                      color: isOn ? activeColor : colors.well,
                     ),
             ),
           ),
@@ -992,8 +998,9 @@ class _FlowPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = isOn ? color.withValues(alpha: 0.14) : AppColors.surfaceLight;
-    final fg = isOn ? color : AppColors.mist.withValues(alpha: 0.5);
+    final colors = context.steesColors;
+    final bg = isOn ? color.withValues(alpha: 0.14) : colors.surfaceLight;
+    final fg = isOn ? color : colors.mist.withValues(alpha: 0.5);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(

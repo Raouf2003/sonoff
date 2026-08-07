@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import 'rule_form_screen.dart';
 
@@ -83,17 +83,18 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 
   Future<void> _delete() async {
     if (_rule == null) return;
+    final colors = context.steesColors;
     final id = _rule!['_id'] as String;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.submerged,
+        backgroundColor: colors.submerged,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Text('Delete rule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        content: Text('"${_rule!['name']}" will be removed permanently.', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist)),
+        title: Text('Delete rule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text('"${_rule!['name']}" will be removed permanently.', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFFF7A7A)))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -108,10 +109,11 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200,
+        backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
@@ -143,22 +145,23 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        backgroundColor: AppColors.well,
-        iconTheme: const IconThemeData(color: AppColors.mist),
+        title: Text('Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        backgroundColor: colors.well,
+        iconTheme: IconThemeData(color: colors.mist),
       ),
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
           child: _loading
-              ? const Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.stream)))
+              ? Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream)))
               : _hasRule
                   ? _buildRuleView()
                   : _buildEmpty(),
@@ -168,6 +171,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
   }
 
   Widget _buildRuleView() {
+    final colors = context.steesColors;
     final rule = _rule!;
     final enabled = (rule['enabled'] as bool?) ?? false;
     final channels = _channelsOf(rule);
@@ -176,7 +180,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     final action = (rule['action'] as String?) ?? 'ON';
     final opposite = action == 'ON' ? 'OFF' : 'ON';
     final condWord = condition == 'above' ? 'above' : 'below';
-    final actionColor = action == 'ON' ? AppColors.leaf : AppColors.sunlight;
+    final actionColor = action == 'ON' ? colors.leaf : colors.sunlight;
     final chLabel = channels.map((c) => 'CH$c').join(' + ');
 
     return SingleChildScrollView(
@@ -192,10 +196,10 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
           Container(
             width: double.infinity,
             decoration: BoxDecoration(
-              color: AppColors.submerged,
+              color: colors.submerged,
               borderRadius: BorderRadius.circular(18),
               border: Border.all(
-                color: enabled ? AppColors.leaf.withValues(alpha: 0.25) : Colors.white.withValues(alpha: 0.06),
+                color: enabled ? colors.leaf.withValues(alpha: 0.25) : colors.border,
               ),
             ),
             child: Column(
@@ -213,7 +217,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                           children: [
                             Expanded(
                               child: Text(rule['name'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
-                                style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                                style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: colors.foam)),
                             ),
                             _ActiveTag(enabled: enabled),
                           ],
@@ -225,9 +229,9 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
-                                _LogicPill(label: 'When $condWord $threshold', color: AppColors.stream),
+                                _LogicPill(label: 'When $condWord $threshold', color: colors.stream),
                                 const SizedBox(height: 6),
-                                Icon(Icons.arrow_downward_rounded, size: 16, color: AppColors.mist.withValues(alpha: 0.4)),
+                                Icon(Icons.arrow_downward_rounded, size: 16, color: colors.mist.withValues(alpha: 0.4)),
                               ],
                             ),
                             const SizedBox(height: 6),
@@ -237,13 +241,13 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            Icon(Icons.swap_horiz_rounded, size: 13, color: AppColors.mist.withValues(alpha: 0.5)),
+                            Icon(Icons.swap_horiz_rounded, size: 13, color: colors.mist.withValues(alpha: 0.5)),
                             const SizedBox(width: 5),
                             Flexible(
                               child: Text(
                                 'Else → $chLabel → $opposite',
                                 overflow: TextOverflow.ellipsis,
-                                style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist.withValues(alpha: 0.6)),
+                                style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
                               ),
                             ),
                           ],
@@ -252,29 +256,29 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                     ),
                   ),
                 ),
-                Container(height: 1, color: Colors.white.withValues(alpha: 0.04)),
+                Container(height: 1, color: colors.border),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: AppColors.mist)),
+                      Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                       const SizedBox(width: 8),
                       Switch(
                         value: enabled,
                         onChanged: (_) => _toggle(),
-                        activeTrackColor: AppColors.leaf,
-                        activeThumbColor: AppColors.well,
+                        activeTrackColor: colors.leaf,
+                        activeThumbColor: colors.well,
                       ),
                       const SizedBox(width: 2),
                       IconButton(
                         onPressed: _editRule,
-                        icon: const Icon(Icons.edit_outlined, size: 19, color: AppColors.stream),
+                        icon: Icon(Icons.edit_outlined, size: 19, color: colors.stream),
                         tooltip: 'Edit',
                       ),
                       IconButton(
                         onPressed: _delete,
-                        icon: const Icon(Icons.delete_outline, size: 19, color: Color(0xFFFF7A7A)),
+                        icon: Icon(Icons.delete_outline, size: 19, color: colors.danger),
                         tooltip: 'Delete',
                       ),
                     ],
@@ -289,6 +293,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
   }
 
   Widget _buildEmpty() {
+    final colors = context.steesColors;
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 40),
@@ -299,18 +304,18 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
               width: 80, height: 80,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: AppColors.stream.withValues(alpha: 0.08),
-                border: Border.all(color: AppColors.stream.withValues(alpha: 0.15)),
+                color: colors.stream.withValues(alpha: 0.08),
+                border: Border.all(color: colors.stream.withValues(alpha: 0.15)),
               ),
-              child: Icon(Icons.rule_outlined, size: 36, color: AppColors.stream.withValues(alpha: 0.5)),
+              child: Icon(Icons.rule_outlined, size: 36, color: colors.stream.withValues(alpha: 0.5)),
             ),
             const SizedBox(height: 20),
-            Text('No rule yet', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.foam)),
+            Text('No rule yet', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
             const SizedBox(height: 8),
             Text(
               'Create a rule to automatically control a relay based on this sensor\'s readings.',
               textAlign: TextAlign.center,
-              style: GoogleFonts.inter(fontSize: 13, color: AppColors.mist.withValues(alpha: 0.7)),
+              style: GoogleFonts.inter(fontSize: 13, color: colors.mist.withValues(alpha: 0.7)),
             ),
             const SizedBox(height: 24),
             SizedBox(
@@ -320,8 +325,8 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                 icon: const Icon(Icons.add, size: 18),
                 label: Text('Create Rule', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
                 style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.stream,
-                  foregroundColor: AppColors.well,
+                  backgroundColor: colors.stream,
+                  foregroundColor: colors.well,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
               ),
@@ -344,13 +349,14 @@ class _SensorHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: AppColors.stream.withValues(alpha: 0.08),
+        color: colors.stream.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+        border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
       ),
       child: Row(
         children: [
@@ -358,9 +364,9 @@ class _SensorHeader extends StatelessWidget {
             width: 38, height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppColors.stream.withValues(alpha: 0.15),
+              color: colors.stream.withValues(alpha: 0.15),
             ),
-            child: const Icon(Icons.sensors, size: 20, color: AppColors.stream),
+            child: Icon(Icons.sensors, size: 20, color: colors.stream),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -368,10 +374,10 @@ class _SensorHeader extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(sensorName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam)),
                 const SizedBox(height: 2),
                 Text(sensorId, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist)),
+                  style: GoogleFonts.inter(fontSize: 11, color: colors.mist)),
               ],
             ),
           ),
@@ -391,25 +397,26 @@ class _ActiveTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: enabled
-            ? AppColors.leaf.withValues(alpha: 0.15)
-            : Colors.white.withValues(alpha: 0.05),
+            ? colors.leaf.withValues(alpha: 0.15)
+            : colors.border,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.circle, size: 5, color: enabled ? AppColors.leaf : AppColors.mist),
+          Icon(Icons.circle, size: 5, color: enabled ? colors.leaf : colors.mist),
           const SizedBox(width: 4),
           Text(
             enabled ? 'Active' : 'Off',
             style: GoogleFonts.sora(
               fontSize: 10,
               fontWeight: FontWeight.w600,
-              color: enabled ? AppColors.leaf : AppColors.mist,
+              color: enabled ? colors.leaf : colors.mist,
             ),
           ),
         ],

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
 
 // ──────────────────────────────────────────────────────────────
 // SteesCard
@@ -24,18 +24,21 @@ class SteesCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final border = borderColor ??
-        (active ? AppColors.borderActive : AppColors.border);
+        (active ? colors.borderActive : colors.border);
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         padding: padding ?? const EdgeInsets.all(AppSpacing.lg),
         decoration: BoxDecoration(
-          color: AppColors.surface,
+          color: colors.surface,
           borderRadius: BorderRadius.circular(AppRadius.xl),
           border: Border.all(color: border, width: 1),
-          boxShadow: active ? AppShadows.glow : AppShadows.card,
+          boxShadow: active
+              ? [AppShadows.glow(colors.stream.withValues(alpha: 0.25))]
+              : [AppShadows.cardShadow(colors.mist.withValues(alpha: 0.15))],
         ),
         child: child,
       ),
@@ -63,6 +66,7 @@ class SteesEmpty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xxxl),
@@ -74,10 +78,10 @@ class SteesEmpty extends StatelessWidget {
               height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: AppColors.stream.withValues(alpha: 0.06),
-                border: Border.all(color: AppColors.stream.withValues(alpha: 0.12)),
+                color: colors.stream.withValues(alpha: 0.06),
+                border: Border.all(color: colors.stream.withValues(alpha: 0.12)),
               ),
-              child: Icon(icon, size: 32, color: AppColors.stream.withValues(alpha: 0.4)),
+              child: Icon(icon, size: 32, color: colors.stream.withValues(alpha: 0.4)),
             ),
             const SizedBox(height: AppSpacing.lg),
             Text(
@@ -85,7 +89,7 @@ class SteesEmpty extends StatelessWidget {
               style: GoogleFonts.sora(
                 fontSize: 17,
                 fontWeight: FontWeight.w600,
-                color: AppColors.foam,
+                color: colors.foam,
               ),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -95,7 +99,7 @@ class SteesEmpty extends StatelessWidget {
               style: GoogleFonts.inter(
                 fontSize: 13,
                 height: 1.5,
-                color: AppColors.mist.withValues(alpha: 0.7),
+                color: colors.mist.withValues(alpha: 0.7),
               ),
             ),
             if (action != null) ...[
@@ -122,10 +126,7 @@ class SteesLoading extends StatelessWidget {
       child: SizedBox(
         width: 24,
         height: 24,
-        child: CircularProgressIndicator(
-          strokeWidth: 2.5,
-          color: AppColors.stream,
-        ),
+        child: CircularProgressIndicator(strokeWidth: 2.5),
       ),
     );
   }
@@ -149,6 +150,7 @@ class SteesSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
       child: Row(
@@ -159,7 +161,7 @@ class SteesSectionHeader extends StatelessWidget {
               fontSize: 11,
               fontWeight: FontWeight.w700,
               letterSpacing: 1.8,
-              color: AppColors.mist,
+              color: colors.mist,
             ),
           ),
           if (count != null) ...[
@@ -167,7 +169,7 @@ class SteesSectionHeader extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: AppColors.surfaceLight,
+                color: colors.surfaceLight,
                 borderRadius: BorderRadius.circular(AppRadius.sm),
               ),
               child: Text(
@@ -175,7 +177,7 @@ class SteesSectionHeader extends StatelessWidget {
                 style: GoogleFonts.inter(
                   fontSize: 10,
                   fontWeight: FontWeight.w600,
-                  color: AppColors.mist,
+                  color: colors.mist,
                 ),
               ),
             ),
@@ -198,7 +200,8 @@ class SteesActiveTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = active ? AppColors.leaf : AppColors.mist;
+    final colors = context.steesColors;
+    final color = active ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -268,9 +271,10 @@ class SteesInfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Row(
       children: [
-        Icon(icon, size: 13, color: AppColors.mist.withValues(alpha: 0.7)),
+        Icon(icon, size: 13, color: colors.mist.withValues(alpha: 0.7)),
         const SizedBox(width: AppSpacing.xs),
         Expanded(
           child: Text(
@@ -279,7 +283,7 @@ class SteesInfoRow extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: GoogleFonts.inter(
               fontSize: 12,
-              color: AppColors.mist.withValues(alpha: 0.8),
+              color: colors.mist.withValues(alpha: 0.8),
             ),
           ),
         ),
@@ -307,10 +311,11 @@ class SteesFAB extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return FloatingActionButton.extended(
       onPressed: onPressed,
-      backgroundColor: AppColors.stream,
-      foregroundColor: AppColors.well,
+      backgroundColor: colors.stream,
+      foregroundColor: colors.well,
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       icon: Icon(icon, size: 20),

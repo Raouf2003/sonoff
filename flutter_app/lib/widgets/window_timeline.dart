@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
+import '../theme/stees_colors.dart';
 
 /// A compact 24-hour timeline strip. Each ON window ([0,1) ranges in minutes)
 /// is drawn as a bright bar against the night track, with hour tick marks
@@ -14,6 +15,7 @@ class WindowTimeline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     final trackHeight = compact ? 12.0 : 22.0;
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -31,9 +33,9 @@ class WindowTimeline extends StatelessWidget {
                 child: Container(
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
-                    color: AppColors.well.withValues(alpha: 0.7),
+                    color: colors.well.withValues(alpha: 0.7),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                    border: Border.all(color: colors.border),
                   ),
                   child: Stack(
                     children: [
@@ -42,13 +44,13 @@ class WindowTimeline extends StatelessWidget {
                           left: width * i / 24 - 0.25,
                           top: 0,
                           bottom: 0,
-                          child: Container(width: 0.5, color: Colors.white.withValues(alpha: 0.08)),
+                          child: Container(width: 0.5, color: colors.border),
                         ),
                     ],
                   ),
                 ),
               ),
-              for (final w in windows) _drawWindow(width, trackHeight, w),
+              for (final w in windows) _drawWindow(context, width, trackHeight, w, colors),
               Positioned(
                 left: 0,
                 right: 0,
@@ -61,7 +63,7 @@ class WindowTimeline extends StatelessWidget {
                         i == 24 ? '24' : '$i',
                         style: GoogleFonts.inter(
                           fontSize: compact ? 9 : 11,
-                          color: AppColors.mist.withValues(alpha: 0.8),
+                          color: colors.mist.withValues(alpha: 0.8),
                         ),
                       ),
                     ],
@@ -75,7 +77,7 @@ class WindowTimeline extends StatelessWidget {
     );
   }
 
-  Widget _drawWindow(double width, double trackHeight, ({int start, int end}) w) {
+  Widget _drawWindow(BuildContext context, double width, double trackHeight, ({int start, int end}) w, SteesColors colors) {
     final left = width * w.start / _totalMin;
     final wid = width * (w.end - w.start) / _totalMin;
     return Positioned(
@@ -85,12 +87,12 @@ class WindowTimeline extends StatelessWidget {
       width: wid.clamp(0.0, width - left),
       child: Container(
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
+          gradient: LinearGradient(
             begin: Alignment.topLeft, end: Alignment.bottomRight,
-            colors: [AppColors.stream, AppColors.leaf],
+            colors: [colors.stream, colors.leaf],
           ),
           borderRadius: BorderRadius.circular(4),
-          boxShadow: [BoxShadow(color: AppColors.stream.withValues(alpha: 0.4), blurRadius: 3)],
+          boxShadow: [BoxShadow(color: colors.stream.withValues(alpha: 0.4), blurRadius: 3)],
         ),
       ),
     );

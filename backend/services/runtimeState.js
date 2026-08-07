@@ -1,6 +1,11 @@
 class RuntimeState {
   constructor() {
     this.deviceStates = new Map();
+    // Treat a device as online if its last MQTT activity is within this
+    // window. Overridable via DEVICE_FRESH_MS. The default (5 min) is far
+    // more forgiving than the old 60s so real devices with a long Tasmota
+    // TelePeriod don't flicker offline between telemetry publishes.
+    this.freshMs = parseInt(process.env.DEVICE_FRESH_MS || '300000', 10);
   }
 
   ensureDeviceState(deviceId, channels) {

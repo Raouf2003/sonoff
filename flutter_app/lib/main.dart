@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'theme.dart';
+import 'theme/app_theme.dart';
+import 'theme/theme_controller.dart';
 import 'services/auth_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_shell.dart';
@@ -12,33 +13,52 @@ void main() {
   runApp(const SteesApp());
 }
 
-class SteesApp extends StatelessWidget {
+class SteesApp extends StatefulWidget {
   const SteesApp({super.key});
 
   @override
+  State<SteesApp> createState() => _SteesAppState();
+}
+
+class _SteesAppState extends State<SteesApp> {
+  final ThemeController _themeController = ThemeController();
+
+  @override
+  void initState() {
+    super.initState();
+    _themeController.load();
+  }
+
+  @override
+  void dispose() {
+    _themeController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'STEES',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: AppColors.well,
-        colorScheme: ColorScheme.dark(
-          primary: AppColors.stream,
-          secondary: AppColors.leaf,
-          surface: AppColors.submerged,
-        ),
-        textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
-        useMaterial3: true,
-      ),
-      home: const AuthGate(),
-      routes: { '/home': (_) => const AuthGate() },
+    return ListenableBuilder(
+      listenable: _themeController,
+      builder: (context, _) {
+        return MaterialApp(
+          title: 'STEES',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: _themeController.themeMode,
+          themeAnimationDuration: const Duration(milliseconds: 350),
+          themeAnimationCurve: Curves.easeInOut,
+          home: AuthGate(themeController: _themeController),
+          routes: { '/home': (_) => AuthGate(themeController: _themeController) },
+        );
+      },
     );
   }
 }
 
 class AuthGate extends StatefulWidget {
-  const AuthGate({super.key});
+  final ThemeController themeController;
+  const AuthGate({super.key, required this.themeController});
 
   @override
   State<AuthGate> createState() => _AuthGateState();
@@ -62,13 +82,15 @@ class _AuthGateState extends State<AuthGate> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    final scheme = Theme.of(context).colorScheme;
     if (_checking) {
       return Scaffold(
         body: Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topCenter, end: Alignment.bottomCenter,
-              colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+              colors: [colors.well, scheme.surfaceContainerHighest, colors.well],
             ),
           ),
           child: Center(
@@ -86,7 +108,7 @@ class _AuthGateState extends State<AuthGate> {
                       width: 24, height: 24,
                       child: CircularProgressIndicator(
                         strokeWidth: 2.5,
-                        color: AppColors.stream.withValues(alpha: 0.6),
+                        color: colors.stream.withValues(alpha: 0.6),
                       ),
                     ),
                   ],
@@ -97,7 +119,9 @@ class _AuthGateState extends State<AuthGate> {
         ),
       );
     }
-    return _loggedIn ? const MainShell() : const LoginScreen();
+    return _loggedIn
+        ? MainShell(themeController: widget.themeController)
+        : LoginScreen(themeController: widget.themeController);
   }
 }
 
@@ -107,20 +131,21 @@ class _SteesLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: size, height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft, end: Alignment.bottomRight,
-          colors: [AppColors.stream, AppColors.leaf],
+          colors: [colors.stream, colors.leaf],
         ),
         boxShadow: [
-          BoxShadow(color: AppColors.stream.withValues(alpha: 0.3), blurRadius: 20, spreadRadius: 0),
+          BoxShadow(color: colors.stream.withValues(alpha: 0.3), blurRadius: 20, spreadRadius: 0),
         ],
       ),
       child: Center(
-        child: Text('S', style: GoogleFonts.sora(fontSize: size * 0.5, fontWeight: FontWeight.w700, color: AppColors.well)),
+        child: Text('S', style: GoogleFonts.sora(fontSize: size * 0.5, fontWeight: FontWeight.w700, color: colors.well)),
       ),
     );
   }

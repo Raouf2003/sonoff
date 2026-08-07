@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+import '../theme/app_theme.dart';
+import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
 import '../widgets/window_timeline.dart';
 
@@ -93,15 +94,16 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   }
 
   Future<void> _pickTime({required bool isStart, required int index}) async {
+    final colors = context.steesColors;
     final picked = await showTimePicker(
       context: context,
       initialTime: isStart ? _rangeStarts[index] : _rangeEnds[index],
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-            primary: AppColors.stream,
-            surface: AppColors.submerged,
-            onSurface: AppColors.foam,
+          colorScheme: ColorScheme.dark(
+            primary: colors.stream,
+            surface: colors.submerged,
+            onSurface: colors.foam,
           ),
         ),
         child: child!,
@@ -195,10 +197,11 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
   void _err(String m) {
     if (!mounted) return;
+    final colors = context.steesColors;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(m, style: const TextStyle(fontSize: 13)),
-        backgroundColor: Colors.redAccent.shade200,
+        backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
@@ -209,17 +212,18 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEdit ? 'Edit Schedule' : 'New Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.foam)),
-        backgroundColor: AppColors.well,
-        iconTheme: const IconThemeData(color: AppColors.mist),
+        title: Text(_isEdit ? 'Edit Schedule' : 'New Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        backgroundColor: colors.well,
+        iconTheme: IconThemeData(color: colors.mist),
       ),
       body: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter, end: Alignment.bottomCenter,
-            colors: [AppColors.well, Color(0xFF0F2332), AppColors.well],
+            colors: [colors.well, Theme.of(context).colorScheme.surfaceContainerHighest, colors.well],
           ),
         ),
         child: SafeArea(
@@ -235,9 +239,9 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                   eyebrow: 'NAME',
                   child: TextField(
                     controller: _nameCtl,
-                    style: GoogleFonts.inter(fontSize: 14, color: AppColors.foam),
+                    style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                     textInputAction: TextInputAction.next,
-                    decoration: _inputDec('Schedule name', 'e.g. Morning irrigation', Icons.label_outline),
+                    decoration: _inputDec('Schedule name', 'e.g. Morning irrigation', Icons.label_outline, colors),
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -252,7 +256,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                         _ChannelChip(
                           label: 'CH$i',
                           selected: _channels.contains(i),
-                          color: AppColors.stream,
+                          color: colors.stream,
                           onTap: () => setState(() {
                             if (!_channels.remove(i)) _channels.add(i);
                           }),
@@ -274,11 +278,11 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                         ],
                         selected: {_recurrenceType},
                         style: SegmentedButton.styleFrom(
-                          backgroundColor: AppColors.well,
-                          selectedBackgroundColor: AppColors.stream,
-                          selectedForegroundColor: AppColors.well,
-                          foregroundColor: AppColors.mist,
-                          side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+                          backgroundColor: colors.well,
+                          selectedBackgroundColor: colors.stream,
+                          selectedForegroundColor: colors.well,
+                          foregroundColor: colors.mist,
+                          side: BorderSide(color: colors.border),
                         ),
                         onSelectionChanged: (s) => setState(() => _recurrenceType = s.first),
                       ),
@@ -292,7 +296,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                               _ChannelChip(
                                 label: _dayLabels[i],
                                 selected: _daysOfWeek.contains(i),
-                                color: AppColors.sunlight,
+                                color: colors.sunlight,
                                 onTap: () => setState(() {
                                   if (!_daysOfWeek.remove(i)) _daysOfWeek.add(i);
                                 }),
@@ -313,7 +317,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                       WindowTimeline(windows: _timelineWindows()),
                       const SizedBox(height: 14),
                       for (var i = 0; i < _rangeStarts.length; i++) ...[
-                        _buildRangeRow(i),
+                        _buildRangeRow(i, colors),
                         if (i < _rangeStarts.length - 1) const SizedBox(height: 10),
                       ],
                       const SizedBox(height: 8),
@@ -326,7 +330,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                               }),
                         icon: const Icon(Icons.add, size: 16),
                         label: Text('Add another window', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                        style: TextButton.styleFrom(foregroundColor: AppColors.stream),
+                        style: TextButton.styleFrom(foregroundColor: colors.stream),
                       ),
                     ],
                   ),
@@ -337,12 +341,12 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                   child: FilledButton.icon(
                     onPressed: _saving ? null : _save,
                     icon: _saving
-                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.well))
+                        ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                         : Icon(_isEdit ? Icons.save_outlined : Icons.add, size: 18),
                     label: Text(_isEdit ? 'Save Changes' : 'Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                     style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.stream,
-                      foregroundColor: AppColors.well,
+                      backgroundColor: colors.stream,
+                      foregroundColor: colors.well,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                     ),
                   ),
@@ -365,13 +369,13 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     ];
   }
 
-  Widget _buildRangeRow(int index) {
+  Widget _buildRangeRow(int index, SteesColors colors) {
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: AppColors.well,
+        color: colors.well,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        border: Border.all(color: colors.border),
       ),
       child: Row(
         children: [
@@ -380,19 +384,21 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
               label: 'Starts',
               time: _rangeStarts[index],
               onTap: () => _pickTime(isStart: true, index: index),
+              colors: colors,
             ),
           ),
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 6),
             height: 18,
             width: 1,
-            color: Colors.white.withValues(alpha: 0.08),
+            color: colors.border,
           ),
           Expanded(
             child: _timeButton(
               label: 'Ends',
               time: _rangeEnds[index],
               onTap: () => _pickTime(isStart: false, index: index),
+              colors: colors,
             ),
           ),
           if (_rangeStarts.length > 1)
@@ -401,7 +407,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 _rangeStarts.removeAt(index);
                 _rangeEnds.removeAt(index);
               }),
-              icon: const Icon(Icons.close, size: 16, color: Color(0xFFFF7A7A)),
+              icon: Icon(Icons.close, size: 16, color: colors.danger),
               tooltip: 'Remove window',
               visualDensity: VisualDensity.compact,
               constraints: const BoxConstraints(),
@@ -412,7 +418,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     );
   }
 
-  Widget _timeButton({required String label, required TimeOfDay time, required VoidCallback onTap}) {
+  Widget _timeButton({required String label, required TimeOfDay time, required VoidCallback onTap, required SteesColors colors}) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
@@ -420,16 +426,16 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.stream.withValues(alpha: 0.3)),
+          border: Border.all(color: colors.stream.withValues(alpha: 0.3)),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label, style: GoogleFonts.inter(fontSize: 10, color: AppColors.mist)),
+            Text(label, style: GoogleFonts.inter(fontSize: 10, color: colors.mist)),
             const SizedBox(width: 6),
             Flexible(
               child: Text(_hhmm(time), overflow: TextOverflow.ellipsis,
-                style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.foam)),
+                style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: colors.foam)),
             ),
           ],
         ),
@@ -437,20 +443,20 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     );
   }
 
-  InputDecoration _inputDec(String hint, String helper, IconData icon) {
+  InputDecoration _inputDec(String hint, String helper, IconData icon, SteesColors colors) {
     return InputDecoration(
       hintText: hint,
       helperText: helper,
-      helperStyle: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.5)),
-      hintStyle: GoogleFonts.inter(fontSize: 14, color: AppColors.mist.withValues(alpha: 0.6)),
-      prefixIcon: Icon(icon, size: 18, color: AppColors.mist),
+      helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+      hintStyle: GoogleFonts.inter(fontSize: 14, color: colors.mist.withValues(alpha: 0.6)),
+      prefixIcon: Icon(icon, size: 18, color: colors.mist),
       filled: true,
-      fillColor: AppColors.well,
+      fillColor: colors.well,
       contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.stream, width: 1.5),
+        borderSide: BorderSide(color: colors.stream, width: 1.5),
       ),
     );
   }
@@ -463,13 +469,14 @@ class _DeviceBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: AppColors.stream.withValues(alpha: 0.08),
+        color: colors.stream.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.stream.withValues(alpha: 0.25)),
+        border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
       ),
       child: Row(
         children: [
@@ -477,9 +484,9 @@ class _DeviceBanner extends StatelessWidget {
             width: 38, height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppColors.stream.withValues(alpha: 0.15),
+              color: colors.stream.withValues(alpha: 0.15),
             ),
-            child: const Icon(Icons.schedule, size: 20, color: AppColors.stream),
+            child: Icon(Icons.schedule, size: 20, color: colors.stream),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -487,10 +494,10 @@ class _DeviceBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(deviceName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.foam)),
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam)),
                 const SizedBox(height: 2),
                 Text(deviceId, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist)),
+                  style: GoogleFonts.inter(fontSize: 11, color: colors.mist)),
               ],
             ),
           ),
@@ -508,29 +515,30 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.submerged,
+        color: colors.submerged,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Container(width: 20, height: 2, decoration: BoxDecoration(color: AppColors.stream, borderRadius: BorderRadius.circular(2))),
+              Container(width: 20, height: 2, decoration: BoxDecoration(color: colors.stream, borderRadius: BorderRadius.circular(2))),
               const SizedBox(width: 8),
-              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: AppColors.stream)),
+              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
             ],
           ),
           if (description != null) ...[
             const SizedBox(height: 4),
             Padding(
               padding: const EdgeInsets.only(left: 28),
-              child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: AppColors.mist.withValues(alpha: 0.7))),
+              child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
             ),
           ],
           const SizedBox(height: 14),
@@ -550,6 +558,7 @@ class _ChannelChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.steesColors;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -557,17 +566,17 @@ class _ChannelChip extends StatelessWidget {
         duration: const Duration(milliseconds: 160),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
-          color: selected ? color : AppColors.well,
+          color: selected ? color : colors.well,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected ? color : Colors.white.withValues(alpha: 0.1),
+            color: selected ? color : colors.border,
             width: selected ? 0 : 1,
           ),
           boxShadow: selected ? [BoxShadow(color: color.withValues(alpha: 0.3), blurRadius: 8)] : null,
         ),
         child: Text(
           label,
-          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? AppColors.well : AppColors.foam),
+          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? colors.well : colors.foam),
         ),
       ),
     );
