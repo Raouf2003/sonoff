@@ -158,12 +158,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
     _waitForDeviceOnline(topic);
   }
 
-  // Send the Tasmota settings as a single Backlog command (so they apply
-  // together before one restart), then ask the device to reboot.
+  // Provision the device in two phases:
+  //  1) Write MQTT + Topic + DeviceName FIRST, while the phone is still on the
+  //     device AP. If Tasmota drops the connection when the SSID changes, these
+  //     settings are already saved.
+  //  2) Then switch Wi-Fi, and finally restart so MQTT applies with fresh state.
   Future<bool> _sendTasmotaConfig() async {
-    final parts = <String>[
-      'SSId1 ${_ssidCtl.text.trim()}',
-      'Password1 ${_wifiPassCtl.text}',
+    final mqttParts = <String>[
       'MqttHost ${_mqttBrokerCtl.text.trim()}',
       'MqttPort ${_mqttPortCtl.text.trim()}',
       if (_mqttUserCtl.text.trim().isNotEmpty)
@@ -172,8 +173,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
       'Topic ${_topicCtl.text.trim()}',
       'DeviceName ${_deviceNameCtl.text.trim()}',
     ];
-    final ok = await _sendCommand('Backlog ${parts.join('; ')}');
-    if (!ok) return false;
+    final mqttOk = await _sendCommand('Backlog ${mqttParts.join('; ')}');
+    if (!mqttOk) return false;
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final wifiOk = await _sendCommand(
+      'Backlog SSId1 ${_ssidCtl.text.trim()}; Password1 ${_wifiPassCtl.text}',
+    );
+    if (!wifiOk) return false;
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
     return _sendCommand('Restart 1');
   }
 
