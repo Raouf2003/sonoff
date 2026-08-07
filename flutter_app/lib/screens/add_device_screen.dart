@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/api_service.dart';
 import '../theme/app_theme.dart';
+import 'provision_device_screen.dart';
 
 class AddDeviceScreen extends StatefulWidget {
   const AddDeviceScreen({super.key});
@@ -22,6 +23,13 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     _deviceIdCtl.dispose();
     _nameCtl.dispose();
     super.dispose();
+  }
+
+  Future<void> _openWizard() async {
+    final done = await Navigator.of(
+      context,
+    ).push<bool>(MaterialPageRoute(builder: (_) => const ProvisionDeviceScreen()));
+    if (done == true && mounted) Navigator.of(context).pop(true);
   }
 
   Future<void> _claim() async {
@@ -82,7 +90,29 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                     Icon(Icons.water_drop_outlined, size: 40, color: colors.stream.withValues(alpha: 0.5)),
                     const SizedBox(height: 12),
                     Text(
-                      'Enter the Device ID from your Tasmota controller.',
+                      'Use the guided wizard to configure a new device.' ,
+                      style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity, height: 50,
+                      child: FilledButton.icon(
+                        onPressed: _openWizard,
+                        icon: const Icon(Icons.bolt_outlined, size: 18),
+                        label: Text('Provision New Device', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: colors.stream,
+                          foregroundColor: colors.well,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Divider(color: colors.border.withValues(alpha: 0.5)),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Or manually enter the Device ID from your Tasmota controller.',
                       style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
                       textAlign: TextAlign.center,
                     ),

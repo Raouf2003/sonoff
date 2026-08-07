@@ -109,6 +109,16 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Devices recently observed on the MQTT broker (public snapshot), used by the
+  // provisioning wizard to detect an unclaimed device coming online.
+  Future<Map<String, dynamic>> fetchSnapshot() async {
+    final res = await get('/api/mqtt/snapshot');
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch snapshot');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> control(String deviceId, int channel, String state) async {
     final res = await post('/api/control', {
       'deviceId': deviceId,

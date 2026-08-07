@@ -2,6 +2,7 @@ const mqtt = require('mqtt');
 const Sensor = require('../models/Sensor');
 
 const ACK_TIMEOUT_MS = 5000;
+const RECENT_WINDOW_MS = 30000;
 
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
@@ -41,6 +42,10 @@ class MqttGateway {
     // deviceId/sensorId -> { lastSeen } entities observed on the broker, used
     // to log first-boots without spamming every message.
     this.seenLog = new Map();
+    // deviceId -> timestamp (ms) of the most recent MQTT packet for that
+    // device, used to expose devices observed on the broker in the last
+    // RECENT_WINDOW_MS regardless of claim status.
+    this.recentDevices = new Map();
   }
 
   init({ io, deviceRegistry, runtimeState }) {
@@ -195,6 +200,9 @@ class MqttGateway {
         name: d.name,
         channels: d.channels,
       })),
+      recentDevices: Array.from(this.recentDevices.entries())
+        .filter(([, ts]) => Date.now() - ts < RECENT_WINDOW_MS)
+        .map(([deviceId]) => ({ deviceId })),
     };
   }
 
@@ -236,6 +244,7 @@ class MqttGateway {
 
     const deviceId = id;
     this._logSeen('device', deviceId);
+    this.recentDevices.set(deviceId, Date.now());
     const device = this.deviceRegistry.get(deviceId);
     const ownerId = device ? device.ownerId : null;
     const channelCount = device ? device.channels : 4;
