@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-import 'package:app_settings/app_settings.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
@@ -63,6 +63,9 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
   // Step 1 - connect to device Wi-Fi + reachability
   // ──────────────────────────────────────────────────────────
 
+  static const MethodChannel _wifiSettingsChannel =
+      MethodChannel('stees/wifi_settings');
+
   Future<void> _openWifiSettings() async {
     try {
       if (Theme.of(context).platform == TargetPlatform.iOS) {
@@ -71,7 +74,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
           mode: LaunchMode.externalApplication,
         );
       } else {
-        await AppSettings.openAppSettings(type: AppSettingsType.wifi);
+        await _wifiSettingsChannel.invokeMethod<void>('openWifiSettings');
       }
     } catch (_) {
       _setError('Could not open Wi-Fi settings.');
@@ -155,24 +158,24 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
     _waitForDeviceOnline(topic);
   }
 
-  // Send each Tasmota setting as an HTTP /cm command, then restart.
+  // Send the Tasmota settings as a single Backlog command (so they apply
+  // together before one restart), then ask the device to reboot.
   Future<bool> _sendTasmotaConfig() async {
-    final commands = <String>[
+    final parts = <String>[
       'SSId1 ${_ssidCtl.text.trim()}',
-      'SSPassword1 ${_wifiPassCtl.text}',
+      'Password1 ${_wifiPassCtl.text}',
       if (_mqttBrokerCtl.text.trim().isNotEmpty)
         'MqttHost ${_mqttBrokerCtl.text.trim()}',
       if (_mqttPortCtl.text.trim().isNotEmpty)
         'MqttPort ${_mqttPortCtl.text.trim()}',
       if (_mqttUserCtl.text.trim().isNotEmpty)
         'MqttUser ${_mqttUserCtl.text.trim()}',
-      if (_mqttPassCtl.text.isNotEmpty) 'MqttPass ${_mqttPassCtl.text}',
-      'TopicName ${_topicCtl.text.trim()}',
+      if (_mqttPassCtl.text.isNotEmpty) 'MqttPassword ${_mqttPassCtl.text}',
+      'Topic ${_topicCtl.text.trim()}',
       'DeviceName ${_deviceNameCtl.text.trim()}',
     ];
-    for (final command in commands) {
-      if (!await _sendCommand(command)) return false;
-    }
+    final ok = await _sendCommand('Backlog ${parts.join('; ')}');
+    if (!ok) return false;
     return _sendCommand('Restart 1');
   }
 
