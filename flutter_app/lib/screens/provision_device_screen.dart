@@ -173,18 +173,22 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
       'Topic ${_topicCtl.text.trim()}',
       'DeviceName ${_deviceNameCtl.text.trim()}',
     ];
-    final mqttOk = await _sendCommand('Backlog ${mqttParts.join('; ')}');
+    final mqttCommand = 'Backlog ${mqttParts.join('; ')}';
+    debugPrint('[PROVISION] sending MQTT phase command: $mqttCommand');
+    final mqttOk = await _sendCommand(mqttCommand);
     if (!mqttOk) return false;
 
     await Future<void>.delayed(const Duration(milliseconds: 500));
 
-    final wifiOk = await _sendCommand(
-      'Backlog SSId1 ${_ssidCtl.text.trim()}; Password1 ${_wifiPassCtl.text}',
-    );
+    final wifiCommand =
+        'Backlog SSId1 ${_ssidCtl.text.trim()}; Password1 ${_wifiPassCtl.text}';
+    debugPrint('[PROVISION] sending WiFi phase command: $wifiCommand');
+    final wifiOk = await _sendCommand(wifiCommand);
     if (!wifiOk) return false;
 
     await Future<void>.delayed(const Duration(milliseconds: 500));
 
+    debugPrint('[PROVISION] sending restart command: Restart 1');
     return _sendCommand('Restart 1');
   }
 
@@ -193,9 +197,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
       final uri = Uri.parse('$_deviceUrl/cm').replace(
         queryParameters: {'cmnd': command},
       );
-      await http.get(uri).timeout(const Duration(seconds: 3));
+      debugPrint('[PROVISION] HTTP GET $uri');
+      final res = await http.get(uri).timeout(const Duration(seconds: 3));
+      debugPrint('[PROVISION] status=${res.statusCode} body=${res.body}');
       return true;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[PROVISION] exception sending "$command": $e');
       return false;
     }
   }
