@@ -29,7 +29,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
 
   final _ssidCtl = TextEditingController(text: 'tasmota-XXXX');
   final _wifiPassCtl = TextEditingController();
-  final _mqttBrokerCtl = TextEditingController();
+  final _mqttBrokerCtl = TextEditingController(text: 'broker.emqx.io');
   final _mqttPortCtl = TextEditingController(text: '1883');
   final _mqttUserCtl = TextEditingController();
   final _mqttPassCtl = TextEditingController();
@@ -164,10 +164,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
     final parts = <String>[
       'SSId1 ${_ssidCtl.text.trim()}',
       'Password1 ${_wifiPassCtl.text}',
-      if (_mqttBrokerCtl.text.trim().isNotEmpty)
-        'MqttHost ${_mqttBrokerCtl.text.trim()}',
-      if (_mqttPortCtl.text.trim().isNotEmpty)
-        'MqttPort ${_mqttPortCtl.text.trim()}',
+      'MqttHost ${_mqttBrokerCtl.text.trim()}',
+      'MqttPort ${_mqttPortCtl.text.trim()}',
       if (_mqttUserCtl.text.trim().isNotEmpty)
         'MqttUser ${_mqttUserCtl.text.trim()}',
       if (_mqttPassCtl.text.isNotEmpty) 'MqttPassword ${_mqttPassCtl.text}',
