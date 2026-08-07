@@ -22,8 +22,14 @@ class ProvisionDeviceScreen extends StatefulWidget {
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
 }
 
-class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
+class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
+    with WidgetsBindingObserver {
   static const String _deviceUrl = 'http://192.168.4.1';
+
+  static const MethodChannel _wifiBindChannel =
+      MethodChannel('stees/wifi_binding');
+
+  bool _wifiBound = false;
 
   final _api = ApiService();
 
@@ -45,7 +51,22 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
   Timer? _waitTimer;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      _probeReachability();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_releaseWifiBinding());
     _reachTimer?.cancel();
     _waitTimer?.cancel();
     _ssidCtl.dispose();
@@ -89,8 +110,33 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
     _probeReachability();
   }
 
+  // Best-effort bind of this process's sockets to the WiFi interface. On the
+  // device AP (no internet) Android may otherwise route requests over
+  // cellular. Returns immediately on failure so the probe logic still runs.
+  Future<void> _ensureBoundToWifi() async {
+    if (Theme.of(context).platform == TargetPlatform.iOS) return;
+    if (_wifiBound) return;
+    try {
+      final ok = await _wifiBindChannel.invokeMethod<bool>('ensureBoundToWifi');
+      _wifiBound = ok ?? false;
+      debugPrint('[PROVISION] wifi bound=$_wifiBound');
+    } catch (e) {
+      debugPrint('[PROVISION] wifi bind failed: $e');
+    }
+  }
+
+  Future<void> _releaseWifiBinding() async {
+    if (Theme.of(context).platform == TargetPlatform.iOS) return;
+    try {
+      await _wifiBindChannel.invokeMethod<void>('releaseWifiBinding');
+      debugPrint('[PROVISION] wifi binding released');
+    } catch (_) {}
+    _wifiBound = false;
+  }
+
   Future<void> _probeReachability() async {
     if (!mounted) return;
+    await _ensureBoundToWifi();
     if (await _isReachable()) {
       _reachTimer?.cancel();
       setState(() {
@@ -150,6 +196,9 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
       });
       return;
     }
+    await _releaseWifiBinding();
+    debugPrint('[PROVISION] wifi binding released, resuming default routing');
+    if (!mounted) return;
     setState(() {
       _provisioning = false;
       _step = _Step.waiting;
@@ -164,6 +213,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen> {
   //     settings are already saved.
   //  2) Then switch Wi-Fi, and finally restart so MQTT applies with fresh state.
   Future<bool> _sendTasmotaConfig() async {
+    await _ensureBoundToWifi();
     final mqttParts = <String>[
       'MqttHost ${_mqttBrokerCtl.text.trim()}',
       'MqttPort ${_mqttPortCtl.text.trim()}',
