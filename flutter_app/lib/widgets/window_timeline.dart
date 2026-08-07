@@ -46,11 +46,12 @@ class WindowTimeline extends StatelessWidget {
                           bottom: 0,
                           child: Container(width: 0.5, color: colors.border),
                         ),
+                      for (final w in windows)
+                        _drawWindow(context, width, w, colors),
                     ],
                   ),
                 ),
               ),
-              for (final w in windows) _drawWindow(context, width, trackHeight, w, colors),
               Positioned(
                 left: 0,
                 right: 0,
@@ -77,7 +78,7 @@ class WindowTimeline extends StatelessWidget {
     );
   }
 
-  Widget _drawWindow(BuildContext context, double width, double trackHeight, ({int start, int end}) w, SteesColors colors) {
+  Widget _drawWindow(BuildContext context, double width, ({int start, int end}) w, SteesColors colors) {
     final left = width * w.start / _totalMin;
     final wid = width * (w.end - w.start) / _totalMin;
     return Positioned(
@@ -87,12 +88,8 @@ class WindowTimeline extends StatelessWidget {
       width: wid.clamp(0.0, width - left),
       child: Container(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft, end: Alignment.bottomRight,
-            colors: [colors.stream, colors.leaf],
-          ),
+          color: colors.stream,
           borderRadius: BorderRadius.circular(4),
-          boxShadow: [BoxShadow(color: colors.stream.withValues(alpha: 0.4), blurRadius: 3)],
         ),
       ),
     );

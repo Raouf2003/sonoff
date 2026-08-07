@@ -204,6 +204,29 @@ class _RulesPageState extends State<RulesPage> {
     if (created == true) _load();
   }
 
+  void _editRule(Map<String, dynamic> rule) {
+    final sensorId = rule['sensorId'] as String? ?? '';
+    final sensor = _sensors.firstWhere(
+      (s) => s['sensorId'] == sensorId,
+      orElse: () => <String, dynamic>{'sensorId': sensorId, 'name': sensorId},
+    );
+    _openRuleFormEdit(sensor, rule);
+  }
+
+  Future<void> _openRuleFormEdit(Map<String, dynamic> sensor, Map<String, dynamic> rule) async {
+    final sensorId = sensor['sensorId'] as String;
+    final updated = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => RuleFormScreen(
+          sensorId: sensorId,
+          sensorName: sensor['name'] as String? ?? sensorId,
+          existing: rule,
+        ),
+      ),
+    );
+    if (updated == true) _load();
+  }
+
   List<int> _channelsOf(Map<String, dynamic> rule) {
     final raw = rule['channels'];
     List<int> chs;
@@ -256,6 +279,7 @@ class _RulesPageState extends State<RulesPage> {
                   channelsOf: _channelsOf,
                   onTap: () => _openRule(_rules[i]),
                   onToggle: () => _toggleRule(_rules[i]),
+                  onEdit: () => _editRule(_rules[i]),
                   onDelete: () => _deleteRule(_rules[i]),
                 ),
               ),
@@ -305,6 +329,7 @@ class _RuleCard extends StatefulWidget {
   final List<int> Function(Map<String, dynamic>) channelsOf;
   final VoidCallback onTap;
   final VoidCallback onToggle;
+  final VoidCallback onEdit;
   final VoidCallback onDelete;
 
   const _RuleCard({
@@ -313,6 +338,7 @@ class _RuleCard extends StatefulWidget {
     required this.channelsOf,
     required this.onTap,
     required this.onToggle,
+    required this.onEdit,
     required this.onDelete,
   });
 
@@ -432,6 +458,11 @@ class _RuleCardState extends State<_RuleCard> {
                     activeThumbColor: colors.well,
                   ),
                   const SizedBox(width: AppSpacing.xs),
+                  IconButton(
+                    onPressed: widget.onEdit,
+                    icon: Icon(Icons.edit_outlined, size: 18, color: colors.stream),
+                    tooltip: 'Edit',
+                  ),
                   IconButton(
                     onPressed: widget.onDelete,
                     icon: Icon(Icons.delete_outline, size: 18, color: colors.danger),

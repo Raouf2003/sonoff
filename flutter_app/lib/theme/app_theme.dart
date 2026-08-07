@@ -33,9 +33,11 @@ class AppRadius {
 
 class AppShadows {
   static BoxShadow cardShadow(Color shadowColor) =>
-      BoxShadow(color: shadowColor, blurRadius: 12, offset: const Offset(0, 4));
+      BoxShadow(color: shadowColor, blurRadius: 16, offset: const Offset(0, 4));
+  static BoxShadow softShadow(Color shadowColor) =>
+      BoxShadow(color: shadowColor.withValues(alpha: 0.10), blurRadius: 18, offset: const Offset(0, 6));
   static BoxShadow glow(Color glowColor) =>
-      BoxShadow(color: glowColor, blurRadius: 20, spreadRadius: 0);
+      BoxShadow(color: glowColor.withValues(alpha: 0.14), blurRadius: 14, offset: Offset.zero);
 }
 
 /// Convenience accessor so widgets write `context.steesColors.stream` instead

@@ -141,7 +141,7 @@ class _SteesLogo extends StatelessWidget {
           colors: [colors.stream, colors.leaf],
         ),
         boxShadow: [
-          BoxShadow(color: colors.stream.withValues(alpha: 0.3), blurRadius: 20, spreadRadius: 0),
+          BoxShadow(color: colors.border, blurRadius: 12, spreadRadius: 0),
         ],
       ),
       child: Center(
@@ -160,8 +160,8 @@ class ChannelConfig {
 }
 
 const channels = [
-  ChannelConfig('Zone 1', Icons.water_drop, Color(0xFF2DD4BF), 'CH 1'),
-  ChannelConfig('Zone 2', Icons.water_drop, Color(0xFF2DD4BF), 'CH 2'),
-  ChannelConfig('Zone 3', Icons.water_drop, Color(0xFF2DD4BF), 'CH 3'),
-  ChannelConfig('Zone 4', Icons.water_drop, Color(0xFF2DD4BF), 'CH 4'),
+  ChannelConfig('Zone 1', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 1'),
+  ChannelConfig('Zone 2', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 2'),
+  ChannelConfig('Zone 3', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 3'),
+  ChannelConfig('Zone 4', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 4'),
 ];

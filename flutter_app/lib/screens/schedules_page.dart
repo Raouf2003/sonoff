@@ -171,71 +171,91 @@ class _DeviceSection extends StatelessWidget {
     final colors = context.steesColors;
     final channels = device['channels'] as int? ?? 4;
     return Padding(
-      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              SteesAvatar(icon: Icons.water_drop, color: colors.stream),
-              const SizedBox(width: AppSpacing.md),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      device['name'] as String? ?? 'Device',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: colors.foam),
+      padding: const EdgeInsets.only(bottom: AppSpacing.lg),
+      child: Container(
+        decoration: BoxDecoration(
+          color: colors.surface.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          border: Border.all(color: colors.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.md),
+              child: Row(
+                children: [
+                  SteesAvatar(icon: Icons.water_drop, color: colors.stream),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          device['name'] as String? ?? 'Device',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: colors.foam),
+                        ),
+                        Text(
+                          'CH1–CH$channels',
+                          style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                        ),
+                      ],
                     ),
-                    Text(
-                      'CH1–CH$channels',
-                      style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                  ),
+                  FilledButton.icon(
+                    onPressed: onAdd,
+                    icon: const Icon(Icons.add, size: 16),
+                    label: Text('Add', style: GoogleFonts.sora(fontSize: 12, fontWeight: FontWeight.w700)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: colors.stream,
+                      foregroundColor: colors.well,
+                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              FilledButton.icon(
-                onPressed: onAdd,
-                icon: const Icon(Icons.add, size: 16),
-                label: Text('Add', style: GoogleFonts.sora(fontSize: 12, fontWeight: FontWeight.w700)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: colors.stream,
-                  foregroundColor: colors.well,
-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.md),
-          if (schedules.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
-              decoration: BoxDecoration(
-                color: colors.surface.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(color: colors.border),
-              ),
-              child: Text(
-                'No schedules for this device',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.inter(fontSize: 13, color: colors.mist.withValues(alpha: 0.6)),
-              ),
-            )
-          else
-            for (final (i, schedule) in schedules.indexed) ...[
-              _ScheduleTile(
-                schedule: schedule,
-                onEdit: () => onEdit(schedule),
-                onToggle: () => onToggle(schedule),
-                onDelete: () => onDelete(schedule),
-              ),
-              if (i < schedules.length - 1) const SizedBox(height: AppSpacing.sm),
-            ],
-        ],
+            ),
+            Divider(
+              height: 1,
+              thickness: 1,
+              color: colors.border,
+            ),
+            Padding(
+              padding: const EdgeInsets.all(AppSpacing.md),
+              child: schedules.isEmpty
+                  ? Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
+                      decoration: BoxDecoration(
+                        color: colors.surface.withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(AppRadius.lg),
+                        border: Border.all(color: colors.border),
+                      ),
+                      child: Text(
+                        'No schedules for this device',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(fontSize: 13, color: colors.mist.withValues(alpha: 0.6)),
+                      ),
+                    )
+                  : Column(
+                      children: [
+                        for (final (i, schedule) in schedules.indexed) ...[
+                          _ScheduleTile(
+                            schedule: schedule,
+                            onEdit: () => onEdit(schedule),
+                            onToggle: () => onToggle(schedule),
+                            onDelete: () => onDelete(schedule),
+                          ),
+                          if (i < schedules.length - 1) const SizedBox(height: AppSpacing.sm),
+                        ],
+                      ],
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }

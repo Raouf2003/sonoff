@@ -177,7 +177,7 @@ class _Field extends StatelessWidget {
       decoration: InputDecoration(
         hintText: hint,
         helperText: subtitle,
-        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
         prefixIcon: Icon(icon, size: 18, color: colors.mist),
         filled: true,
         fillColor: colors.well,

@@ -94,7 +94,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                           begin: Alignment.topLeft, end: Alignment.bottomRight,
                           colors: [colors.stream, colors.leaf],
                         ),
-                        boxShadow: [BoxShadow(color: colors.stream.withValues(alpha: 0.25), blurRadius: 24, spreadRadius: 2)],
+                        boxShadow: [BoxShadow(color: colors.border, blurRadius: 14, spreadRadius: 0)],
                       ),
                       child: Center(
                         child: Text('S', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w700, color: colors.well)),

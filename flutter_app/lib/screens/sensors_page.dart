@@ -214,7 +214,7 @@ class _SensorCardState extends State<_SensorCard> {
               SteesInfoRow(
                 icon: Icons.settings_input_hdmi,
                 label: 'Device: ${widget.deviceName}',
-                value: value != null
+                value: online
                     ? Text(
                         _fmtValue(value),
                         style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700, color: colors.stream),

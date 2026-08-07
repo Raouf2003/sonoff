@@ -112,7 +112,7 @@ class _MainShellState extends State<MainShell> {
                 colors: [colors.stream, colors.leaf],
               ),
               boxShadow: [
-                BoxShadow(color: colors.stream.withValues(alpha: 0.3), blurRadius: 12),
+                BoxShadow(color: colors.border, blurRadius: 8),
               ],
             ),
             child: Center(

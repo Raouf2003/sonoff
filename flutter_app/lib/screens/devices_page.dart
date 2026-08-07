@@ -30,6 +30,9 @@ class _DevicesPageState extends State<DevicesPage>
   bool _connected = false;
   Timer? _statusTimer;
 
+  static const int _maxPollFailures = 3;
+  int _pollFailures = 0;
+
   final List<bool> channelStates = [false, false, false, false];
   final List<bool> _channelLoading = [false, false, false, false];
   final Set<String> _pendingRelays = {};
@@ -75,7 +78,7 @@ class _DevicesPageState extends State<DevicesPage>
     _connectSocket();
     _statusTimer = Timer.periodic(
       const Duration(seconds: 15),
-      (_) => _fetchStatus(),
+      (_) => _fetchStatus(silent: true),
     );
   }
 
@@ -162,6 +165,7 @@ class _DevicesPageState extends State<DevicesPage>
 
     _socket?.on('device_status', (data) {
       if (!mounted) return;
+      _pollFailures = 0;
       final map = data as Map<String, dynamic>;
       final deviceId = map['deviceId'] as String?;
       if (deviceId != null && deviceId != _selectedDeviceId) return;
@@ -171,6 +175,7 @@ class _DevicesPageState extends State<DevicesPage>
 
     _socket?.on('device_update', (data) {
       if (!mounted) return;
+      _pollFailures = 0;
       final map = data as Map<String, dynamic>;
       final deviceId = map['deviceId'] as String?;
       if (deviceId != null && deviceId != _selectedDeviceId) return;
@@ -184,10 +189,11 @@ class _DevicesPageState extends State<DevicesPage>
     _socket?.connect();
   }
 
-  Future<void> _fetchStatus() async {
+  Future<void> _fetchStatus({bool silent = false}) async {
     if (_selectedDeviceId == null) return;
     try {
       final data = await _api.getStatus(_selectedDeviceId!);
+      _pollFailures = 0;
       _setConnected(data['online'] == true);
       setState(() {
         for (int i = 0; i < _deviceChannels; i++) {
@@ -197,13 +203,22 @@ class _DevicesPageState extends State<DevicesPage>
         }
       });
     } catch (e) {
-      _setConnected(false);
-      _showError('Failed to fetch status');
+      if (!silent) {
+        _setConnected(false);
+        _showError('Failed to fetch status');
+        return;
+      }
+      // Background polling: stay silent until several consecutive failures.
+      _pollFailures++;
+      if (_pollFailures >= _maxPollFailures) {
+        _setConnected(false);
+      }
     }
   }
 
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
+    if (!_connected) return;
     final key = '${_selectedDeviceId}_$channel';
     if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
@@ -372,27 +387,20 @@ class _DevicesPageState extends State<DevicesPage>
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(AppRadius.xl),
-                color: selected ? colors.surfaceLight : colors.surface,
+                color: colors.submerged,
                 border: Border.all(
                   color: selected
                       ? colors.stream.withValues(alpha: 0.6)
                       : colors.border,
                   width: selected ? 1.5 : 1,
                 ),
-                boxShadow: selected
-                    ? [
-                        BoxShadow(
-                          color: colors.stream.withValues(alpha: 0.15),
-                          blurRadius: 10,
-                        ),
-                      ]
-                    : null,
+                boxShadow: [AppShadows.cardShadow(colors.border)],
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    Icons.sensors,
+                    Icons.memory,
                     size: 14,
                     color: selected ? colors.stream : colors.mist,
                   ),
@@ -444,19 +452,14 @@ class _DevicesPageState extends State<DevicesPage>
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [
-            colors.submerged,
-            colors.surface,
-          ],
+          colors: [colors.submerged, colors.surface],
         ),
         border: Border.all(
           color: _connected
               ? colors.stream.withValues(alpha: 0.25)
               : colors.border,
         ),
-        boxShadow: _connected
-            ? [AppShadows.glow(colors.stream)]
-            : [AppShadows.cardShadow(colors.border)],
+        boxShadow: [AppShadows.cardShadow(colors.border)],
       ),
       child: Row(
         children: [
@@ -536,9 +539,9 @@ class _DevicesPageState extends State<DevicesPage>
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         crossAxisCount: _deviceChannels == 1 ? 1 : 2,
-        mainAxisSpacing: AppSpacing.lg,
-        crossAxisSpacing: AppSpacing.lg,
-        childAspectRatio: _deviceChannels == 1 ? 1.25 : 1.05,
+        mainAxisSpacing: AppSpacing.md,
+        crossAxisSpacing: AppSpacing.md,
+        childAspectRatio: _deviceChannels == 1 ? 1.4 : 1.15,
         children: List.generate(
           _deviceChannels,
           (i) => _WaterCard(
@@ -547,6 +550,7 @@ class _DevicesPageState extends State<DevicesPage>
             config: channels[i],
             isOn: channelStates[i],
             loading: _channelLoading[i],
+            offline: !_connected,
             entrance: _entranceControllers[i],
             ripple: _rippleControllers[i],
             onToggle: (val) => _toggle(i + 1, val),
@@ -653,8 +657,8 @@ class _StatusPill extends StatelessWidget {
               boxShadow: connected
                   ? [
                       BoxShadow(
-                        color: color.withValues(alpha: 0.5),
-                        blurRadius: 5,
+                        color: color.withValues(alpha: 0.35),
+                        blurRadius: 3,
                       ),
                     ]
                   : null,
@@ -685,6 +689,7 @@ class _WaterCard extends AnimatedWidget {
   final ChannelConfig config;
   final bool isOn;
   final bool loading;
+  final bool offline;
   final AnimationController entrance;
   final AnimationController ripple;
   final ValueChanged<bool> onToggle;
@@ -695,6 +700,7 @@ class _WaterCard extends AnimatedWidget {
     required this.config,
     required this.isOn,
     required this.loading,
+    required this.offline,
     required this.entrance,
     required this.ripple,
     required this.onToggle,
@@ -710,6 +716,7 @@ class _WaterCard extends AnimatedWidget {
         config: config,
         isOn: isOn,
         loading: loading,
+        offline: offline,
         ripple: ripple,
         onToggle: onToggle,
       ),
@@ -722,6 +729,7 @@ class _WaterCardBody extends StatefulWidget {
   final ChannelConfig config;
   final bool isOn;
   final bool loading;
+  final bool offline;
   final AnimationController ripple;
   final ValueChanged<bool> onToggle;
 
@@ -730,6 +738,7 @@ class _WaterCardBody extends StatefulWidget {
     required this.config,
     required this.isOn,
     required this.loading,
+    required this.offline,
     required this.ripple,
     required this.onToggle,
   });
@@ -762,10 +771,11 @@ class _WaterCardBodyState extends State<_WaterCardBody>
     final c = widget.config;
     final isOn = widget.isOn;
     final colors = context.steesColors;
+    final disabled = widget.offline || widget.loading;
 
     return GestureDetector(
-      onTapDown: widget.loading ? null : (_) => _press.forward(),
-      onTapUp: widget.loading
+      onTapDown: disabled ? null : (_) => _press.forward(),
+      onTapUp: disabled
           ? null
           : (_) {
               _press.reverse();
@@ -775,102 +785,143 @@ class _WaterCardBodyState extends State<_WaterCardBody>
       child: AnimatedScale(
         scale: 1.0 - _press.value * 0.03,
         duration: const Duration(milliseconds: 120),
-        child: AnimatedOpacity(
-          opacity: widget.loading ? 0.6 : 1.0,
-          duration: const Duration(milliseconds: 200),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeInOut,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AppRadius.xxl),
-              gradient: isOn
-                  ? LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        c.color.withValues(alpha: 0.12),
-                        c.color.withValues(alpha: 0.04),
-                      ],
-                    )
-                  : null,
-              color: isOn ? null : colors.surface,
-              border: Border.all(
-                color: isOn ? c.color.withValues(alpha: 0.3) : colors.border,
-                width: 1.5,
+child: AnimatedOpacity(
+            opacity: widget.loading ? 0.6 : (widget.offline ? 0.72 : 1.0),
+            duration: const Duration(milliseconds: 200),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeInOut,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                color: widget.offline
+                    ? colors.submerged.withValues(alpha: 0.5)
+                    : colors.submerged,
+                border: Border.all(
+                  color: widget.offline
+                      ? colors.mist.withValues(alpha: 0.5)
+                      : isOn
+                          ? colors.leaf
+                          : colors.border,
+                  width: widget.offline ? 1 : (isOn ? 1.2 : 1),
+                ),
+                boxShadow: [AppShadows.cardShadow(colors.border)],
               ),
-              boxShadow: isOn
-                  ? [
-                      BoxShadow(
-                        color: c.color.withValues(alpha: 0.12),
-                        blurRadius: 20,
-                        spreadRadius: -2,
-                      ),
-                    ]
-                  : [AppShadows.cardShadow(colors.border)],
-            ),
-            padding: const EdgeInsets.all(AppSpacing.md),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      c.subtitle,
-                      style: GoogleFonts.inter(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.2,
-                        color: isOn
-                            ? c.color.withValues(alpha: 0.8)
-                            : colors.mist.withValues(alpha: 0.5),
-                      ),
-                    ),
-                    _DropletToggle(
-                      isOn: isOn,
-                      loading: widget.loading,
-                      activeColor: c.color,
-                      onTap: () => widget.onToggle(!isOn),
-                    ),
-                  ],
-                ),
-                const Spacer(),
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 300),
-                  child: isOn
-                      ? _RippleIcon(
-                          icon: c.icon,
-                          color: c.color,
-                          ripple: widget.ripple,
-                        )
-                      : Icon(
-                          c.icon,
-                          key: const ValueKey('off'),
-                          size: 24,
-                          color: colors.mist.withValues(alpha: 0.3),
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.md,
+                AppSpacing.sm,
+                AppSpacing.md,
+                AppSpacing.sm,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        c.subtitle,
+                        style: GoogleFonts.inter(
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 1.1,
+                          color: widget.offline
+                              ? colors.mist.withValues(alpha: 0.6)
+                              : colors.mist,
                         ),
-                ),
-                const SizedBox(height: AppSpacing.sm),
-                AnimatedDefaultTextStyle(
-                  duration: const Duration(milliseconds: 300),
-                  style: GoogleFonts.sora(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: isOn ? c.color : colors.foam,
+                      ),
+                      _DropletToggle(
+                        isOn: isOn,
+                        loading: widget.loading,
+                        disabled: widget.offline,
+                        activeColor: colors.leaf,
+                        onTap: disabled ? null : () => widget.onToggle(!isOn),
+                      ),
+                    ],
                   ),
-                  child: Text(
-                    c.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        height: 34,
+                        child: Center(
+                          child: widget.offline
+                              ? Icon(
+                                  c.icon,
+                                  size: 30,
+                                  color: isOn
+                                      ? colors.leaf.withValues(alpha: 0.6)
+                                      : colors.mist.withValues(alpha: 0.35),
+                                )
+                              : _RippleIcon(
+                                  icon: c.icon,
+                                  size: 30,
+                                  color: isOn
+                                      ? colors.leaf
+                                      : colors.mist.withValues(alpha: 0.45),
+                                  ripple: widget.ripple,
+                                ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 4),
-                _FlowPill(isOn: isOn, color: c.color),
-              ],
+                  if (widget.offline)
+                    const _OfflineBadge()
+                  else
+                    _FlowPill(isOn: isOn, color: colors.leaf),
+                ],
+              ),
             ),
           ),
-        ),
       ),
+    );
+  }
+}
+
+class _RippleIcon extends AnimatedWidget {
+  final IconData icon;
+  final Color color;
+  final double size;
+  const _RippleIcon({
+    required this.icon,
+    required this.color,
+    required AnimationController ripple,
+    this.size = 24,
+  }) : super(listenable: ripple);
+
+  @override
+  Widget build(BuildContext context) {
+    final ctrl = listenable as AnimationController;
+    final scale = 1.0 + ctrl.value * 0.08;
+    final opacity = 0.6 + ctrl.value * 0.4;
+    final ring = size + 12;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        if (ctrl.value > 0.1)
+          Transform.scale(
+            scale: 1.0 + ctrl.value * 0.4,
+            child: Opacity(
+              opacity: (1.0 - ctrl.value) * 0.25,
+              child: Container(
+                width: ring,
+                height: ring,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: color, width: 2),
+                ),
+              ),
+            ),
+          ),
+        Transform.scale(
+          scale: scale,
+          child: Opacity(
+            opacity: opacity,
+            child: Icon(icon, size: size, color: color),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -878,21 +929,23 @@ class _WaterCardBodyState extends State<_WaterCardBody>
 class _DropletToggle extends StatelessWidget {
   final bool isOn;
   final bool loading;
+  final bool disabled;
   final Color activeColor;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _DropletToggle({
     required this.isOn,
     required this.loading,
     required this.activeColor,
-    required this.onTap,
+    this.disabled = false,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     return GestureDetector(
-      onTap: loading ? null : onTap,
+      onTap: (loading || disabled) ? null : onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
@@ -900,15 +953,11 @@ class _DropletToggle extends StatelessWidget {
         height: 21,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(11),
-          color: isOn ? activeColor : colors.surfaceLight,
-          boxShadow: isOn
-              ? [
-                  BoxShadow(
-                    color: activeColor.withValues(alpha: 0.3),
-                    blurRadius: 8,
-                  ),
-                ]
-              : null,
+          color: disabled
+              ? colors.surfaceLight.withValues(alpha: 0.5)
+              : isOn
+                  ? activeColor
+                  : colors.surfaceLight,
         ),
         padding: const EdgeInsets.all(2.5),
         child: AnimatedAlign(
@@ -920,9 +969,11 @@ class _DropletToggle extends StatelessWidget {
             height: 16,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isOn
-                  ? colors.well
-                  : colors.mist.withValues(alpha: 0.5),
+              color: disabled
+                  ? colors.mist.withValues(alpha: 0.4)
+                  : isOn
+                      ? colors.well
+                      : colors.mist.withValues(alpha: 0.5),
             ),
             child: Center(
               child: loading
@@ -937,7 +988,11 @@ class _DropletToggle extends StatelessWidget {
                   : Icon(
                       isOn ? Icons.water_drop : Icons.water_drop_outlined,
                       size: 9,
-                      color: isOn ? activeColor : colors.well,
+                      color: disabled
+                          ? colors.mist.withValues(alpha: 0.4)
+                          : isOn
+                              ? activeColor
+                              : colors.well,
                     ),
             ),
           ),
@@ -947,46 +1002,34 @@ class _DropletToggle extends StatelessWidget {
   }
 }
 
-class _RippleIcon extends AnimatedWidget {
-  final IconData icon;
-  final Color color;
-  const _RippleIcon({
-    required this.icon,
-    required this.color,
-    required AnimationController ripple,
-  }) : super(listenable: ripple);
+class _OfflineBadge extends StatelessWidget {
+  const _OfflineBadge();
 
   @override
   Widget build(BuildContext context) {
-    final ctrl = listenable as AnimationController;
-    final scale = 1.0 + ctrl.value * 0.08;
-    final opacity = 0.6 + ctrl.value * 0.4;
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        if (ctrl.value > 0.1)
-          Transform.scale(
-            scale: 1.0 + ctrl.value * 0.4,
-            child: Opacity(
-              opacity: (1.0 - ctrl.value) * 0.25,
-              child: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: color, width: 2),
-                ),
-              ),
+    final colors = context.steesColors;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: colors.mist.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.cloud_off, size: 9, color: colors.mist.withValues(alpha: 0.8)),
+          const SizedBox(width: 4),
+          Text(
+            'OFFLINE',
+            style: GoogleFonts.sora(
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              color: colors.mist.withValues(alpha: 0.8),
             ),
           ),
-        Transform.scale(
-          scale: scale,
-          child: Opacity(
-            opacity: opacity,
-            child: Icon(icon, size: 24, color: color),
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1000,7 +1043,7 @@ class _FlowPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     final bg = isOn ? color.withValues(alpha: 0.14) : colors.surfaceLight;
-    final fg = isOn ? color : colors.mist.withValues(alpha: 0.5);
+    final fg = isOn ? color : colors.mist.withValues(alpha: 0.7);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -1013,18 +1056,7 @@ class _FlowPill extends StatelessWidget {
           Container(
             width: 5,
             height: 5,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: fg,
-              boxShadow: isOn
-                  ? [
-                      BoxShadow(
-                        color: color.withValues(alpha: 0.5),
-                        blurRadius: 4,
-                      ),
-                    ]
-                  : null,
-            ),
+            decoration: BoxDecoration(shape: BoxShape.circle, color: fg),
           ),
           const SizedBox(width: 4),
           Text(

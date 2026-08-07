@@ -332,7 +332,7 @@ class _DeviceDropdown extends StatelessWidget {
         hintText: devices.isEmpty ? 'No Sonoff devices yet' : 'Select the Sonoff device',
         labelStyle: GoogleFonts.inter(fontSize: 12, color: colors.mist),
         helperText: 'e.g. Greenhouse Sonoff',
-        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
         prefixIcon: Icon(Icons.settings_input_hdmi, size: 18, color: colors.mist),
         filled: true,
         fillColor: colors.well,
@@ -381,7 +381,7 @@ class _Field extends StatelessWidget {
       decoration: InputDecoration(
         hintText: hint,
         helperText: subtitle,
-        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
         prefixIcon: Icon(icon, size: 18, color: colors.mist),
         filled: true,
         fillColor: colors.well,

@@ -447,7 +447,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     return InputDecoration(
       hintText: hint,
       helperText: helper,
-      helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.5)),
+      helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
       hintStyle: GoogleFonts.inter(fontSize: 14, color: colors.mist.withValues(alpha: 0.6)),
       prefixIcon: Icon(icon, size: 18, color: colors.mist),
       filled: true,
@@ -570,9 +570,8 @@ class _ChannelChip extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: selected ? color : colors.border,
-            width: selected ? 0 : 1,
+            width: selected ? 1 : 1,
           ),
-          boxShadow: selected ? [BoxShadow(color: color.withValues(alpha: 0.3), blurRadius: 8)] : null,
         ),
         child: Text(
           label,

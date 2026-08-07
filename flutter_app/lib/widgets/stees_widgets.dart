@@ -33,12 +33,12 @@ class SteesCard extends StatelessWidget {
         duration: const Duration(milliseconds: 250),
         padding: padding ?? const EdgeInsets.all(AppSpacing.lg),
         decoration: BoxDecoration(
-          color: colors.surface,
+          color: colors.submerged,
           borderRadius: BorderRadius.circular(AppRadius.xl),
-          border: Border.all(color: border, width: 1),
-          boxShadow: active
-              ? [AppShadows.glow(colors.stream.withValues(alpha: 0.25))]
-              : [AppShadows.cardShadow(colors.mist.withValues(alpha: 0.15))],
+          border: Border.all(color: border, width: active ? 1.2 : 1),
+          boxShadow: [
+            AppShadows.cardShadow(colors.border),
+          ],
         ),
         child: child,
       ),
