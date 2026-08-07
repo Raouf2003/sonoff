@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
@@ -16,7 +17,8 @@ class DevicesPage extends StatefulWidget {
   State<DevicesPage> createState() => _DevicesPageState();
 }
 
-class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin {
+class _DevicesPageState extends State<DevicesPage>
+    with TickerProviderStateMixin {
   final _api = ApiService();
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
@@ -29,6 +31,7 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   final List<bool> channelStates = [false, false, false, false];
   final List<bool> _channelLoading = [false, false, false, false];
+  final Set<String> _pendingRelays = {};
   final List<AnimationController> _rippleControllers = [];
   final List<AnimationController> _entranceControllers = [];
 
@@ -54,22 +57,36 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
   void initState() {
     super.initState();
     for (int i = 0; i < 4; i++) {
-      _rippleControllers.add(AnimationController(vsync: this, duration: const Duration(milliseconds: 1500)));
-      _entranceControllers.add(AnimationController(
-        vsync: this,
-        duration: Duration(milliseconds: 400 + i * 100),
-      )..forward());
+      _rippleControllers.add(
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 1500),
+        ),
+      );
+      _entranceControllers.add(
+        AnimationController(
+          vsync: this,
+          duration: Duration(milliseconds: 400 + i * 100),
+        )..forward(),
+      );
     }
     _loadDevices();
     _connectSocket();
-    _statusTimer = Timer.periodic(const Duration(seconds: 15), (_) => _fetchStatus());
+    _statusTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _fetchStatus(),
+    );
   }
 
   @override
   void dispose() {
     _statusTimer?.cancel();
-    for (final c in _rippleControllers) { c.dispose(); }
-    for (final c in _entranceControllers) { c.dispose(); }
+    for (final c in _rippleControllers) {
+      c.dispose();
+    }
+    for (final c in _entranceControllers) {
+      c.dispose();
+    }
     _socket?.disconnect();
     _socket?.dispose();
     super.dispose();
@@ -104,7 +121,11 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
     _fetchStatus();
   }
 
-  Map<String, dynamic> _getDevice(String deviceId) {    return _devices.firstWhere((d) => d['deviceId'] == deviceId, orElse: () => _devices.first);
+  Map<String, dynamic> _getDevice(String deviceId) {
+    return _devices.firstWhere(
+      (d) => d['deviceId'] == deviceId,
+      orElse: () => _devices.first,
+    );
   }
 
   int get _activeCount {
@@ -116,14 +137,24 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
   }
 
   void _connectSocket() {
+    _connectSocketAsync();
+  }
+
+  Future<void> _connectSocketAsync() async {
+    final token = await AuthService().getToken();
     _socket = io.io('$kProtocol://$kServerIp', <String, dynamic>{
       'transports': ['websocket'],
       'secure': true,
       'autoConnect': false,
+      if (token != null) 'auth': <String, dynamic>{'token': token},
     });
 
     _socket?.onConnect((_) {
-      if (mounted) setState(() { /* socket to backend is up, but device status determines the pill */ });
+      if (mounted) {
+        setState(() {
+          /* socket to backend is up, but device status determines the pill */
+        });
+      }
     });
     _socket?.onDisconnect((_) => _setConnected(false));
     _socket?.onConnectError((_) => _setConnected(false));
@@ -172,20 +203,30 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
+    final key = '${_selectedDeviceId}_$channel';
+    if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
     final prev = channelStates[index];
+    _pendingRelays.add(key);
     _setChannelState(index, targetState);
     setState(() => _channelLoading[index] = true);
     try {
-      await _api.control(_selectedDeviceId!, channel, targetState ? 'ON' : 'OFF');
+      await _api.control(
+        _selectedDeviceId!,
+        channel,
+        targetState ? 'ON' : 'OFF',
+      );
     } catch (e) {
       final msg = e.toString().replaceFirst('Exception: ', '');
-      if (msg.toLowerCase().contains('not connected') || msg.toLowerCase().contains('offline') || msg.toLowerCase().contains('powered off')) {
+      if (msg.toLowerCase().contains('not connected') ||
+          msg.toLowerCase().contains('offline') ||
+          msg.toLowerCase().contains('powered off')) {
         _setConnected(false);
       }
       _setChannelState(index, prev);
       _showError(msg);
     } finally {
+      _pendingRelays.remove(key);
       if (mounted) setState(() => _channelLoading[index] = false);
     }
   }
@@ -197,7 +238,9 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
         content: Text(msg, style: const TextStyle(fontSize: 13)),
         backgroundColor: Colors.redAccent.shade200,
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
         margin: const EdgeInsets.all(AppSpacing.lg),
         duration: const Duration(seconds: 3),
       ),
@@ -205,9 +248,9 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
   }
 
   void _openAddDevice() async {
-    final added = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
-    );
+    final added = await Navigator.of(
+      context,
+    ).push<bool>(MaterialPageRoute(builder: (_) => const AddDeviceScreen()));
     if (added == true) _loadDevices();
   }
 
@@ -226,16 +269,25 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
     return SteesEmpty(
       icon: Icons.water_drop_outlined,
       title: 'No devices yet',
-      subtitle: 'Claim a Sonoff controller to start\nmanaging your irrigation zones.',
+      subtitle:
+          'Claim a Sonoff controller to start\nmanaging your irrigation zones.',
       action: FilledButton.icon(
         onPressed: _openAddDevice,
         icon: const Icon(Icons.add, size: 18),
-        label: Text('Add Device', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+        label: Text(
+          'Add Device',
+          style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
+        ),
         style: FilledButton.styleFrom(
           backgroundColor: AppColors.stream,
           foregroundColor: AppColors.well,
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xl,
+            vertical: AppSpacing.md,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+          ),
         ),
       ),
     );
@@ -265,7 +317,12 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   Widget _buildPageTitle() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.xl,
+        AppSpacing.sm,
+        AppSpacing.xl,
+        AppSpacing.sm,
+      ),
       child: Text(
         'DEVICES',
         style: GoogleFonts.sora(
@@ -315,15 +372,28 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
                 borderRadius: BorderRadius.circular(AppRadius.xl),
                 color: selected ? AppColors.surfaceLight : AppColors.surface,
                 border: Border.all(
-                  color: selected ? AppColors.stream.withValues(alpha: 0.6) : AppColors.border,
+                  color: selected
+                      ? AppColors.stream.withValues(alpha: 0.6)
+                      : AppColors.border,
                   width: selected ? 1.5 : 1,
                 ),
-                boxShadow: selected ? [BoxShadow(color: AppColors.stream.withValues(alpha: 0.15), blurRadius: 10)] : null,
+                boxShadow: selected
+                    ? [
+                        BoxShadow(
+                          color: AppColors.stream.withValues(alpha: 0.15),
+                          blurRadius: 10,
+                        ),
+                      ]
+                    : null,
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.sensors, size: 14, color: selected ? AppColors.stream : AppColors.mist),
+                  Icon(
+                    Icons.sensors,
+                    size: 14,
+                    color: selected ? AppColors.stream : AppColors.mist,
+                  ),
                   const SizedBox(width: AppSpacing.xs + 2),
                   Text(
                     '$name · $ch',
@@ -359,7 +429,9 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
   }
 
   Widget _buildHeroCard() {
-    final device = _getDevice(_selectedDeviceId ?? _devices.first['deviceId'] as String);
+    final device = _getDevice(
+      _selectedDeviceId ?? _devices.first['deviceId'] as String,
+    );
     final name = device['name'] as String? ?? _selectedDeviceId ?? '';
     final channelsCount = device['channels'] as int? ?? _deviceChannels;
     return Container(
@@ -370,9 +442,18 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [_connected ? AppColors.stream.withValues(alpha: 0.14) : AppColors.submerged, AppColors.surface],
+          colors: [
+            _connected
+                ? AppColors.stream.withValues(alpha: 0.14)
+                : AppColors.submerged,
+            AppColors.surface,
+          ],
         ),
-        border: Border.all(color: _connected ? AppColors.stream.withValues(alpha: 0.25) : AppColors.border),
+        border: Border.all(
+          color: _connected
+              ? AppColors.stream.withValues(alpha: 0.25)
+              : AppColors.border,
+        ),
         boxShadow: _connected ? AppShadows.glow : AppShadows.card,
       ),
       child: Row(
@@ -387,12 +468,20 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
                   name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.foam),
+                  style: GoogleFonts.sora(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.foam,
+                  ),
                 ),
                 const SizedBox(height: AppSpacing.xs),
                 Text(
                   '$channelsCount zones · $_activeCount flowing',
-                  style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.mist),
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.mist,
+                  ),
                 ),
               ],
             ),
@@ -426,7 +515,11 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
             ),
             child: Text(
               '$_deviceChannels',
-              style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: AppColors.mist),
+              style: GoogleFonts.inter(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: AppColors.mist,
+              ),
             ),
           ),
         ],
@@ -463,18 +556,28 @@ class _DevicesPageState extends State<DevicesPage> with TickerProviderStateMixin
 
   Widget _buildBottomActions() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.lg),
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.sm,
+        AppSpacing.lg,
+        AppSpacing.lg,
+      ),
       child: SizedBox(
         width: double.infinity,
         height: 44,
         child: OutlinedButton.icon(
           onPressed: _openSchedules,
           icon: const Icon(Icons.schedule, size: 16),
-          label: Text('Schedules', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+          label: Text(
+            'Schedules',
+            style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
           style: OutlinedButton.styleFrom(
             foregroundColor: AppColors.foam,
             side: BorderSide(color: AppColors.stream.withValues(alpha: 0.35)),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+            ),
           ),
         ),
       ),
@@ -497,10 +600,17 @@ class _HeroIcon extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: connected
-              ? [AppColors.stream.withValues(alpha: 0.25), AppColors.leaf.withValues(alpha: 0.05)]
+              ? [
+                  AppColors.stream.withValues(alpha: 0.25),
+                  AppColors.leaf.withValues(alpha: 0.05),
+                ]
               : [AppColors.submerged, AppColors.surface],
         ),
-        border: Border.all(color: connected ? AppColors.stream.withValues(alpha: 0.35) : AppColors.border),
+        border: Border.all(
+          color: connected
+              ? AppColors.stream.withValues(alpha: 0.35)
+              : AppColors.border,
+        ),
       ),
       child: Icon(
         connected ? Icons.water_drop : Icons.water_drop_outlined,
@@ -519,7 +629,10 @@ class _StatusPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = connected ? AppColors.leaf : AppColors.mist;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2, vertical: 5),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm + 2,
+        vertical: 5,
+      ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
@@ -533,13 +646,24 @@ class _StatusPill extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: color,
-              boxShadow: connected ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 5)] : null,
+              boxShadow: connected
+                  ? [
+                      BoxShadow(
+                        color: color.withValues(alpha: 0.5),
+                        blurRadius: 5,
+                      ),
+                    ]
+                  : null,
             ),
           ),
           const SizedBox(width: 5),
           Text(
             connected ? 'Online' : 'Offline',
-            style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+            style: GoogleFonts.sora(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
           ),
         ],
       ),
@@ -610,17 +734,24 @@ class _WaterCardBody extends StatefulWidget {
   State<_WaterCardBody> createState() => _WaterCardBodyState();
 }
 
-class _WaterCardBodyState extends State<_WaterCardBody> with SingleTickerProviderStateMixin {
+class _WaterCardBodyState extends State<_WaterCardBody>
+    with SingleTickerProviderStateMixin {
   late AnimationController _press;
 
   @override
   void initState() {
     super.initState();
-    _press = AnimationController(vsync: this, duration: const Duration(milliseconds: 120));
+    _press = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 120),
+    );
   }
 
   @override
-  void dispose() { _press.dispose(); super.dispose(); }
+  void dispose() {
+    _press.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -628,77 +759,110 @@ class _WaterCardBodyState extends State<_WaterCardBody> with SingleTickerProvide
     final isOn = widget.isOn;
 
     return GestureDetector(
-      onTapDown: (_) => _press.forward(),
-      onTapUp: (_) { _press.reverse(); widget.onToggle(!isOn); },
+      onTapDown: widget.loading ? null : (_) => _press.forward(),
+      onTapUp: widget.loading
+          ? null
+          : (_) {
+              _press.reverse();
+              widget.onToggle(!isOn);
+            },
       onTapCancel: () => _press.reverse(),
       child: AnimatedScale(
         scale: 1.0 - _press.value * 0.03,
         duration: const Duration(milliseconds: 120),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 350),
-          curve: Curves.easeInOut,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(AppRadius.xxl),
-            gradient: isOn
-                ? LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [c.color.withValues(alpha: 0.12), c.color.withValues(alpha: 0.04)],
-                  )
-                : null,
-            color: isOn ? null : AppColors.surface,
-            border: Border.all(
-              color: isOn ? c.color.withValues(alpha: 0.3) : AppColors.border,
-              width: 1.5,
+        child: AnimatedOpacity(
+          opacity: widget.loading ? 0.6 : 1.0,
+          duration: const Duration(milliseconds: 200),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOut,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppRadius.xxl),
+              gradient: isOn
+                  ? LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        c.color.withValues(alpha: 0.12),
+                        c.color.withValues(alpha: 0.04),
+                      ],
+                    )
+                  : null,
+              color: isOn ? null : AppColors.surface,
+              border: Border.all(
+                color: isOn ? c.color.withValues(alpha: 0.3) : AppColors.border,
+                width: 1.5,
+              ),
+              boxShadow: isOn
+                  ? [
+                      BoxShadow(
+                        color: c.color.withValues(alpha: 0.12),
+                        blurRadius: 20,
+                        spreadRadius: -2,
+                      ),
+                    ]
+                  : AppShadows.card,
             ),
-            boxShadow: isOn
-                ? [BoxShadow(color: c.color.withValues(alpha: 0.12), blurRadius: 20, spreadRadius: -2)]
-                : AppShadows.card,
-          ),
-          padding: const EdgeInsets.all(AppSpacing.md),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    c.subtitle,
-                    style: GoogleFonts.inter(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1.2,
-                      color: isOn ? c.color.withValues(alpha: 0.8) : AppColors.mist.withValues(alpha: 0.5),
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      c.subtitle,
+                      style: GoogleFonts.inter(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.2,
+                        color: isOn
+                            ? c.color.withValues(alpha: 0.8)
+                            : AppColors.mist.withValues(alpha: 0.5),
+                      ),
                     ),
-                  ),
-                  _DropletToggle(
-                    isOn: isOn,
-                    loading: widget.loading,
-                    activeColor: c.color,
-                    onTap: () => widget.onToggle(!isOn),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
-                child: isOn
-                    ? _RippleIcon(icon: c.icon, color: c.color, ripple: widget.ripple)
-                    : Icon(c.icon, key: const ValueKey('off'), size: 24, color: AppColors.mist.withValues(alpha: 0.3)),
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 300),
-                style: GoogleFonts.sora(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: isOn ? c.color : AppColors.foam,
+                    _DropletToggle(
+                      isOn: isOn,
+                      loading: widget.loading,
+                      activeColor: c.color,
+                      onTap: () => widget.onToggle(!isOn),
+                    ),
+                  ],
                 ),
-                child: Text(c.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              ),
-              const SizedBox(height: 4),
-              _FlowPill(isOn: isOn, color: c.color),
-            ],
+                const Spacer(),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: isOn
+                      ? _RippleIcon(
+                          icon: c.icon,
+                          color: c.color,
+                          ripple: widget.ripple,
+                        )
+                      : Icon(
+                          c.icon,
+                          key: const ValueKey('off'),
+                          size: 24,
+                          color: AppColors.mist.withValues(alpha: 0.3),
+                        ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 300),
+                  style: GoogleFonts.sora(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isOn ? c.color : AppColors.foam,
+                  ),
+                  child: Text(
+                    c.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                _FlowPill(isOn: isOn, color: c.color),
+              ],
+            ),
           ),
         ),
       ),
@@ -712,7 +876,12 @@ class _DropletToggle extends StatelessWidget {
   final Color activeColor;
   final VoidCallback onTap;
 
-  const _DropletToggle({required this.isOn, required this.loading, required this.activeColor, required this.onTap});
+  const _DropletToggle({
+    required this.isOn,
+    required this.loading,
+    required this.activeColor,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -726,7 +895,14 @@ class _DropletToggle extends StatelessWidget {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(11),
           color: isOn ? activeColor : AppColors.surfaceLight,
-          boxShadow: isOn ? [BoxShadow(color: activeColor.withValues(alpha: 0.3), blurRadius: 8)] : null,
+          boxShadow: isOn
+              ? [
+                  BoxShadow(
+                    color: activeColor.withValues(alpha: 0.3),
+                    blurRadius: 8,
+                  ),
+                ]
+              : null,
         ),
         padding: const EdgeInsets.all(2.5),
         child: AnimatedAlign(
@@ -738,12 +914,25 @@ class _DropletToggle extends StatelessWidget {
             height: 16,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isOn ? AppColors.well : AppColors.mist.withValues(alpha: 0.5),
+              color: isOn
+                  ? AppColors.well
+                  : AppColors.mist.withValues(alpha: 0.5),
             ),
             child: Center(
               child: loading
-                  ? SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.6, color: isOn ? activeColor : AppColors.mist))
-                  : Icon(isOn ? Icons.water_drop : Icons.water_drop_outlined, size: 9, color: isOn ? activeColor : AppColors.well),
+                  ? SizedBox(
+                      width: 10,
+                      height: 10,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.6,
+                        color: isOn ? activeColor : AppColors.mist,
+                      ),
+                    )
+                  : Icon(
+                      isOn ? Icons.water_drop : Icons.water_drop_outlined,
+                      size: 9,
+                      color: isOn ? activeColor : AppColors.well,
+                    ),
             ),
           ),
         ),
@@ -755,8 +944,11 @@ class _DropletToggle extends StatelessWidget {
 class _RippleIcon extends AnimatedWidget {
   final IconData icon;
   final Color color;
-  const _RippleIcon({required this.icon, required this.color, required AnimationController ripple})
-      : super(listenable: ripple);
+  const _RippleIcon({
+    required this.icon,
+    required this.color,
+    required AnimationController ripple,
+  }) : super(listenable: ripple);
 
   @override
   Widget build(BuildContext context) {
@@ -774,11 +966,20 @@ class _RippleIcon extends AnimatedWidget {
               child: Container(
                 width: 36,
                 height: 36,
-                decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: color, width: 2)),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: color, width: 2),
+                ),
               ),
             ),
           ),
-        Transform.scale(scale: scale, child: Opacity(opacity: opacity, child: Icon(icon, size: 24, color: color))),
+        Transform.scale(
+          scale: scale,
+          child: Opacity(
+            opacity: opacity,
+            child: Icon(icon, size: 24, color: color),
+          ),
+        ),
       ],
     );
   }
@@ -808,13 +1009,25 @@ class _FlowPill extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: fg,
-              boxShadow: isOn ? [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 4)] : null,
+              boxShadow: isOn
+                  ? [
+                      BoxShadow(
+                        color: color.withValues(alpha: 0.5),
+                        blurRadius: 4,
+                      ),
+                    ]
+                  : null,
             ),
           ),
           const SizedBox(width: 4),
           Text(
             isOn ? 'FLOWING' : 'DRY',
-            style: GoogleFonts.sora(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.8, color: fg),
+            style: GoogleFonts.sora(
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              color: fg,
+            ),
           ),
         ],
       ),

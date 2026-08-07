@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 
@@ -10,7 +11,7 @@ const controlRoutes = require('./routes/control');
 const sensorRoutes = require('./routes/sensors');
 const ruleRoutes = require('./routes/rules');
 const scheduleRoutes = require('./routes/schedules');
-const { authMiddleware } = require('./middleware/auth');
+const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
 
 const deviceRegistry = require('./services/deviceRegistry');
 const runtimeState = require('./services/runtimeState');
@@ -62,8 +63,36 @@ async function loadFromDb() {
 initRuntime();
 loadFromDb().catch((err) => console.error('Service init error:', err.message));
 
+// Build the socket room name for a user. Rooms are namespaced so they never
+// collide with any other Socket.IO concept.
+const userRoom = (userId) => `user:${userId}`;
+
+// Expose the room naming helper to services (e.g. mqttGateway) that only hold
+// a reference to `io`, so they can target the correct owner room.
+io.userRoom = userRoom;
+
+// Authenticate every socket using the same JWT as the REST API. The token is
+// read from the Socket.IO handshake (app sends it via the `auth` field) and
+// verified against JWT_SECRET. The resulting userId is used to assign the
+// socket to that user's private room so events only reach that user's clients.
+io.use((socket, next) => {
+  const token = socket.handshake.auth && socket.handshake.auth.token;
+  if (!token) {
+    return next(new Error('Missing token'));
+  }
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.data.userId = decoded.userId;
+    next();
+  } catch (err) {
+    return next(new Error('Invalid or expired token'));
+  }
+});
+
 io.on('connection', (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  const room = userRoom(socket.data.userId);
+  socket.join(room);
+  console.log(`Client connected: ${socket.id} -> room ${room}`);
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
   });

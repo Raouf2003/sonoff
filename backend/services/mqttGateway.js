@@ -34,6 +34,10 @@ class MqttGateway {
     // sensorId -> { value, lastSeen } latest live MQTT reading. Transient,
     // never persisted. Used to verify a sensor exists before saving it.
     this.sensorCache = new Map();
+    // sensorId -> ownerId (string) resolved lazily and cached in memory to
+    // avoid a DB lookup on every incoming sensor reading. Never trusted from
+    // the client; always derived from the Sensor document.
+    this.sensorOwnerCache = new Map();
     // deviceId/sensorId -> { lastSeen } entities observed on the broker, used
     // to log first-boots without spamming every message.
     this.seenLog = new Map();
@@ -233,7 +237,7 @@ class MqttGateway {
     const deviceId = id;
     this._logSeen('device', deviceId);
     const device = this.deviceRegistry.get(deviceId);
-    const owned = !!(device && device.ownerId);
+    const ownerId = device ? device.ownerId : null;
     const channelCount = device ? device.channels : 4;
 
     // Tasmota LWT reports liveness: tele/<deviceId>/LWT = "Online"/"Offline".
@@ -241,8 +245,8 @@ class MqttGateway {
       const up = payload.trim().toLowerCase() === 'online';
       this.runtimeState.ensureDeviceState(deviceId, channelCount);
       this.runtimeState.setOnline(deviceId, up);
-      if (this.io && this.deviceRegistry.isOwned(deviceId)) {
-        this.io.emit('device_status', { deviceId, online: up });
+      if (this.io && ownerId) {
+        this.io.to(`user:${ownerId}`).emit('device_status', { deviceId, online: up });
       }
       return;
     }
@@ -279,11 +283,12 @@ class MqttGateway {
         chans[Number(ch)] = st;
       }
       this.runtimeState.touchDevice(deviceId);
-      if (owned && this.io) {
+      if (this.io && ownerId) {
+        const room = `user:${ownerId}`;
         for (const [ch, st] of Object.entries(channelUpdates)) {
-          this.io.emit('device_update', { deviceId, channel: Number(ch), state: st });
+          this.io.to(room).emit('device_update', { deviceId, channel: Number(ch), state: st });
         }
-        this.io.emit('device_status', { deviceId, online: true });
+        this.io.to(room).emit('device_status', { deviceId, online: true });
       }
     }
   }
@@ -319,16 +324,38 @@ class MqttGateway {
       { $set: { lastValue: value, lastSeen: new Date(now) } },
     ).catch((err) => console.error('Sensor update error:', err));
 
-    // Live push to the app, mirroring device_update. Emitted on every valid
-    // reading so the online dot / timestamp stays fresh. Same broadcast scope
-    // as device_update - the app filters by sensorId client-side.
-    if (this.io) {
-      this.io.emit('sensor_update', {
-        sensorId,
-        value,
-        lastSeen: new Date(now).toISOString(),
-      });
+    // Live push to the app, mirroring device_update. Emitted only to the
+    // owning user's socket room; never broadcast globally.
+    this._routeSensorUpdate(sensorId, value, new Date(now).toISOString());
+  }
+
+  // Deliver a sensor reading only to the sockets of the user who owns that
+  // sensor. The owner is resolved from the Sensor document once and cached in
+  // memory (sensorOwnerCache) so repeated MQTT readings don't hit the DB.
+  // If the owner cannot be determined the update is safely skipped.
+  async _routeSensorUpdate(sensorId, value, lastSeenIso) {
+    if (!this.io) return;
+    try {
+      const ownerId = await this._sensorOwnerId(sensorId);
+      if (!ownerId) {
+        console.log(`[mqtt] Skipping sensor_update for ${sensorId}: owner unknown`);
+        return;
+      }
+      this.io.to(`user:${ownerId}`).emit('sensor_update', { sensorId, value, lastSeen: lastSeenIso });
+    } catch (err) {
+      console.error(`[mqtt] Failed to route sensor_update for ${sensorId}:`, err.message);
     }
+  }
+
+  async _sensorOwnerId(sensorId) {
+    const cached = this.sensorOwnerCache.get(sensorId);
+    if (cached) return cached;
+    const doc = await Sensor.findOne({ sensorId }).select('ownerId').lean();
+    const ownerId = doc && doc.ownerId ? doc.ownerId.toString() : null;
+    if (ownerId) {
+      this.sensorOwnerCache.set(sensorId, ownerId);
+    }
+    return ownerId;
   }
 }
 
