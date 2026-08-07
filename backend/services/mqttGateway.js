@@ -2,7 +2,11 @@ const mqtt = require('mqtt');
 const Sensor = require('../models/Sensor');
 
 const ACK_TIMEOUT_MS = 5000;
-const RECENT_WINDOW_MS = 30000;
+// How long a device stays visible in recentDevices after its last MQTT packet.
+// Tasmota only publishes tele/<topic>/STATE at boot and then every TelePeriod
+// (default 300s), so the window must cover the idle silence between telemetry
+// bursts, otherwise the wizard can miss a freshly-provisioned device.
+const RECENT_WINDOW_MS = 320000;
 
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
