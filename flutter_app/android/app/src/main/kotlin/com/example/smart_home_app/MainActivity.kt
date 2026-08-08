@@ -43,6 +43,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "ensureBoundToWifi" -> ensureBoundToWifi(result)
                     "releaseWifiBinding" -> releaseWifiBinding(result)
+                    "getNetworkInfo" -> getNetworkInfo(result)
                     else -> result.notImplemented()
                 }
             }
@@ -90,7 +91,7 @@ class MainActivity : FlutterActivity() {
         } catch (e: SecurityException) {
             failPending("SECURITY", "Missing ACCESS_NETWORK_STATE permission.", null)
         } catch (e: Exception) {
-            failPending("ERROR", e.message, null)
+            failPending("ERROR", e.message ?: "Unknown error", null)
         }
     }
 
@@ -115,6 +116,28 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * Returns the transport/capabilities of the bound network (or the active
+     * default if none bound), so the wizard can diagnose whether the phone is
+     * still on the device AP (no internet) or was auto-switched back to a
+     * router with internet.
+     */
+    private fun getNetworkInfo(result: MethodChannel.Result) {
+        val nw = boundNetwork ?: connectivityManager.activeNetwork
+        val caps = nw?.let { connectivityManager.getNetworkCapabilities(it) }
+        val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        val hasInternet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        result.success(
+            mapOf(
+                "bound" to (boundNetwork != null),
+                "wifi" to isWifi,
+                "internet" to hasInternet,
+                "validated" to validated,
+            )
+        )
     }
 
     private fun bindTo(network: Network) {

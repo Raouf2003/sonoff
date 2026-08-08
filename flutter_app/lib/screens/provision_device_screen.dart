@@ -120,6 +120,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       final ok = await _wifiBindChannel.invokeMethod<bool>('ensureBoundToWifi');
       _wifiBound = ok ?? false;
       debugPrint('[PROVISION] wifi bound=$_wifiBound');
+      if (_wifiBound) await _logNetworkInfo('after bind');
     } catch (e) {
       debugPrint('[PROVISION] wifi bind failed: $e');
     }
@@ -146,7 +147,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       });
       return;
     }
-    setState(() => _error = 'Could not find the device. Open Wi-Fi settings and connect to it.');
+    setState(() {
+      _error ??=
+          'Could not find the device. Open Wi-Fi settings and connect to it.';
+    });
     _reachTimer = Timer(const Duration(seconds: 2), _probeReachability);
   }
 
@@ -155,6 +159,30 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       await http.get(Uri.parse(_deviceUrl)).timeout(const Duration(seconds: 2));
       return true;
     } catch (_) {
+      _wifiBound = false;
+      final onInternet = await _logNetworkInfo('probe failed');
+      if (onInternet) {
+        _error =
+            "You're connected to a network with internet (your router), not the "
+            'device access point. Disable Mobile data, forget/off your router '
+            'Wi-Fi, connect to the device network, then retry.';
+        setState(() {});
+      }
+      return false;
+    }
+  }
+
+  Future<bool> _logNetworkInfo(String tag) async {
+    if (Theme.of(context).platform == TargetPlatform.iOS) return false;
+    try {
+      final info = await _wifiBindChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getNetworkInfo');
+      debugPrint(
+          '[PROVISION] $tag: bound=${info?['bound']} wifi=${info?['wifi']} '
+          'internet=${info?['internet']} validated=${info?['validated']}');
+      return info?['internet'] == true;
+    } catch (e) {
+      debugPrint('[PROVISION] $tag: could not read network info: $e');
       return false;
     }
   }
