@@ -59,6 +59,9 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
+      _reachTimer?.cancel();
+      _wifiBound = false;
+      debugPrint('[PROVISION] resume after Wi-Fi settings');
       _probeReachability();
     }
   }
@@ -103,24 +106,45 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   void _startSearch() {
+    _reachTimer?.cancel();
     setState(() {
       _searching = true;
       _error = null;
     });
+    _wifiBound = false;
     _probeReachability();
   }
 
-  // Best-effort bind of this process's sockets to the WiFi interface. On the
-  // device AP (no internet) Android may otherwise route requests over
-  // cellular. Returns immediately on failure so the probe logic still runs.
+  // Bind this process's sockets to the CURRENTLY ACTIVE Wi-Fi network (the one
+  // the user manually selected in Android Wi-Fi settings). Unlike the old
+  // requestNetwork() approach this never lets Android pick a different network
+  // (e.g. the router) — getActiveNetwork() returns exactly the user's choice.
   Future<void> _ensureBoundToWifi() async {
     if (Theme.of(context).platform == TargetPlatform.iOS) return;
     if (_wifiBound) return;
+    final expected = _ssidCtl.text.trim();
     try {
-      final ok = await _wifiBindChannel.invokeMethod<bool>('ensureBoundToWifi');
-      _wifiBound = ok ?? false;
-      debugPrint('[PROVISION] wifi bound=$_wifiBound');
-      if (_wifiBound) await _logNetworkInfo('after bind');
+      final info = await _wifiBindChannel.invokeMethod<Map<dynamic, dynamic>>(
+        'ensureBoundToActiveWifi',
+        {'expectedSsid': expected},
+      );
+      final activeSsid = info?['activeSsid']?.toString() ?? '<unknown>';
+      debugPrint('[PROVISION] expected SSID: $expected');
+      debugPrint('[PROVISION] active SSID: $activeSsid');
+      final matched = info?['matched'] == true;
+      _wifiBound = info?['bound'] == true;
+      if (_wifiBound) {
+        debugPrint('[PROVISION] active Wi-Fi network matched');
+        debugPrint('[PROVISION] process bound to active Wi-Fi');
+        await _logNetworkInfo('after bind');
+      } else if (!matched) {
+        debugPrint('[PROVISION] wrong Wi-Fi network');
+        _error =
+            "You're connected to $activeSsid. Connect to $expected. Open Wi-Fi settings and try again.";
+        setState(() {});
+      } else {
+        debugPrint('[PROVISION] could not bind to active Wi-Fi');
+      }
     } catch (e) {
       debugPrint('[PROVISION] wifi bind failed: $e');
     }
@@ -137,7 +161,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _probeReachability() async {
     if (!mounted) return;
+    // Give Android a moment to settle on the newly selected network after the
+    // user returns from Wi-Fi Settings (or from Continue).
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
     await _ensureBoundToWifi();
+    if (!_wifiBound) {
+      // Wrong SSID or bind failed: stop auto-retrying, show error + Retry.
+      setState(() => _searching = false);
+      return;
+    }
     if (await _isReachable()) {
       _reachTimer?.cancel();
       setState(() {
@@ -156,18 +189,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<bool> _isReachable() async {
     try {
-      await http.get(Uri.parse(_deviceUrl)).timeout(const Duration(seconds: 2));
+      debugPrint('[PROVISION] probing $_deviceUrl');
+      final res =
+          await http.get(Uri.parse(_deviceUrl)).timeout(const Duration(seconds: 3));
+      // Any HTTP response counts as reachable, regardless of status code.
+      debugPrint('[PROVISION] probe status=${res.statusCode}');
       return true;
     } catch (_) {
+      debugPrint('[PROVISION] probe unreachable (connection failed or timeout)');
       _wifiBound = false;
-      final onInternet = await _logNetworkInfo('probe failed');
-      if (onInternet) {
-        _error =
-            "You're connected to a network with internet (your router), not the "
-            'device access point. Disable Mobile data, forget/off your router '
-            'Wi-Fi, connect to the device network, then retry.';
-        setState(() {});
-      }
+      await _logNetworkInfo('probe failed');
       return false;
     }
   }
