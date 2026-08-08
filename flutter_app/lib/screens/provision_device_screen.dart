@@ -49,6 +49,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   String? _error;
   Timer? _reachTimer;
   Timer? _waitTimer;
+  String? _pollingTopic;
+
+  String get _phaseLabel {
+    switch (_step) {
+      case _Step.connect:
+        return 'AP_CONNECT';
+      case _Step.provision:
+        return 'CONFIGURING';
+      case _Step.waiting:
+        return 'WAITING_FOR_DEVICE';
+    }
+  }
 
   @override
   void initState() {
@@ -58,11 +70,24 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && mounted) {
-      _reachTimer?.cancel();
-      _wifiBound = false;
-      debugPrint('[PROVISION] resume after Wi-Fi settings');
-      _probeReachability();
+    // Phase-dependent resume handling. The AP probe / Wi-Fi binding must run
+    // ONLY during the initial "connect phone to Tasmota AP" phase. After the
+    // Tasmota Restart command succeeds, the AP is EXPECTED to disappear, so we
+    // must never re-probe 192.168.4.1 or show an AP connection error again.
+    if (state != AppLifecycleState.resumed || !mounted) return;
+    switch (_step) {
+      case _Step.connect:
+        debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
+        _reachTimer?.cancel();
+        _wifiBound = false;
+        _probeReachability();
+      case _Step.provision:
+        debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
+      case _Step.waiting:
+        debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped: provisioning already completed');
+        _waitTimer?.cancel();
+        final topic = _pollingTopic;
+        if (topic != null) _pollSnapshot(topic);
     }
   }
 
@@ -106,6 +131,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   void _startSearch() {
+    debugPrint('[PROVISION] phase=$_phaseLabel start search');
+    if (_step != _Step.connect) return;
     _reachTimer?.cancel();
     setState(() {
       _searching = true;
@@ -160,15 +187,15 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   Future<void> _probeReachability() async {
-    if (!mounted) return;
+    if (!mounted || _step != _Step.connect) return;
     // Give Android a moment to settle on the newly selected network after the
     // user returns from Wi-Fi Settings (or from Continue).
     await Future<void>.delayed(const Duration(milliseconds: 400));
-    if (!mounted) return;
+    if (!mounted || _step != _Step.connect) return;
     await _ensureBoundToWifi();
     if (!_wifiBound) {
       // Wrong SSID or bind failed: stop auto-retrying, show error + Retry.
-      setState(() => _searching = false);
+      if (mounted && _step == _Step.connect) setState(() => _searching = false);
       return;
     }
     if (await _isReachable()) {
@@ -255,8 +282,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       });
       return;
     }
+    debugPrint('[PROVISION] restart succeeded');
+    // Post-provision / waiting phase. The Tasmota AP is expected to disappear
+    // now — stop AP probing and do NOT re-run Wi-Fi binding. The phone must go
+    // back to normal routing and we wait for the device on the backend.
+    _reachTimer?.cancel();
+    debugPrint('[PROVISION] phase=WAITING_FOR_DEVICE');
     await _releaseWifiBinding();
-    debugPrint('[PROVISION] wifi binding released, resuming default routing');
+    debugPrint('[PROVISION] wifi binding released');
     if (!mounted) return;
     setState(() {
       _provisioning = false;
@@ -321,20 +354,25 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // ──────────────────────────────────────────────────────────
 
   void _waitForDeviceOnline(String deviceId) {
+    _pollingTopic = deviceId;
     _pollSnapshot(deviceId);
   }
 
   Future<void> _pollSnapshot(String deviceId) async {
+    if (_step != _Step.waiting) return;
     bool found = false;
     try {
+      debugPrint('[PROVISION] polling backend for deviceId=$deviceId');
       final snapshot = await _api.fetchSnapshot();
       final recent = snapshot['recentDevices'] as List<dynamic>? ?? [];
       found = recent.any((d) => d is Map && d['deviceId'] == deviceId);
     } catch (_) {
       found = false;
     }
-    if (!mounted) return;
+    if (!mounted || _step != _Step.waiting) return;
     if (found) {
+      debugPrint('[PROVISION] device detected in recentDevices');
+      _waitTimer?.cancel();
       await _runClaim(deviceId);
       return;
     }
