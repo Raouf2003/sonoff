@@ -2,6 +2,14 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+    <!-- WifiManager.isWifiEnabled()/getScanResults() require ACCESS_WIFI_STATE;
+         startScan() requires CHANGE_WIFI_STATE (above). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <!-- Wi-Fi SSID scan: location permission is required to read nearby
+         network names on Android 6.1+ (API 23+). Coarse is enough on some
+         versions; fine is required for ScanResult.SSID on Android 10+. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <application
         android:label="smart_home_app"
         android:name="${applicationName}"

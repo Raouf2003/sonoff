@@ -2,11 +2,14 @@ package com.example.smart_home_app
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
@@ -19,6 +22,10 @@ class MainActivity : FlutterActivity() {
     private val wifiBindChannelName = "stees/wifi_binding"
 
     private var boundNetwork: Network? = null
+    private var pendingScanResult: MethodChannel.Result? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val scanRequestCode = 4711
 
     private val connectivityManager: ConnectivityManager
         get() = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -36,6 +43,7 @@ class MainActivity : FlutterActivity() {
                         startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
                         result.success(null)
                     }
+                    "scanWifi" -> scanWifi(result)
                     else -> result.notImplemented()
                 }
             }
@@ -56,7 +64,133 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         releaseWifiBinding(null)
+        pendingScanResult?.error("ABORTED", "Activity destroyed before Wi-Fi scan finished.", null)
+        pendingScanResult = null
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (requestCode == scanRequestCode) {
+            val granted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                startWifiScan()
+            } else {
+                val result = pendingScanResult
+                pendingScanResult = null
+                result?.success(
+                    mapOf(
+                        "available" to false,
+                        "networks" to emptyList<String>(),
+                        "reason" to "permission denied",
+                    )
+                )
+            }
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    /**
+     * Scans for nearby Wi-Fi SSIDs WITHOUT disconnecting the phone from the
+     * Tasmota AP the user is currently on. This is a passive read of the
+     * radio-side scan results — connecting happens only via the system Wi-Fi
+     * settings, never here. Requires location permission on Android 6.1+;
+     * if it is missing we request it at runtime. On any failure we degrade
+     * gracefully (Dart keeps "Enter network manually").
+     */
+    private fun scanWifi(result: MethodChannel.Result) {
+        val permission = requiredScanPermission()
+        if (permission != null && checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && permission != null) {
+                if (pendingScanResult != null) {
+                    result.success(
+                        mapOf(
+                            "available" to false,
+                            "networks" to emptyList<String>(),
+                            "reason" to "scan in progress",
+                        )
+                    )
+                    return
+                }
+                pendingScanResult = result
+                requestPermissions(arrayOf(permission), scanRequestCode)
+                return
+            }
+            result.success(
+                mapOf(
+                    "available" to false,
+                    "networks" to emptyList<String>(),
+                    "reason" to "permission missing",
+                )
+            )
+            return
+        }
+        // Permission already granted: still store the result so startWifiScan()
+        // can complete the Dart call. Without this the pending result stays
+        // null, startWifiScan() returns early and the sheet spins forever.
+        pendingScanResult = result
+        startWifiScan()
+    }
+
+    private fun startWifiScan() {
+        val result = pendingScanResult ?: return
+        pendingScanResult = null
+        val wm = wifiManager
+        val enabled = runCatching { wm?.isWifiEnabled }.getOrDefault(false)
+        if (wm == null || enabled != true) {
+            result.success(
+                mapOf(
+                    "available" to false,
+                    "networks" to emptyList<String>(),
+                    "reason" to "Wi-Fi off or unavailable",
+                )
+            )
+            return
+        }
+        val wifi: WifiManager = wm
+        val started = runCatching { wifi.startScan() }.getOrDefault(false)
+        // Scan results arrive asynchronously; read them shortly after startScan().
+        mainHandler.postDelayed({
+            val scanned: List<android.net.wifi.ScanResult> =
+                runCatching { wifi.scanResults }.getOrDefault(emptyList())
+            val names: MutableList<String> = mutableListOf()
+            for (sr in scanned) {
+                val name = sr.SSID?.trim()?.removeSurrounding("\"")
+                if (!name.isNullOrBlank() && name != "<unknown ssid>" && !names.contains(name)) {
+                    names.add(name)
+                }
+            }
+            names.sort()
+            if (names.isEmpty()) {
+                result.success(
+                    mapOf(
+                        "available" to true,
+                        "networks" to emptyList<String>(),
+                        "reason" to if (started) "no networks found" else "scan rejected",
+                    )
+                )
+            } else {
+                result.success(
+                    mapOf(
+                        "available" to true,
+                        "networks" to names,
+                        "reason" to null,
+                    )
+                )
+            }
+        }, 1200)
+    }
+
+    private fun requiredScanPermission(): String? {
+        return when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> android.Manifest.permission.ACCESS_FINE_LOCATION
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> android.Manifest.permission.ACCESS_FINE_LOCATION
+            else -> null
+        }
     }
 
     /**

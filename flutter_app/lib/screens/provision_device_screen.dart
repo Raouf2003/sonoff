@@ -26,6 +26,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     with WidgetsBindingObserver {
   static const String _deviceUrl = 'http://192.168.4.1';
 
+  // Expected Tasmota AP SSID used only for the Wi-Fi binding sanity check.
+  // The trailing XXXX acts as a tasmota- prefix wildcard in MainActivity.
+  static const String _tasmotaApSsid = 'tasmota-XXXX';
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -33,7 +37,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   final _api = ApiService();
 
-  final _ssidCtl = TextEditingController(text: 'tasmota-XXXX');
+  final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
   final _mqttBrokerCtl = TextEditingController(text: 'broker.emqx.io');
   final _mqttPortCtl = TextEditingController(text: '1883');
@@ -42,10 +46,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   final _deviceNameCtl = TextEditingController();
   final _topicCtl = TextEditingController();
 
+  bool _manualWifi = false;
+
   _Step _step = _Step.connect;
   bool _searching = false;
   bool _provisioning = false;
-  bool _topicEdited = false;
   String? _error;
   Timer? _reachTimer;
   Timer? _waitTimer;
@@ -149,7 +154,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   Future<void> _ensureBoundToWifi() async {
     if (Theme.of(context).platform == TargetPlatform.iOS) return;
     if (_wifiBound) return;
-    final expected = _ssidCtl.text.trim();
+    final expected = _tasmotaApSsid;
     try {
       final info = await _wifiBindChannel.invokeMethod<Map<dynamic, dynamic>>(
         'ensureBoundToActiveWifi',
@@ -251,9 +256,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   void _syncTopic() {
     final name = _deviceNameCtl.text.trim();
-    if (_topicEdited || name.isEmpty) return;
+    if (name.isEmpty) return;
     final slug = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
-    final rand = DateTime.now().millisecondsSinceEpoch % 1000;
+    final rand = (DateTime.now().millisecondsSinceEpoch % 0xFFFF)
+        .toRadixString(16)
+        .padLeft(4, '0');
     _topicCtl.text = 'stees_${slug}_$rand';
     setState(() {});
   }
@@ -264,9 +271,19 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _provision() async {
     final name = _deviceNameCtl.text.trim();
+    final ssid = _ssidCtl.text.trim();
+    if (name.isEmpty) {
+      _setError('Enter a Device Name.');
+      return;
+    }
+    if (ssid.isEmpty) {
+      _setError('Select or enter your home Wi-Fi network.');
+      return;
+    }
+    _syncTopic();
     final topic = _topicCtl.text.trim();
-    if (name.isEmpty || topic.isEmpty) {
-      _setError('Enter a Device Name and MQTT Topic.');
+    if (topic.isEmpty) {
+      _setError('Could not generate a Device ID. Enter a Device Name first.');
       return;
     }
     setState(() {
@@ -474,24 +491,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
               Icon(Icons.wifi_outlined, size: 40, color: colors.stream.withValues(alpha: 0.5)),
               const SizedBox(height: AppSpacing.md),
               Text(
-                'Connect your phone to the device Wi-Fi.',
+                'Connect your phone to the device Wi-Fi.\n\n'
+                "Tap below, pick the device's access point (tasmota-XXXX), "
+                'then return here.',
                 style: GoogleFonts.inter(fontSize: 13, color: colors.mist, height: 1.5),
                 textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: AppSpacing.xl),
-              _Field(
-                controller: _ssidCtl,
-                hint: 'Wi-Fi SSID',
-                subtitle: 'e.g. tasmota-XXXX',
-                icon: Icons.router_outlined,
-              ),
-              const SizedBox(height: AppSpacing.md),
-              _Field(
-                controller: _wifiPassCtl,
-                hint: 'Wi-Fi password',
-                subtitle: 'Leave blank if the network is open',
-                icon: Icons.lock_outline,
-                obscure: true,
               ),
               const SizedBox(height: AppSpacing.xl),
               SizedBox(
@@ -539,27 +543,21 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _section(colors, 'NETWORK'),
-        _Field(controller: _ssidCtl, hint: 'Wi-Fi SSID', icon: Icons.router_outlined),
+        _section(colors, 'HOME WI-FI'),
+        _buildWifiSelector(colors),
         const SizedBox(height: AppSpacing.md),
+        if (_manualWifi) ...[
+          _Field(
+            controller: _ssidCtl,
+            hint: 'Network name (SSID)',
+            icon: Icons.router_outlined,
+          ),
+          const SizedBox(height: AppSpacing.md),
+        ],
         _Field(
           controller: _wifiPassCtl,
           hint: 'Wi-Fi Password',
           icon: Icons.lock_outline,
-          obscure: true,
-        ),
-        const SizedBox(height: AppSpacing.xl),
-        _section(colors, 'MQTT BROKER'),
-        _Field(controller: _mqttBrokerCtl, hint: 'MQTT Broker', icon: Icons.dns_outlined),
-        const SizedBox(height: AppSpacing.md),
-        _Field(controller: _mqttPortCtl, hint: 'MQTT Port', icon: Icons.numbers),
-        const SizedBox(height: AppSpacing.md),
-        _Field(controller: _mqttUserCtl, hint: 'MQTT Username', icon: Icons.person_outline),
-        const SizedBox(height: AppSpacing.md),
-        _Field(
-          controller: _mqttPassCtl,
-          hint: 'MQTT Password',
-          icon: Icons.key_outlined,
           obscure: true,
         ),
         const SizedBox(height: AppSpacing.xl),
@@ -571,11 +569,34 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
           onChanged: (_) => _syncTopic(),
         ),
         const SizedBox(height: AppSpacing.md),
-        _Field(
-          controller: _topicCtl,
-          hint: 'MQTT Topic (device ID)',
-          icon: Icons.alternate_email,
-          onChanged: (_) => _topicEdited = true,
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+          decoration: BoxDecoration(
+            color: colors.well,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.alternate_email, size: 18, color: colors.mist),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Device ID',
+                      style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _topicCtl.text.isEmpty ? 'generated from device name' : _topicCtl.text,
+                      style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: AppSpacing.xxl),
         SizedBox(
@@ -596,6 +617,70 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         const SizedBox(height: AppSpacing.xl),
       ],
     );
+  }
+
+  // Dropdown-style selector for the HOME Wi-Fi network. Opening it scans for
+  // nearby networks (without disconnecting from the Tasmota AP) and offers a
+  // manual entry fallback for hidden/unlisted networks.
+  Widget _buildWifiSelector(SteesColors colors) {
+    final selected = _ssidCtl.text.trim();
+    return InkWell(
+      onTap: _openWifiPicker,
+      borderRadius: BorderRadius.circular(AppRadius.lg),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+        decoration: BoxDecoration(
+          color: colors.well,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.wifi, size: 18, color: colors.mist),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Wi-Fi Network',
+                    style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    selected.isEmpty ? 'Select Wi-Fi network' : selected,
+                    style: GoogleFonts.inter(fontSize: 14, color: selected.isEmpty ? colors.mist : colors.foam),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.arrow_drop_down, size: 22, color: colors.mist),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openWifiPicker() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+      ),
+      builder: (ctx) => _WifiPickerSheet(
+        currentSsid: _ssidCtl.text.trim(),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      if (picked == '_manual') {
+        _manualWifi = true;
+      } else {
+        _manualWifi = false;
+        _ssidCtl.text = picked;
+      }
+    });
   }
 
   Widget _buildWaiting(SteesColors colors) {
@@ -666,10 +751,180 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 }
 
+class _WifiPickerSheet extends StatefulWidget {
+  final String currentSsid;
+  const _WifiPickerSheet({required this.currentSsid});
+
+  @override
+  State<_WifiPickerSheet> createState() => _WifiPickerSheetState();
+}
+
+class _WifiPickerSheetState extends State<_WifiPickerSheet> {
+  static const _scanChannel = MethodChannel('stees/wifi_settings');
+
+  List<String> _networks = const [];
+  bool _scanning = false;
+  String? _scanMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _scan();
+  }
+
+  Future<void> _scan() async {
+    setState(() {
+      _scanning = true;
+      _scanMessage = null;
+      _networks = const [];
+    });
+    try {
+      final Map<dynamic, dynamic>? result = await _scanChannel
+          .invokeMethod<Map<dynamic, dynamic>>('scanWifi')
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final available = result?['available'] == true;
+      final raw = result?['networks'] as List<dynamic>? ?? const [];
+      final ssids = raw
+          .whereType<String>()
+          .where((s) => s.trim().isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+      setState(() {
+        _scanning = false;
+        _networks = ssids;
+        _scanMessage = !available
+            ? 'Wi-Fi scan unavailable. Enter your network manually.'
+            : (ssids.isEmpty ? 'No Wi-Fi networks found.' : null);
+      });
+    } on TimeoutException {
+      debugPrint('[PROVISION] wifi scan timed out after 10s');
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _scanMessage = 'Wi-Fi scan timed out. Tap refresh to try again.';
+      });
+    } catch (e) {
+      debugPrint('[PROVISION] wifi scan failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _scanMessage = 'Wi-Fi scan unavailable. Enter your network manually.';
+      });
+    }
+  }
+
+  void _selectNetwork(String ssid) {
+    Navigator.of(context).pop(ssid);
+  }
+
+  void _selectManual() {
+    Navigator.of(context).pop('_manual');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Select Wi-Fi Network',
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
+                ),
+                const Spacer(),
+                IconButton(
+                  tooltip: 'Rescan',
+                  onPressed: _scanning ? null : _scan,
+                  icon: _scanning
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
+                        )
+                      : const Icon(Icons.refresh, size: 20, color: Colors.white),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            if (_scanMessage != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                child: Text(
+                  _scanMessage!,
+                  style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
+                ),
+              ),
+            if (_scanning)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.xl),
+                child: Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream),
+                  ),
+                ),
+              )
+            else if (_networks.isNotEmpty)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: _networks.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 4),
+                  itemBuilder: (ctx, i) {
+                    final ssid = _networks[i];
+                    final isCurrent = ssid == widget.currentSsid;
+                    return Material(
+                      color: isCurrent ? colors.stream.withValues(alpha: 0.12) : colors.submerged,
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      child: ListTile(
+                        dense: true,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+                        leading: Icon(Icons.wifi, size: 20, color: colors.mist),
+                        title: Text(
+                          ssid,
+                          style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: isCurrent
+                            ? Icon(Icons.check_circle, size: 18, color: colors.stream)
+                            : null,
+                        onTap: () => _selectNetwork(ssid),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: AppSpacing.xl),
+            ListTile(
+              dense: true,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+              leading: Icon(Icons.keyboard_outlined, size: 20, color: colors.mist),
+              title: Text(
+                'Enter network manually',
+                style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
+              ),
+              onTap: _selectManual,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Field extends StatelessWidget {
   final TextEditingController controller;
   final String hint;
-  final String subtitle;
   final IconData icon;
   final bool obscure;
   final ValueChanged<String>? onChanged;
@@ -677,7 +932,6 @@ class _Field extends StatelessWidget {
   const _Field({
     required this.controller,
     required this.hint,
-    this.subtitle = '',
     required this.icon,
     this.obscure = false,
     this.onChanged,
@@ -693,8 +947,6 @@ class _Field extends StatelessWidget {
       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       decoration: InputDecoration(
         hintText: hint,
-        helperText: subtitle.isEmpty ? null : subtitle,
-        helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
         prefixIcon: Icon(icon, size: 18, color: colors.mist),
         filled: true,
         fillColor: colors.well,
