@@ -6,9 +6,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../models/device_type.dart';
 import '../services/api_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
+import '../widgets/device_type_picker.dart';
 
 enum _Step { connect, provision, waiting }
 
@@ -30,6 +32,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // The trailing XXXX acts as a tasmota- prefix wildcard in MainActivity.
   static const String _tasmotaApSsid = 'tasmota-XXXX';
 
+  // Give up waiting for the device to appear on the backend after this long.
+  // Must comfortably exceed the backend's recentDevices window so a device that
+  // was briefly seen is not missed, but not spin forever on a lost network.
+  static const Duration _waitDeadline = Duration(minutes: 6);
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -47,6 +54,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   final _topicCtl = TextEditingController();
 
   bool _manualWifi = false;
+  DeviceType _deviceType = DeviceType.fourRelay;
 
   _Step _step = _Step.connect;
   bool _searching = false;
@@ -55,6 +63,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   Timer? _reachTimer;
   Timer? _waitTimer;
   String? _pollingTopic;
+  DateTime? _waitStart;
 
   String get _phaseLabel {
     switch (_step) {
@@ -79,13 +88,23 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // ONLY during the initial "connect phone to Tasmota AP" phase. After the
     // Tasmota Restart command succeeds, the AP is EXPECTED to disappear, so we
     // must never re-probe 192.168.4.1 or show an AP connection error again.
-    if (state != AppLifecycleState.resumed || !mounted) return;
+    if (state != AppLifecycleState.resumed) {
+      // Leaving the app (e.g. jumping into Wi-Fi Settings) halts the probing
+      // timer. Detection is restarted from a clean slate on resume.
+      if (_step == _Step.connect) {
+        _reachTimer?.cancel();
+        // Bump the generation so any in-flight probe cannot commit stale state.
+        _apProbeGen++;
+      }
+      return;
+    }
+    if (!mounted) return;
     switch (_step) {
       case _Step.connect:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
-        _reachTimer?.cancel();
-        _wifiBound = false;
-        _probeReachability();
+        // Start a fresh, single, phase-gated detection cycle. The internal
+        // stabilization delay + retry loop absorb the Wi-Fi transition.
+        _startApDetection();
       case _Step.provision:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
       case _Step.waiting:
@@ -137,14 +156,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   void _startSearch() {
     debugPrint('[PROVISION] phase=$_phaseLabel start search');
-    if (_step != _Step.connect) return;
-    _reachTimer?.cancel();
-    setState(() {
-      _searching = true;
-      _error = null;
-    });
-    _wifiBound = false;
-    _probeReachability();
+    _startApDetection();
   }
 
   // Bind this process's sockets to the CURRENTLY ACTIVE Wi-Fi network (the one
@@ -170,10 +182,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         debugPrint('[PROVISION] process bound to active Wi-Fi');
         await _logNetworkInfo('after bind');
       } else if (!matched) {
+        // Wrong SSID is treated as a transient condition here — the AP probe on
+        // 192.168.4.1 is the authority, so we keep retrying inside the grace
+        // window and let the loop surface an error only after it is exhausted.
         debugPrint('[PROVISION] wrong Wi-Fi network');
-        _error =
-            "You're connected to $activeSsid. Connect to $expected. Open Wi-Fi settings and try again.";
-        setState(() {});
       } else {
         debugPrint('[PROVISION] could not bind to active Wi-Fi');
       }
@@ -189,34 +201,6 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] wifi binding released');
     } catch (_) {}
     _wifiBound = false;
-  }
-
-  Future<void> _probeReachability() async {
-    if (!mounted || _step != _Step.connect) return;
-    // Give Android a moment to settle on the newly selected network after the
-    // user returns from Wi-Fi Settings (or from Continue).
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    if (!mounted || _step != _Step.connect) return;
-    await _ensureBoundToWifi();
-    if (!_wifiBound) {
-      // Wrong SSID or bind failed: stop auto-retrying, show error + Retry.
-      if (mounted && _step == _Step.connect) setState(() => _searching = false);
-      return;
-    }
-    if (await _isReachable()) {
-      _reachTimer?.cancel();
-      setState(() {
-        _searching = false;
-        _step = _Step.provision;
-        _syncTopic();
-      });
-      return;
-    }
-    setState(() {
-      _error ??=
-          'Could not find the device. Open Wi-Fi settings and connect to it.';
-    });
-    _reachTimer = Timer(const Duration(seconds: 2), _probeReachability);
   }
 
   Future<bool> _isReachable() async {
@@ -251,17 +235,102 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   // ──────────────────────────────────────────────────────────
-  // Step 2 - configuration form + topic generation
+  // Step 1 - AP detection (retry loop, phase-gated)
   // ──────────────────────────────────────────────────────────
+
+  // Android needs a moment after returning from Wi-Fi Settings before the
+  // active network, the process binding and routing to 192.168.4.1 are usable.
+  // A single failed probe is a TRANSIENT condition — never an error.
+  static const Duration _stabilizeDelay = Duration(milliseconds: 1200);
+  static const Duration _probeRetryInterval = Duration(milliseconds: 2500);
+  static const Duration _apProbeGrace = Duration(seconds: 20);
+
+  // Generation counter used to guarantee only ONE detection process is ever
+  // running. Every new detection cycle (resume / Continue / retry) bumps this
+  // and re-arms a single Timer; stale attempts bail out early.
+  int _apProbeGen = 0;
+  DateTime? _apProbeStart;
+  int _apAttempt = 0;
+
+  void _startApDetection() {
+    if (_step != _Step.connect) return;
+    _reachTimer?.cancel();
+    _apProbeGen++;
+    final gen = _apProbeGen;
+    _apProbeStart = DateTime.now();
+    _apAttempt = 0;
+    _wifiBound = false;
+    debugPrint('[PROVISION] phase=$_phaseLabel app resumed/restarting detection, waiting for network stabilization');
+    if (mounted) {
+      setState(() {
+        _searching = true;
+        _error = null;
+      });
+    }
+    // Small stabilization delay BEFORE the first probe (not after a failure).
+    _reachTimer = Timer(_stabilizeDelay, () => _runApProbe(gen));
+  }
+
+  Future<void> _runApProbe(int gen) async {
+    if (!mounted || _step != _Step.connect || gen != _apProbeGen) return;
+    _apAttempt++;
+    debugPrint('[PROVISION] AP detection attempt=$_apAttempt');
+    // Best-effort bind to the active Wi-Fi network. Binding can also fail
+    // transiently right after the network transition — not fatal, probe next.
+    await _ensureBoundToWifi();
+    if (!mounted || _step != _Step.connect || gen != _apProbeGen) return;
+
+    if (await _isReachable()) {
+      _reachTimer?.cancel();
+      debugPrint('[PROVISION] device AP reachable');
+      if (!mounted || _step != _Step.connect) return;
+      setState(() {
+        _searching = false;
+        _error = null;
+        _step = _Step.provision;
+        _syncTopic();
+      });
+      debugPrint('[PROVISION] AP detected, entering configuration');
+      return;
+    }
+    if (!mounted || _step != _Step.connect || gen != _apProbeGen) return;
+
+    // Not reachable YET. Keep the neutral state and retry within the grace
+    // window. No error is shown during this phase.
+    final elapsed = DateTime.now().difference(_apProbeStart!);
+    if (elapsed < _apProbeGrace) {
+      _reachTimer?.cancel();
+      _reachTimer = Timer(_probeRetryInterval, () => _runApProbe(gen));
+      return;
+    }
+
+    // Grace period exhausted — only now is a failure surfaced to the user.
+    debugPrint('[PROVISION] AP detection grace ${_apProbeGrace.inSeconds}s elapsed, giving up');
+    if (!mounted || _step != _Step.connect) return;
+    setState(() {
+      _searching = false;
+      _error =
+          "Could not find the device. Make sure you're connected to the Tasmota Wi-Fi and try again.";
+    });
+    debugPrint('[PROVISION] grace period exhausted, showing final error');
+  }
+
+  // Generated from the device name; kept stable for the current attempt so the
+  // topic/deviceId sent to Tasmota matches the one later used to detect/claim.
+  String _idSlug = '';
+  String _idSuffix = '';
 
   void _syncTopic() {
     final name = _deviceNameCtl.text.trim();
     if (name.isEmpty) return;
     final slug = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
-    final rand = (DateTime.now().millisecondsSinceEpoch % 0xFFFF)
-        .toRadixString(16)
-        .padLeft(4, '0');
-    _topicCtl.text = 'stees_${slug}_$rand';
+    if (slug != _idSlug) {
+      _idSlug = slug;
+      _idSuffix = (DateTime.now().millisecondsSinceEpoch % 0xFFFF)
+          .toRadixString(16)
+          .padLeft(4, '0');
+    }
+    _topicCtl.text = 'stees_${slug}_$_idSuffix';
     setState(() {});
   }
 
@@ -371,25 +440,49 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // ──────────────────────────────────────────────────────────
 
   void _waitForDeviceOnline(String deviceId) {
+    debugPrint('[PROVISION] waiting for device online: deviceId=$deviceId');
     _pollingTopic = deviceId;
+    _waitStart = DateTime.now();
     _pollSnapshot(deviceId);
   }
 
   Future<void> _pollSnapshot(String deviceId) async {
+    _waitTimer?.cancel();
     if (_step != _Step.waiting) return;
+    // Bound the wait: the device must appear within the window or it is not
+    // coming (wrong home Wi-Fi, wrong password, broker unreachable). Surface a
+    // precise failure instead of polling forever.
+    final started = _waitStart;
+    if (started != null &&
+        DateTime.now().difference(started) > _waitDeadline) {
+      debugPrint('[PROVISION] wait deadline of ${_waitDeadline.inMinutes}m elapsed, giving up');
+      if (!mounted) return;
+      setState(() {
+        _error =
+            "The device hasn't connected to the server. Check the home Wi-Fi "
+            'password and that the device can reach the internet, then try again.';
+      });
+      return;
+    }
     bool found = false;
     try {
-      debugPrint('[PROVISION] polling backend for deviceId=$deviceId');
       final snapshot = await _api.fetchSnapshot();
       final recent = snapshot['recentDevices'] as List<dynamic>? ?? [];
-      found = recent.any((d) => d is Map && d['deviceId'] == deviceId);
-    } catch (_) {
+      final rawIds = recent.map((d) {
+        if (d is Map) return d['deviceId'];
+        return d;
+      }).whereType<String>().toList();
+      found = rawIds.contains(deviceId);
+      debugPrint(
+          '[PROVISION] poll: recentDevices=${recent.length} '
+          'found=$deviceId all=$rawIds');
+    } catch (e) {
+      debugPrint('[PROVISION] snapshot poll failed: $e');
       found = false;
     }
     if (!mounted || _step != _Step.waiting) return;
     if (found) {
       debugPrint('[PROVISION] device detected in recentDevices');
-      _waitTimer?.cancel();
       await _runClaim(deviceId);
       return;
     }
@@ -398,7 +491,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _runClaim(String deviceId) async {
     try {
-      await _api.claimDevice(deviceId, _deviceNameCtl.text.trim(), channels: 4);
+      await _api.claimDevice(
+        deviceId,
+        _deviceNameCtl.text.trim(),
+        channels: _deviceType.channelCount,
+      );
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {
@@ -524,7 +621,25 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
                       : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                 ),
               ),
-              if (_error != null) ...[
+              if (_searching) ...[
+                const SizedBox(height: AppSpacing.md),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Text(
+                      'Checking device connection…',
+                      style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+                    ),
+                  ],
+                ),
+              ],
+              if (!_searching && _error != null) ...[
                 const SizedBox(height: AppSpacing.md),
                 Text(
                   _error!,
@@ -569,6 +684,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
           onChanged: (_) => _syncTopic(),
         ),
         const SizedBox(height: AppSpacing.md),
+        DeviceTypePicker(
+          value: _deviceType,
+          onChanged: (t) => setState(() => _deviceType = t),
+        ),
+        const SizedBox(height: AppSpacing.md),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
           decoration: BoxDecoration(
@@ -594,6 +714,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                'Generated automatically',
+                style: GoogleFonts.inter(fontSize: 10, color: colors.mist.withValues(alpha: 0.6)),
               ),
             ],
           ),
