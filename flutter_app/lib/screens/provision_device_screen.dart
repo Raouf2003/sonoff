@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -219,6 +220,41 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
   }
 
+  // Confirms the setup AP is actually responding on 192.168.4.1 before any
+  // cmnd is sent. If the phone is on the home router (device already left its
+  // AP), commands would just time out and the user would see "nothing happen".
+  Future<bool> _ensureSetupApReachable() async {
+    await _ensureBoundToWifi();
+    for (var attempt = 1; attempt <= 5; attempt++) {
+      if (await _isReachable()) return true;
+      debugPrint('[PROVISION] setup AP probe attempt $attempt failed, retrying');
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+    }
+    debugPrint('[PROVISION] setup AP not reachable on 192.168.4.1');
+    return false;
+  }
+
+  // After a restart-triggering write (Topic/FullTopic) the device reboots and
+  // returns to AP mode while home Wi-Fi is not yet configured. Wait (with
+  // re-binding) until it is reachable again, then let the caller read settings
+  // back. The device only leaves the AP for good once Restart 1 fires with the
+  // home SSID present.
+  Future<bool> _waitForDeviceOnAp() async {
+    for (var attempt = 1; attempt <= 20; attempt++) {
+      await _ensureBoundToWifi();
+      if (await _isReachable()) {
+        debugPrint('[PROVISION] device back on setup AP after write-triggered reboot');
+        return true;
+      }
+      if (attempt == 20) {
+        debugPrint('[PROVISION] device did not return to setup AP after reboot');
+        return false;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+    }
+    return false;
+  }
+
   Future<bool> _logNetworkInfo(String tag) async {
     if (Theme.of(context).platform == TargetPlatform.iOS) return false;
     try {
@@ -355,6 +391,17 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _setError('Could not generate a Device ID. Enter a Device Name first.');
       return;
     }
+    if (!await _ensureSetupApReachable()) {
+      if (!mounted) return;
+      setState(() {
+        _provisioning = false;
+        _error = 'The device is not reachable on its setup Wi-Fi anymore. '
+            'It likely already connected to your home network; power-cycle it '
+            'and, if it reconnects instead of showing the tasmota-XXXX AP, '
+            'factory-reset it (hold its button ~10s), then try again.';
+      });
+      return;
+    }
     setState(() {
       _provisioning = true;
       _error = null;
@@ -385,54 +432,172 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _waitForDeviceOnline(topic);
   }
 
-  // Provision the device in two phases:
-  //  1) Write MQTT + Topic + DeviceName FIRST, while the phone is still on the
-  //     device AP. If Tasmota drops the connection when the SSID changes, these
-  //     settings are already saved.
-  //  2) Then switch Wi-Fi, and finally restart so MQTT applies with fresh state.
-  Future<bool> _sendTasmotaConfig() async {
-    await _ensureBoundToWifi();
-    final mqttParts = <String>[
-      'MqttHost ${_mqttBrokerCtl.text.trim()}',
-      'MqttPort ${_mqttPortCtl.text.trim()}',
-      if (_mqttUserCtl.text.trim().isNotEmpty)
-        'MqttUser ${_mqttUserCtl.text.trim()}',
-      if (_mqttPassCtl.text.isNotEmpty) 'MqttPassword ${_mqttPassCtl.text}',
-      'Topic ${_topicCtl.text.trim()}',
-      'DeviceName ${_deviceNameCtl.text.trim()}',
-    ];
-    final mqttCommand = 'Backlog ${mqttParts.join('; ')}';
-    debugPrint('[PROVISION] sending MQTT phase command: $mqttCommand');
-    final mqttOk = await _sendCommand(mqttCommand);
-    if (!mqttOk) return false;
+  // Provision the device.
+//
+// Tasmota semantics verified on real hardware (firmware 15.5.0):
+//
+//  * `Topic`, `FullTopic`, `MqttClient`, `GroupTopic<x>`, `SSId<x>` and
+//    `Password<x>` are documented as "<set> ... and restart" commands.
+//  * Sending `Topic`/`FullTopic` INSIDE a single `Backlog` DROPS them: the
+//    observed `Backlog MqttHost..; MqttPort..; Topic ..; FullTopic ..;
+//    DeviceName ..` returned `{}` and read-back still showed the factory topic
+//    `tasmota_%06X`, while `MqttHost`/`MqttPort` (non-restart commands) in the
+//    same Backlog persisted. So restart-prone commands must NEVER be bundled
+//    into one Backlog with the broker/identity block.
+//  * `MqttHost`/`MqttPort`/`MqttUser`/`MqttPassword` are NOT restart commands
+//    and persist reliably, so they stay together in one Backlog.
+//
+// Strategy:
+//  1) Broker + credentials in ONE Backlog (no restart) -> read-back verify.
+//  2) `Topic` and `FullTopic` EACH standalone; a standalone write persists
+//     (proven), but may reboot the device, so after each write we wait for the
+//     device to return on the setup AP and then read the value back.
+//  3) `DeviceName` standalone (no restart).
+//  4) Home Wi-Fi credentials LAST (SSId1/Password1) so the device stays on the
+//     setup AP during identity configuration and only leaves it on the final
+//     `Restart 1`, i.e. once it can reach the home router + broker.
+//  5) Every persisted setting is read back and compared BEFORE `Restart 1`, so
+//     a silently-dropped write fails loudly instead of a device that never
+//     comes online under the expected topic.
+Future<bool> _sendTasmotaConfig() async {
+  await _ensureBoundToWifi();
 
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+  debugPrint('[PROVISION] configuring MQTT broker...');
+  final brokerParts = <String>[
+    if (_mqttUserCtl.text.trim().isNotEmpty)
+      'MqttUser ${_mqttUserCtl.text.trim()}',
+    if (_mqttPassCtl.text.isNotEmpty) 'MqttPassword ${_mqttPassCtl.text}',
+    'MqttHost ${_mqttBrokerCtl.text.trim()}',
+    'MqttPort ${_mqttPortCtl.text.trim()}',
+  ];
+  final brokerOk = await _sendCommand('Backlog ${brokerParts.join('; ')}');
+  debugPrint('[PROVISION] MQTT broker response=${brokerOk ? 'OK' : 'FAILED'}');
+  if (!brokerOk) return false;
 
-    final wifiCommand =
-        'Backlog SSId1 ${_ssidCtl.text.trim()}; Password1 ${_wifiPassCtl.text}';
-    debugPrint('[PROVISION] sending WiFi phase command: $wifiCommand');
-    final wifiOk = await _sendCommand(wifiCommand);
-    if (!wifiOk) return false;
+  debugPrint('[PROVISION] configuring MQTT identity...');
+  final topic = _topicCtl.text.trim();
+  // Pin the topic layout to the default "%prefix%/%topic%/" so the device
+  // ALWAYS publishes on tele/<topic>/STATE (and stat/<topic>/...). A leftover
+  // custom FullTopic on the device would shift the deviceId to a different
+  // topic segment and the wizard would never match it.
+  if (!await _setDeviceSetting('Topic', topic)) return false;
+  if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) return false;
 
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+  final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
+  debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
+  if (!nameOk) return false;
 
-    debugPrint('[PROVISION] sending restart command: Restart 1');
-    return _sendCommand('Restart 1');
+  debugPrint('[PROVISION] configuring WiFi...');
+  final wifiSsid = await _sendCommand('SSId1 ${_ssidCtl.text.trim()}');
+  debugPrint(
+      '[PROVISION] WiFi configuration response(SSId1)=${wifiSsid ? 'OK' : 'FAILED'}');
+  if (!wifiSsid) return false;
+  final wifiPass = await _sendCommand('Password1 ${_wifiPassCtl.text}');
+  debugPrint(
+      '[PROVISION] WiFi configuration response(Password1)=${wifiPass ? 'OK' : 'FAILED'}');
+  if (!wifiPass) return false;
+
+  // Read back the exact settings the device claims to have before restarting.
+  debugPrint('[PROVISION] verifying persisted settings...');
+  final checks = <String, String>{
+    'Topic': topic,
+    'FullTopic': '%prefix%/%topic%/',
+    'MqttHost': _mqttBrokerCtl.text.trim(),
+    'MqttPort': _mqttPortCtl.text.trim(),
+    'SSId1': _ssidCtl.text.trim(),
+  };
+  for (final entry in checks.entries) {
+    if (!await _verifySetting(entry.key, entry.value)) return false;
+  }
+  debugPrint('[PROVISION] persisted settings verified');
+
+  debugPrint('[PROVISION] sending restart command: Restart 1');
+  return _sendCommand('Restart 1');
+}
+
+  // Writes one setting that Tasmota may react to with a reboot (Topic,
+  // FullTopic, ...). The write itself is verified by waiting for the device to
+  // come back on the setup AP (it reboots to AP mode while home Wi-Fi is not
+  // yet configured) and then reading the stored value back.
+  Future<bool> _setDeviceSetting(String key, String value) async {
+    final ok = await _sendCommand('$key $value');
+    debugPrint('[PROVISION] $key write response=${ok ? 'OK' : 'FAILED'}');
+    if (!ok) return false;
+    await _waitForDeviceOnAp();
+    return _verifySetting(key, value);
   }
 
+  // Sends one cmnd command (write or action). A plain HTTP 200 is NOT enough -
+  // Tasmota can wrap a rejected command in 200. Treat any {"Command":{"Error"...}}
+  // body as a hard failure and log everything for diagnostics.
   Future<bool> _sendCommand(String command) async {
     try {
       final uri = Uri.parse('$_deviceUrl/cm').replace(
         queryParameters: {'cmnd': command},
       );
       debugPrint('[PROVISION] HTTP GET $uri');
-      final res = await http.get(uri).timeout(const Duration(seconds: 3));
-      debugPrint('[PROVISION] status=${res.statusCode} body=${res.body}');
+      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      final body = res.body.trim();
+      debugPrint('[PROVISION] response status=${res.statusCode} body=$body');
+      if (res.statusCode != 200) return false;
+      if (body.isEmpty) return true;
+      try {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final cmd = decoded['Command'];
+          if (cmd is Map && cmd['Error'] is int && cmd['Error'] != 0) {
+            debugPrint('[PROVISION] COMMAND REJECTED: "$command" -> $body');
+            return false;
+          }
+        }
+      } catch (_) {}
       return true;
     } catch (e) {
       debugPrint('[PROVISION] exception sending "$command": $e');
       return false;
     }
+  }
+
+  // Queries a setting (cmnd with no argument) and requires the stored value to
+  // equal the expected value. The device may be momentarily rebooting after a
+  // config write, so a short retry loop absorbs the gap before declaring the
+  // write did not persist.
+  Future<bool> _verifySetting(String key, String expected) async {
+    for (var attempt = 1; attempt <= 6; attempt++) {
+      try {
+        final uri = Uri.parse('$_deviceUrl/cm').replace(
+          queryParameters: {'cmnd': key},
+        );
+        debugPrint('[PROVISION] read-back GET $uri (attempt $attempt)');
+        final res = await http.get(uri).timeout(const Duration(seconds: 3));
+        final body = res.body.trim();
+        if (res.statusCode != 200) {
+          debugPrint('[PROVISION] read-back $key HTTP ${res.statusCode}');
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          continue;
+        }
+        final decoded = jsonDecode(body);
+        final got = decoded is Map ? decoded[key] : decoded;
+        final gotStr = got?.toString().trim() ?? '';
+        if (got == null || gotStr.isEmpty) {
+          debugPrint('[PROVISION] VERIFY FAILED: $key missing in response ($body)');
+          return false;
+        }
+        final want = expected.trim();
+        if (gotStr != want) {
+          debugPrint('[PROVISION] DEVICE ID MISMATCH: $key=$gotStr expected=$want');
+          debugPrint('[PROVISION] VERIFY FAILED: $key=$gotStr expected=$want');
+          return false;
+        }
+        debugPrint('[PROVISION] verification OK: $key=$gotStr');
+        return true;
+      } catch (e) {
+        debugPrint('[PROVISION] read-back $key exception (attempt $attempt): $e');
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    debugPrint('[PROVISION] VERIFY FAILED: $key unreachable after retries');
+    return false;
   }
 
   // ──────────────────────────────────────────────────────────
@@ -475,7 +640,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       found = rawIds.contains(deviceId);
       debugPrint(
           '[PROVISION] poll: recentDevices=${recent.length} '
-          'found=$deviceId all=$rawIds');
+          'looking for deviceId=$deviceId found=$found all=$rawIds');
+      if (!found) {
+        debugPrint(
+            '[PROVISION] DEVICE ID MISMATCH expected=$deviceId '
+            'received=$rawIds');
+      }
     } catch (e) {
       debugPrint('[PROVISION] snapshot poll failed: $e');
       found = false;
