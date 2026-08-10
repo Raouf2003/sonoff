@@ -19,6 +19,11 @@ import '../widgets/device_type_picker.dart';
 
 enum _Step { connect, provision, waiting }
 
+/// Result of the full Tasmota configuration sweep. [wifiTestFailed] is a
+/// distinct outcome so a failed Wi-Fi pre-flight test stays on Configure with a
+/// Wi-Fi-specific message (never a generic power-cycle/factory-reset error).
+enum _ConfigOutcome { ok, wifiTestFailed, configFailed }
+
 /// STEES provisioning wizard. Replaces the workflow of typing MQTT/Wi-Fi
 /// settings into the raw Tasmota web page, using STEES-styled screens and the
 /// existing backend claim endpoint.
@@ -53,6 +58,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // a bounded recovery (power-cycle + retry), never blind auto-retries.
   static const Duration _configStepDeadline = Duration(minutes: 3);
 
+  // WifiTest3 pre-flight validation (AP mode only, mode 3 = test credentials
+  // WITHOUT persisting them or restarting). The start HTTP call returns
+  // {"WifiTest3":"Testing"} immediately; the firmware runs the test in the
+  // background (~9-10s on 15.5.0) and we poll the data-less WifiTest command
+  // until the status settles. These bounds keep a stuck/slow device from
+  // blocking provisioning forever, while still allowing the test to complete.
+  static const Duration _wifiTestHttpTimeout = Duration(seconds: 4);
+  static const Duration _wifiTestPollInterval = Duration(seconds: 1);
+  static const Duration _wifiTestTotalDeadline = Duration(seconds: 20);
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -67,6 +82,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   final _mqttUserCtl = TextEditingController();
   final _mqttPassCtl = TextEditingController();
   final _deviceNameCtl = TextEditingController();
+
+  final FocusNode _wifiPassFocus = FocusNode();
 
   bool _manualWifi = false;
   DeviceType _deviceType = DeviceType.fourRelay;
@@ -106,6 +123,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // Paces the WAIT stage labels: Wi-Fi for the early device-reboot window, then
   // MQTT. Labels are cosmetic pacing, never a functional timeout.
   Timer? _waitStageTimer;
+
+  // Pre-flight Wi-Fi validation (Tasmota WifiTest3) is a local device operation
+  // that runs while the phone is still bound to the Tasmota AP. Keeps the
+  // testing state and the classifier result so the Configure screen can render
+  // a specific error and stay put (no Restart, no session change).
+  WifiTestResult _wifiTestResult = WifiTestResult.unknown;
 
   String get _phaseLabel {
     switch (_step) {
@@ -177,6 +200,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _mqttUserCtl.dispose();
     _mqttPassCtl.dispose();
     _deviceNameCtl.dispose();
+    _wifiPassFocus.dispose();
     super.dispose();
   }
 
@@ -497,16 +521,31 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] device MAC read locally (sent on claim): $mac');
     }
 
-    final ok = await _sendTasmotaConfig().timeout(
+    final outcome = await _sendTasmotaConfig().timeout(
       _configStepDeadline,
       onTimeout: () {
         debugPrint(
             '[PROVISION] config step exceeded ${_configStepDeadline.inMinutes}m deadline');
-        return false;
+        return _ConfigOutcome.configFailed;
       },
     );
     if (!mounted) return;
-    if (!ok) {
+    if (outcome == _ConfigOutcome.wifiTestFailed) {
+      // Wi-Fi pre-flight failed: the device is still on the setup AP. STAY on
+      // Configure (step already is _Step.provision), preserve the session /
+      // deviceId / claim token, surface the specific Wi-Fi message and let the
+      // user correct the credentials and test again. Nothing was persisted and
+      // no Restart was sent.
+      debugPrint('[PROVISION] Wi-Fi validation failed, staying on Configure');
+      traceLog('WIFI_TEST',
+          'STAY_ON_CONFIGURE result=${_wifiTestResult.name}');
+      setState(() {
+        _provisioning = false;
+        _error = wifiTestMessage(_wifiTestResult);
+      });
+      return;
+    }
+    if (outcome != _ConfigOutcome.ok) {
       setState(() {
         _provisioning = false;
         _error = 'The device did not accept all settings. Power-cycle it (hold '
@@ -660,19 +699,24 @@ String _sessionErrorFor(int? status) {
 //  * `MqttHost`/`MqttPort`/`MqttUser`/`MqttPassword` are NOT restart commands
 //    and persist reliably, so they stay together in one Backlog.
 //
-// Strategy:
+//  Strategy:
 //  1) Broker + credentials in ONE Backlog (no restart) -> read-back verify.
 //  2) `Topic` and `FullTopic` EACH standalone; a standalone write persists
 //     (proven), but may reboot the device, so after each write we wait for the
 //     device to return on the setup AP and then read the value back.
 //  3) `DeviceName` standalone (no restart).
-//  4) Home Wi-Fi credentials LAST (SSId1/Password1) so the device stays on the
+//  4) PRE-FLIGHT Wi-Fi validation: `WifiTest3 <ssid>+<password>` (AP mode,
+//     non-persisting, non-restarting) proves the entered home credentials work
+//     BEFORE they are persisted. On failure the wizard STAYS on Configure,
+//     keeps the same session/deviceId/claim token, and never writes SSID/
+//     password or sends Restart.
+//  5) Home Wi-Fi credentials LAST (SSId1/Password1) so the device stays on the
 //     setup AP during identity configuration and only leaves it on the final
 //     `Restart 1`, i.e. once it can reach the home router + broker.
-//  5) Every persisted setting is read back and compared BEFORE `Restart 1`, so
+//  6) Every persisted setting is read back and compared BEFORE `Restart 1`, so
 //     a silently-dropped write fails loudly instead of a device that never
 //     comes online under the expected topic.
-Future<bool> _sendTasmotaConfig() async {
+Future<_ConfigOutcome> _sendTasmotaConfig() async {
   await _ensureBoundToWifi();
   _trace.enter(ProvisionPhase.config, 'BROKER_BACKLOG');
 
@@ -686,37 +730,67 @@ Future<bool> _sendTasmotaConfig() async {
   ];
   final brokerOk = await _sendCommand('Backlog ${brokerParts.join('; ')}');
   debugPrint('[PROVISION] MQTT broker response=${brokerOk ? 'OK' : 'FAILED'}');
-  if (!brokerOk) return false;
+  if (!brokerOk) return _ConfigOutcome.configFailed;
   _trace.debugTrace(ProvisionPhase.config, label: 'BROKER_VERIFY');
 
   debugPrint('[PROVISION] configuring MQTT identity...');
   final topic = _issuedDeviceId;
   if (topic.isEmpty) {
     debugPrint('[PROVISION] VERIFY FAILED: no deviceId issued by backend');
-    return false;
+    return _ConfigOutcome.configFailed;
   }
   // Pin the topic layout to the default "%prefix%/%topic%/" so the device
   // ALWAYS publishes on tele/<topic>/STATE (and stat/<topic>/...). A leftover
   // custom FullTopic on the device would shift the deviceId to a different
   // topic segment and the wizard would never match it.
-  if (!await _setDeviceSetting('Topic', topic)) return false;
+  if (!await _setDeviceSetting('Topic', topic)) {
+    return _ConfigOutcome.configFailed;
+  }
   _trace.debugTrace(ProvisionPhase.config, label: 'TOPIC_VERIFIED');
-  if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) return false;
+  if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) {
+    return _ConfigOutcome.configFailed;
+  }
   _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
 
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
-  if (!nameOk) return false;
+  if (!nameOk) return _ConfigOutcome.configFailed;
 
-  debugPrint('[PROVISION] configuring WiFi...');
+  // Pre-flight Wi-Fi credential validation. The device is still on the setup
+  // AP; WifiTest3 runs locally against the network and proves the credentials
+  // BEFORE SSID1/Password1 are written. A failure stays on Configure with a
+  // Wi-Fi-specific message - no persist, no Restart, same session/identity.
+debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
+    if (mounted) {
+      setState(() => _state = ProvisionState.configuringWifiTest);
+    }
+    _wifiTestResult = await _runWifiTest(_ssidCtl.text.trim(),
+        _wifiPassCtl.text);
+    if (_wifiTestResult != WifiTestResult.success) {
+      debugPrint('[PROVISION][WIFI_TEST] FAILED '
+          'result=${_wifiTestResult.name}');
+      _trace.debugTrace(ProvisionPhase.wifi,
+          label: 'WIFI_TEST_FAILED_${_wifiTestResult.name}');
+      if (mounted) {
+        setState(() => _state = ProvisionState.wifiTestFailed);
+      }
+      return _ConfigOutcome.wifiTestFailed;
+    }
+    debugPrint('[PROVISION][WIFI_TEST] SUCCESS - persisting credentials');
+    _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_OK');
+    if (mounted) {
+      setState(() => _state = ProvisionState.wifiTestSucceeded);
+    }
+
+    debugPrint('[PROVISION] configuring WiFi...');
   final wifiSsid = await _sendCommand('SSId1 ${_ssidCtl.text.trim()}');
   debugPrint(
       '[PROVISION] WiFi configuration response(SSId1)=${wifiSsid ? 'OK' : 'FAILED'}');
-  if (!wifiSsid) return false;
+  if (!wifiSsid) return _ConfigOutcome.configFailed;
   final wifiPass = await _sendCommand('Password1 ${_wifiPassCtl.text}');
   debugPrint(
       '[PROVISION] WiFi configuration response(Password1)=${wifiPass ? 'OK' : 'FAILED'}');
-  if (!wifiPass) return false;
+  if (!wifiPass) return _ConfigOutcome.configFailed;
 
   // Read back the exact settings the device claims to have before restarting.
   debugPrint('[PROVISION] verifying persisted settings...');
@@ -728,7 +802,9 @@ Future<bool> _sendTasmotaConfig() async {
     'SSId1': _ssidCtl.text.trim(),
   };
   for (final entry in checks.entries) {
-    if (!await _verifySetting(entry.key, entry.value)) return false;
+    if (!await _verifySetting(entry.key, entry.value)) {
+      return _ConfigOutcome.configFailed;
+    }
   }
   debugPrint('[PROVISION] persisted settings verified');
   _trace.debugTrace(ProvisionPhase.config, label: 'ALL_VERIFIED');
@@ -736,7 +812,7 @@ Future<bool> _sendTasmotaConfig() async {
   debugPrint('[PROVISION] sending restart command: Restart 1');
   final restartOk = await _sendCommand('Restart 1');
   _trace.debugTrace(ProvisionPhase.config, label: 'RESTART_SENT_TO_DEVICE');
-  return restartOk;
+  return restartOk ? _ConfigOutcome.ok : _ConfigOutcome.configFailed;
 }
 
   // Writes one setting that Tasmota may react to with a reboot (Topic,
@@ -822,6 +898,102 @@ Future<bool> _sendTasmotaConfig() async {
     }
     debugPrint('[PROVISION] VERIFY FAILED: $key unreachable after retries');
     return false;
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Pre-flight Wi-Fi credential validation (WifiTest3)
+  // ──────────────────────────────────────────────────────────
+
+  // Validates the ENTERED home Wi-Fi credentials against the physical network
+  // BEFORE SSID1/Password1 are persisted and BEFORE Restart 1. Uses Tasmota
+  // `WifiTest3` (mode 3): only available in AP mode, tests the given
+  // `ssid+password` against the network WITHOUT storing anything and WITHOUT
+  // restarting. Entirely local (192.168.4.1) - no backend/cloud call.
+  //
+  // Sequence on firmware 15.5.0:
+  //   1. `WifiTest3 <ssid>+<password>`      -> {"WifiTest3":"Testing"} (start)
+  //   2. poll `WifiTest` (data-less) until status settles:
+  //        {"WifiTest":"Successful"}                              -> success
+  //        {"WifiTest":"Connect failed..."} (localized variants)  -> failure
+  //        anything else ("Testing"/"Not Started"/malformed)      -> keep polling
+  //
+  // The verdict is latched on the device until the next test starts, so a
+  // single poll loop reading the settled value is authoritative. The entered
+  // credentials are NEVER logged (SSID/password go into the URL only).
+  Future<WifiTestResult> _runWifiTest(String ssid, String password) async {
+    debugPrint('[PROVISION][WIFI_TEST] START');
+    _trace.enter(ProvisionPhase.wifi, 'WIFI_TEST_START');
+
+    // WifiTest3 uses `+` as the ssid/password separator, so a `+` inside either
+    // value would corrupt the request. Such networks are simply not testable —
+    // surface it locally instead of falsifying the result.
+    if (ssid.contains('+') || password.contains('+')) {
+      debugPrint(
+          '[PROVISION][WIFI_TEST] SKIP cannot test "+" in ssid/password');
+      return WifiTestResult.unknown;
+    }
+
+    final startUri = Uri.parse('$_deviceUrl/cm').replace(
+      queryParameters: {'cmnd': 'WifiTest3 $ssid+$password'},
+    );
+    try {
+      final res = await http.get(startUri).timeout(_wifiTestHttpTimeout);
+      debugPrint(
+          '[PROVISION][WIFI_TEST] start HTTP status=${res.statusCode}');
+      if (res.statusCode != 200) {
+        debugPrint('[PROVISION][WIFI_TEST] HTTP_ERROR (non-200)');
+        return WifiTestResult.localError;
+      }
+    } catch (e) {
+      debugPrint('[PROVISION][WIFI_TEST] HTTP_ERROR $e');
+      return WifiTestResult.localError;
+    }
+
+    // Poll the verdict. The test runs in the background (~9-10s), so keep
+    // polling until the status leaves the transient "Testing" state or the
+    // deadline expires. A transient HTTP failure mid-test is a LOCAL AP
+    // communication problem, not a Wi-Fi verdict - retry the loop, and only
+    // classify if we exhaust the deadline.
+    final pollUri = Uri.parse('$_deviceUrl/cm').replace(
+      queryParameters: {'cmnd': 'WifiTest'},
+    );
+    final deadline = DateTime.now().add(_wifiTestTotalDeadline);
+    bool sawTransientException = false;
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        final res = await http.get(pollUri).timeout(_wifiTestHttpTimeout);
+        final body = res.body.trim();
+        debugPrint(
+            '[PROVISION][WIFI_TEST] poll HTTP status=${res.statusCode} '
+            'pending=${isWifiTestPending(body)}');
+        if (res.statusCode != 200 || body.isEmpty) {
+          sawTransientException = true;
+          await Future<void>.delayed(_wifiTestPollInterval);
+          continue;
+        }
+        if (isWifiTestPending(body)) {
+          // Firmware still running the background test - keep polling.
+          await Future<void>.delayed(_wifiTestPollInterval);
+          continue;
+        }
+        final result = classifyWifiTest(body);
+        debugPrint('[PROVISION][WIFI_TEST] FINAL verdict=${result.name}');
+        _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_VERDICT');
+        return result;
+      } catch (e) {
+        sawTransientException = true;
+        debugPrint(
+            '[PROVISION][WIFI_TEST] poll HTTP exception $e (transient, retrying)');
+        await Future<void>.delayed(_wifiTestPollInterval);
+      }
+    }
+    debugPrint(
+        '[PROVISION][WIFI_TEST] TIMEOUT '
+        'transientError=$sawTransientException');
+    _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_TIMEOUT');
+    return sawTransientException
+        ? WifiTestResult.localError
+        : WifiTestResult.unknown;
   }
 
   // ──────────────────────────────────────────────────────────
@@ -1350,6 +1522,11 @@ Future<bool> _sendTasmotaConfig() async {
   }
 
   Widget _buildConfig(SteesColors colors) {
+    final subLabel = _provisioning
+        ? provisionUserLabel(_state)
+        : (_state == ProvisionState.wifiTestFailed
+            ? provisionUserLabel(ProvisionState.wifiTestFailed)
+            : null);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1357,7 +1534,7 @@ Future<bool> _sendTasmotaConfig() async {
         _PhaseProgress(
           active: 1,
           colors: colors,
-          subLabel: _provisioning ? provisionUserLabel(_state) : null,
+          subLabel: subLabel,
         ),
         const SizedBox(height: AppSpacing.xl),
         _section(colors, 'HOME WI-FI'),
@@ -1376,6 +1553,7 @@ Future<bool> _sendTasmotaConfig() async {
           hint: 'Wi-Fi Password',
           icon: Icons.lock_outline,
           obscure: true,
+          focusNode: _wifiPassFocus,
         ),
         const SizedBox(height: AppSpacing.xl),
         _section(colors, 'DEVICE'),
@@ -1427,7 +1605,76 @@ Future<bool> _sendTasmotaConfig() async {
           ),
         ),
         const SizedBox(height: AppSpacing.xxl),
-        if (_error != null) ...[
+        if (_state == ProvisionState.wifiTestFailed) ...[
+          Container(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            decoration: BoxDecoration(
+              color: colors.danger.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              border: Border.all(color: colors.danger.withValues(alpha: 0.25)),
+            ),
+            child: Column(
+              children: [
+                Icon(Icons.wifi_off_outlined,
+                    size: 28, color: colors.danger),
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  'Wi-Fi connection failed',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.sora(
+                      fontSize: 15, fontWeight: FontWeight.w600, color: colors.danger),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                  _error ??
+                      "The device couldn't connect to this Wi-Fi network. "
+                          'Check the Wi-Fi name and password and try again.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                      fontSize: 12, color: colors.mist.withValues(alpha: 0.85), height: 1.4),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  'Your device is still connected to the setup Wi-Fi, so you '
+                  'can correct the credentials and test again.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                      fontSize: 11, color: colors.mist.withValues(alpha: 0.6)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 50,
+                  child: FilledButton(
+                    onPressed: _provisioning ? null : _provision,
+                    style: _filledStyle(colors),
+                    child: Text('Try Again',
+                        style: GoogleFonts.sora(
+                            fontSize: 15, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: SizedBox(
+                  height: 50,
+                  child: OutlinedButton(
+                    onPressed: _focusWifiPassword,
+                    style: _outlinedStyle(colors),
+                    child: Text('Change Wi-Fi',
+                        style: GoogleFonts.sora(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ] else if (_error != null) ...[
           Text(
             _error!,
             textAlign: TextAlign.center,
@@ -1447,12 +1694,29 @@ Future<bool> _sendTasmotaConfig() async {
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
                   )
-                : Text('Provision Device', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                : Text('Test Wi-Fi & Continue',
+                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
           ),
         ),
+        if (_provisioning && _state == ProvisionState.configuringWifiTest) ...[
+          const SizedBox(height: AppSpacing.md),
+          Text(
+            'Testing Wi-Fi connection…\nPlease keep your phone connected to '
+            'the device.',
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.85), height: 1.5),
+          ),
+        ],
         const SizedBox(height: AppSpacing.xl),
       ],
     );
+  }
+
+  // Moves focus to the Wi-Fi password field after a failed connectivity test so
+  // the user can immediately correct the most common mistake. Keeps the wizard
+  // on the Configure step - no session or identity change.
+  void _focusWifiPassword() {
+    FocusScope.of(context).requestFocus(_wifiPassFocus);
   }
 
   // Dropdown-style selector for the HOME Wi-Fi network. Opening it scans for
@@ -2005,12 +2269,14 @@ class _Field extends StatelessWidget {
   final String hint;
   final IconData icon;
   final bool obscure;
+  final FocusNode? focusNode;
 
   const _Field({
     required this.controller,
     required this.hint,
     required this.icon,
     this.obscure = false,
+    this.focusNode,
   });
 
   @override
@@ -2018,6 +2284,7 @@ class _Field extends StatelessWidget {
     final colors = context.steesColors;
     return TextField(
       controller: controller,
+      focusNode: focusNode,
       obscureText: obscure,
       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       decoration: InputDecoration(

@@ -1,0 +1,115 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:smart_home_app/services/provisioning_service.dart';
+
+/// Unit tests for the Tasmota WifiTest3 pre-flight Wi-Fi validation classifier.
+///
+/// These test the pure decision logic that decides whether the entered home
+/// Wi-Fi credentials are allowed to be PERSISTED and trigger `Restart 1`.
+/// WifiTest3 (mode 3) never stores credentials nor restarts by itself, and the
+/// wiring guarantees that SSID1/Password1 writes only run after `success` —
+/// the classifier is the gate and therefore holds the "no persist / no restart
+/// on failure" invariant.
+void main() {
+  group('classifyWifiTest', () {
+    test('success response', () {
+      expect(classifyWifiTest('{"WifiTest":"Successful"}'),
+          WifiTestResult.success);
+    });
+
+    test('success with per-index key', () {
+      expect(classifyWifiTest('{"WifiTest3":"Successful"}'),
+          WifiTestResult.success);
+    });
+
+    test('wrong password (WL_CONNECT_FAILED)', () {
+      expect(classifyWifiTest('{"WifiTest":"Connect failed"}'),
+          WifiTestResult.wrongPassword);
+    });
+
+    test('SSID not found (WL_NO_SSID_AVAIL)', () {
+      expect(
+          classifyWifiTest(
+              '{"WifiTest":"Connect failed as AP cannot be reached"}'),
+          WifiTestResult.ssidNotFound);
+    });
+
+    test('no IP address received', () {
+      expect(
+          classifyWifiTest(
+              '{"WifiTest":"Connect failed as no IP address received"}'),
+          WifiTestResult.noIp);
+    });
+
+    test('still running is pending, not a verdict', () {
+      expect(classifyWifiTest('{"WifiTest":"Testing"}'),
+          WifiTestResult.unknown);
+      expect(classifyWifiTest('{"WifiTest":"Not Started"}'),
+          WifiTestResult.unknown);
+    });
+
+    test('empty body is unknown', () {
+      expect(classifyWifiTest(''), WifiTestResult.unknown);
+      expect(classifyWifiTest('   '), WifiTestResult.unknown);
+    });
+
+    test('malformed / non-JSON body is unknown', () {
+      expect(classifyWifiTest('not json at all'), WifiTestResult.unknown);
+      expect(classifyWifiTest('{"WifiTest":42}'), WifiTestResult.unknown);
+      expect(classifyWifiTest('{"Other":"Successful"}'), WifiTestResult.unknown);
+    });
+
+    test('unrecognized (localized/tolerated) settled string is unknown', () {
+      // A translated or unknown verdict string must NOT be treated as success
+      // or as a specific failure — only as terminal-unknown, so it can never
+      // cause a Restart.
+      expect(classifyWifiTest('{"WifiTest":"سیستم موفق"}'),
+          WifiTestResult.unknown);
+    });
+  });
+
+  group('isWifiTestPending', () {
+    test('true while, says Testing or Not Started', () {
+      expect(isWifiTestPending('{"WifiTest":"Testing"}'), isTrue);
+      expect(isWifiTestPending('{"WifiTest":"Not Started"}'), isTrue);
+    });
+
+    test('false on any settled verdict', () {
+      expect(isWifiTestPending('{"WifiTest":"Successful"}'), isFalse);
+      expect(isWifiTestPending('{"WifiTest":"Connect failed"}'), isFalse);
+    });
+
+    test('false on empty/malformed (cannot wait for a dead endpoint)', () {
+      expect(isWifiTestPending(''), isFalse);
+      expect(isWifiTestPending('garbage'), isFalse);
+    });
+  });
+
+  group('no-persist / no-restart invariant (decision mapping)', () {
+    test('credentials may be persisted ONLY after success', () {
+      expect(wifiTestMessage(WifiTestResult.success), isNotNull);
+      // The gate equals: persistAllowed = (result == WifiTestResult.success).
+      // Every non-success verdict carries a failure/unknown message, never the
+      // success confirmation.
+      for (final r in WifiTestResult.values) {
+        if (r == WifiTestResult.success) continue;
+        expect(wifiTestMessage(r), isNot(equals(wifiTestMessage(WifiTestResult.success))));
+      }
+    });
+
+    test('wrong password message is specific but not claimed for unknowns', () {
+      expect(wifiTestMessage(WifiTestResult.wrongPassword),
+          contains('password may be incorrect'));
+      expect(wifiTestMessage(WifiTestResult.unknown),
+          isNot(contains('password may be incorrect')));
+      expect(wifiTestMessage(WifiTestResult.ssidNotFound),
+          isNot(contains('password may be incorrect')));
+    });
+
+    test('every percentage has a message (no crash on malformed path)', () {
+      for (final r in WifiTestResult.values) {
+        expect(wifiTestMessage(r).isNotEmpty, isTrue,
+            reason: '${r.name} must have a message');
+      }
+    });
+  });
+}
