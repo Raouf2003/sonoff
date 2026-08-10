@@ -18,6 +18,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
   List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _schedules = [];
   bool _loading = true;
+  bool _loadError = false;
 
   @override
   void initState() {
@@ -26,7 +27,10 @@ class _SchedulesPageState extends State<SchedulesPage> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
     try {
       final results = await Future.wait([_api.getDevices(), _api.getSchedules()]);
       if (mounted) {
@@ -37,7 +41,14 @@ class _SchedulesPageState extends State<SchedulesPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          // Only surface the error screen when nothing is loaded yet; a failed
+          // refresh against existing data keeps showing the list.
+          _loadError = _devices.isEmpty;
+        });
+      }
     }
   }
 
@@ -89,7 +100,9 @@ class _SchedulesPageState extends State<SchedulesPage> {
     try {
       await _api.toggleSchedule(id);
     } catch (e) {
+      if (!mounted) return;
       setState(() => schedule['enabled'] = !target);
+      _showError(e is ApiException ? e.message : 'Could not update the schedule');
     }
   }
 
@@ -112,16 +125,38 @@ class _SchedulesPageState extends State<SchedulesPage> {
     if (ok != true) return;
     try {
       await _api.deleteSchedule(id);
-      _load();
+      if (mounted) _load();
     } catch (e) {
-      // ignore
+      if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the schedule');
     }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    final colors = context.steesColors;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 13)),
+        backgroundColor: colors.danger,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+        margin: const EdgeInsets.all(AppSpacing.lg),
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     if (_loading) return const SteesLoading();
+    if (_loadError) {
+      return SteesError(
+        title: 'Could not load schedules',
+        subtitle: 'Check your connection and try again.',
+        onRetry: _load,
+      );
+    }
     if (_devices.isEmpty) {
       return const SteesEmpty(
         icon: Icons.devices_other,

@@ -23,6 +23,7 @@ class _DevicesPageState extends State<DevicesPage>
   final _api = ApiService();
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
+  bool _loadError = false;
   String? _selectedDeviceId;
   int _deviceChannels = 4;
 
@@ -42,6 +43,14 @@ class _DevicesPageState extends State<DevicesPage>
   void _setConnected(bool connected) {
     if (!mounted || _connected == connected) return;
     setState(() => _connected = connected);
+  }
+
+  // Stops every ripple so an OFF channel is never left animating.
+  void _stopRipples() {
+    for (final c in _rippleControllers) {
+      c.stop();
+      c.reset();
+    }
   }
 
   void _setChannelState(int index, bool newState, {bool applyRipple = true}) {
@@ -103,14 +112,30 @@ class _DevicesPageState extends State<DevicesPage>
         setState(() {
           _devices = devices.cast<Map<String, dynamic>>();
           _loading = false;
+          _loadError = false;
         });
         if (_selectedDeviceId == null && _devices.isNotEmpty) {
           _selectDevice(_devices.first['deviceId'] as String);
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          // Distinguish "could not load" from "nothing to show": an empty
+          // device list is a happy state, a failed fetch needs a retry.
+          _loadError = _devices.isEmpty;
+        });
+      }
     }
+  }
+
+  void _retryLoad() {
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
+    _loadDevices();
   }
 
   void _selectDevice(String deviceId) {
@@ -122,6 +147,13 @@ class _DevicesPageState extends State<DevicesPage>
       _selectedDeviceId = deviceId;
       _deviceChannels = device['channels'] as int? ?? 4;
     });
+    // Switch context fully: previous device's states and animations must not
+    // leak into the newly selected device's grid.
+    for (int i = 0; i < 4; i++) {
+      channelStates[i] = false;
+      _channelLoading[i] = false;
+    }
+    _stopRipples();
     _fetchStatus();
   }
 
@@ -154,36 +186,43 @@ class _DevicesPageState extends State<DevicesPage>
     });
 
     _socket?.onConnect((_) {
-      if (mounted) {
-        setState(() {
-          /* socket to backend is up, but device status determines the pill */
-        });
-      }
+      // Socket is up. Device liveness is driven by device_status/polling, so
+      // there is nothing to flip here — no-op on purpose.
     });
     _socket?.onDisconnect((_) => _setConnected(false));
     _socket?.onConnectError((_) => _setConnected(false));
 
+    // Live events are fire-and-forget wake-ups, never the sole source of
+    // truth. Casts are guarded so a malformed payload can't crash the handler.
     _socket?.on('device_status', (data) {
-      if (!mounted) return;
-      _pollFailures = 0;
-      final map = data as Map<String, dynamic>;
-      final deviceId = map['deviceId'] as String?;
-      if (deviceId != null && deviceId != _selectedDeviceId) return;
-      final online = map['online'] == true;
-      _setConnected(online);
+      try {
+        if (!mounted) return;
+        _pollFailures = 0;
+        final map = data as Map<String, dynamic>;
+        final deviceId = map['deviceId'] as String?;
+        if (deviceId != null && deviceId != _selectedDeviceId) return;
+        final online = map['online'] == true;
+        _setConnected(online);
+      } catch (_) {
+        // Ignore malformed event; polling re-establishes truth.
+      }
     });
 
     _socket?.on('device_update', (data) {
-      if (!mounted) return;
-      _pollFailures = 0;
-      final map = data as Map<String, dynamic>;
-      final deviceId = map['deviceId'] as String?;
-      if (deviceId != null && deviceId != _selectedDeviceId) return;
-      final channel = map['channel'] as int;
-      final index = channel - 1;
-      if (index < 0 || index >= _deviceChannels) return;
-      final state = map['state'] as String;
-      _setChannelState(index, state == 'ON');
+      try {
+        if (!mounted) return;
+        _pollFailures = 0;
+        final map = data as Map<String, dynamic>;
+        final deviceId = map['deviceId'] as String?;
+        if (deviceId != null && deviceId != _selectedDeviceId) return;
+        final channel = map['channel'] as int;
+        final index = channel - 1;
+        if (index < 0 || index >= _deviceChannels) return;
+        final state = map['state'] as String;
+        _setChannelState(index, state == 'ON');
+      } catch (_) {
+        // Ignore malformed event; polling re-establishes truth.
+      }
     });
 
     _socket?.connect();
@@ -199,7 +238,12 @@ class _DevicesPageState extends State<DevicesPage>
         for (int i = 0; i < _deviceChannels; i++) {
           final on = data['POWER${i + 1}'] == 'ON';
           channelStates[i] = on;
-          if (on) _rippleControllers[i].repeat(reverse: true);
+          if (on) {
+            _rippleControllers[i].repeat(reverse: true);
+          } else {
+            _rippleControllers[i].stop();
+            _rippleControllers[i].reset();
+          }
         }
       });
     } catch (e) {
@@ -275,11 +319,35 @@ class _DevicesPageState extends State<DevicesPage>
     widget.onNavigateToTab(2);
   }
 
+  // Channel label/icon for any channel count. The 4-entry default palette
+  // covers the common case; additional relays fall back to a generated entry so
+  // a device claimed with more channels never indexes past the list.
+  ChannelConfig _configFor(int index) {
+    if (index < channels.length) return channels[index];
+    return ChannelConfig(
+      'Zone ${index + 1}',
+      Icons.water_drop,
+      const Color(0xFF0F766E),
+      'CHANNEL ${index + 1}',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const SteesLoading();
+    if (_loadError) return _buildError(context.steesColors);
     if (_devices.isEmpty) return _buildEmpty(context.steesColors);
     return _buildDeviceView(context.steesColors);
+  }
+
+  Widget _buildError(SteesColors colors) {
+    // Uses the shared error component so the failure state is visually
+    // consistent with the rest of the app.
+    return SteesError(
+      title: 'Could not load devices',
+      subtitle: 'Check your connection and try again.',
+      onRetry: _retryLoad,
+    );
   }
 
   Widget _buildEmpty(SteesColors colors) {
@@ -547,7 +615,7 @@ class _DevicesPageState extends State<DevicesPage>
           (i) => _WaterCard(
             index: i,
             channel: i + 1,
-            config: channels[i],
+            config: _configFor(i),
             isOn: channelStates[i],
             loading: _channelLoading[i],
             offline: !_connected,

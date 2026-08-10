@@ -27,9 +27,9 @@ const ruleSchema = new mongoose.Schema({
     required: true,
     validate: {
       validator(v) {
-        return Array.isArray(v) && v.length > 0 && v.every((n) => Number.isInteger(n) && n >= 1 && n <= 4) && new Set(v).size === v.length;
+        return Array.isArray(v) && v.length > 0 && v.every((n) => Number.isInteger(n) && n >= 1) && new Set(v).size === v.length;
       },
-      message: 'channels must be a non-empty array of unique integers between 1 and 4',
+      message: 'channels must be a non-empty array of unique positive integers',
     },
   },
   condition: {

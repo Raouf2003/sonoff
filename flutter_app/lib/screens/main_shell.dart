@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/auth_service.dart';
+import '../services/api_service.dart';
 import 'devices_page.dart';
 import 'sensors_page.dart';
 import 'schedules_page.dart';
@@ -27,22 +28,45 @@ class _MainShellState extends State<MainShell> {
     const RulesPage(),
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    // Any API response with 401 (expired/invalid token) from any tab logs the
+    // user out instead of leaving every page showing a generic failure.
+    ApiService.onUnauthorized = _handleSessionExpired;
+  }
+
+  @override
+  void dispose() {
+    if (ApiService.onUnauthorized == _handleSessionExpired) {
+      ApiService.onUnauthorized = null;
+    }
+    super.dispose();
+  }
+
   void _switchTab(int index) {
     setState(() => _currentIndex = index);
   }
 
+  void _routeToLogin() {
+    Navigator.of(context).pushAndRemoveUntil(
+      PageRouteBuilder(
+        pageBuilder: (_, _, _) => const LoginScreen(),
+        transitionsBuilder: (_, anim, _, child) => FadeTransition(opacity: anim, child: child),
+        transitionDuration: const Duration(milliseconds: 300),
+      ),
+      (route) => false,
+    );
+  }
+
+  Future<void> _handleSessionExpired() async {
+    await _auth.clear();
+    if (mounted) _routeToLogin();
+  }
+
   Future<void> _logout() async {
     await _auth.clear();
-    if (mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        PageRouteBuilder(
-          pageBuilder: (_, _, _) => const LoginScreen(),
-          transitionsBuilder: (_, anim, _, child) => FadeTransition(opacity: anim, child: child),
-          transitionDuration: const Duration(milliseconds: 300),
-        ),
-        (route) => false,
-      );
-    }
+    if (mounted) _routeToLogin();
   }
 
   void _openAppearance() {

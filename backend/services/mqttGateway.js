@@ -7,6 +7,11 @@ const ACK_TIMEOUT_MS = 5000;
 // (default 300s), so the window must cover the idle silence between telemetry
 // bursts, otherwise the wizard can miss a freshly-provisioned device.
 const RECENT_WINDOW_MS = 320000;
+// How often the transient in-memory lookups are pruned so a busy public broker
+// never grows them without bound.
+const PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+const SENSOR_CACHE_TTL_MS = 10 * 60 * 1000;
+const SEEN_LOG_TTL_MS = 24 * 60 * 60 * 1000;
 
 function powerUpdatesFrom(parsed, channelCount) {
   const updates = {};
@@ -57,6 +62,27 @@ class MqttGateway {
     this.deviceRegistry = deviceRegistry;
     this.runtimeState = runtimeState;
     this._connect();
+    this.pruneTimer = setInterval(() => this._prune(), PRUNE_INTERVAL_MS);
+    if (this.pruneTimer.unref) this.pruneTimer.unref();
+  }
+
+  // Drops stale transient entries so the per-process maps stay bounded even
+  // under noise from a shared public broker. Clients re-populate transparently:
+  // recentDevices re-announce, sensor readings re-cache, owners re-resolve.
+  _prune() {
+    const now = Date.now();
+    for (const [id, ts] of this.recentDevices) {
+      if (now - ts >= RECENT_WINDOW_MS) this.recentDevices.delete(id);
+    }
+    for (const [id, entry] of this.sensorCache) {
+      if (now - entry.lastSeen >= SENSOR_CACHE_TTL_MS) {
+        this.sensorCache.delete(id);
+        this.sensorOwnerCache.delete(id);
+      }
+    }
+    for (const [id, ts] of this.seenLog) {
+      if (now - ts >= SEEN_LOG_TTL_MS) this.seenLog.delete(id);
+    }
   }
 
   isConnected() {
@@ -93,7 +119,15 @@ class MqttGateway {
       this._failPending('connection closed');
     });
 
-    this.client.on('message', (topic, message) => this._handle(topic.toString(), message.toString()));
+    this.client.on('message', (topic, message) => {
+      try {
+        this._handle(topic.toString(), message.toString());
+      } catch (err) {
+        // A malformed/hostile payload from the (shared, public) broker must
+        // never take down the backend. Log and drop the message.
+        console.error(`[mqtt] ignored unhandled message on ${topic}:`, err.message);
+      }
+    });
   }
 
   _subscribe() {
@@ -354,7 +388,8 @@ class MqttGateway {
 
     // Live push to the app, mirroring device_update. Emitted only to the
     // owning user's socket room; never broadcast globally.
-    this._routeSensorUpdate(sensorId, value, new Date(now).toISOString());
+    this._routeSensorUpdate(sensorId, value, new Date(now).toISOString())
+      .catch((err) => console.error(`[mqtt] sensor_update failed for ${sensorId}:`, err.message));
   }
 
   // Deliver a sensor reading only to the sockets of the user who owns that
@@ -388,3 +423,5 @@ class MqttGateway {
 }
 
 module.exports = new MqttGateway();
+module.exports.MqttGateway = MqttGateway;
+module.exports.powerUpdatesFrom = powerUpdatesFrom;

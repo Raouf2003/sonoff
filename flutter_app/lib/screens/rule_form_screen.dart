@@ -24,6 +24,11 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   String _action = 'ON';
   bool _saving = false;
 
+  // Effective channel ceiling. Starts from the caller-provided value (devices
+  // with 1-4 relays) or is resolved from the sensor's device when opened with
+  // the default, so multi-relay devices aren't artificially capped at 4.
+  int _maxChannel = 4;
+
   bool get _isEdit => widget.existing != null;
 
   @override
@@ -31,6 +36,35 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
     super.initState();
     final e = widget.existing;
     if (e != null) _prefill(e);
+    _maxChannel = widget.maxChannel;
+    if (_maxChannel <= 1) _resolveMaxChannel();
+  }
+
+  // Resolves the real channel count of the sensor's Sonoff device when the
+  // caller couldn't provide it, rather than silently capping the rule at 4.
+  Future<void> _resolveMaxChannel() async {
+    try {
+      final list = await Future.wait([_api.getSensors(), _api.getDevices()]);
+      final sensors = list[0].cast<Map<String, dynamic>>();
+      final devices = list[1].cast<Map<String, dynamic>>();
+      String? deviceId = widget.existing?['deviceId'] as String?;
+      for (final s in sensors) {
+        if (s['sensorId'] == widget.sensorId) {
+          deviceId = s['deviceId'] as String?;
+          break;
+        }
+      }
+      if (deviceId == null) return;
+      for (final d in devices) {
+        if (d['deviceId'] == deviceId) {
+          final resolved = (d['channels'] as int?) ?? 4;
+          if (mounted && resolved > 1) setState(() => _maxChannel = resolved);
+          break;
+        }
+      }
+    } catch (_) {
+      // Keep the safe default; the backend still validates against the device.
+    }
   }
 
   void _prefill(Map<String, dynamic> rule) {
@@ -105,7 +139,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
       }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
-      _err(e.toString().replaceFirst('Exception: ', ''));
+      _err(e is ApiException ? e.message : 'Could not save the rule');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -169,7 +203,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                   child: Wrap(
                     spacing: 10,
                     runSpacing: 8,
-                    children: [for (int i = 1; i <= widget.maxChannel; i++) _ChannelChip(
+                    children: [for (int i = 1; i <= _maxChannel; i++) _ChannelChip(
                       label: 'CH$i',
                       selected: _channels.contains(i),
                       color: colors.stream,

@@ -29,6 +29,7 @@ class _SignupScreenState extends State<SignupScreen> {
   }
 
   Future<void> _signup() async {
+    if (_loading) return;
     final u = _usernameCtl.text.trim();
     final p = _passwordCtl.text;
     final c = _confirmCtl.text;
@@ -41,9 +42,14 @@ class _SignupScreenState extends State<SignupScreen> {
       await _auth.saveToken(data['token'] as String);
       await _auth.saveUsername(data['user']['username'] as String);
       if (mounted) Navigator.of(context).pushNamedAndRemoveUntil('/home', (_) => false);
-    } catch (e) { _err(e.toString().replaceFirst('Exception: ', '')); }
+    } catch (e) { _err(_friendly(e)); }
     finally { if (mounted) setState(() => _loading = false); }
   }
+
+  // ApiException already carries a user-safe message; anything else is a
+  // programming/server edge case we never surface verbatim.
+  String _friendly(Object e) =>
+      e is ApiException ? e.message : 'Something went wrong. Please try again.';
 
   void _err(String m) {
     if (!mounted) return;
@@ -81,7 +87,7 @@ class _SignupScreenState extends State<SignupScreen> {
                   const SizedBox(height: 36),
                   _Field(controller: _usernameCtl, hint: 'Username', icon: Icons.person_outline, next: true),
                   const SizedBox(height: 14),
-                  _Field(controller: _passwordCtl, hint: 'Password', icon: Icons.lock_outline, obscure: true, next: true),
+                  _Field(controller: _passwordCtl, hint: 'Password', icon: Icons.lock_outline, obscure: _obscure, next: true),
                   const SizedBox(height: 14),
                   _Field(
                     controller: _confirmCtl, hint: 'Confirm Password', icon: Icons.lock_outline, obscure: _obscure,

@@ -38,6 +38,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   Future<void> _login() async {
+    if (_loading) return;
     final u = _usernameCtl.text.trim();
     final p = _passwordCtl.text;
     if (u.isEmpty || p.isEmpty) { _err('Fill in all fields'); return; }
@@ -47,9 +48,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       await _auth.saveToken(data['token'] as String);
       await _auth.saveUsername(data['user']['username'] as String);
       if (mounted) Navigator.of(context).pushReplacementNamed('/home');
-    } catch (e) { _err(e.toString().replaceFirst('Exception: ', '')); }
+    } catch (e) { _err(_friendly(e)); }
     finally { if (mounted) setState(() => _loading = false); }
   }
+
+  // ApiException already carries a user-safe message; anything else is a
+  // programming/server edge case we never surface verbatim.
+  String _friendly(Object e) =>
+      e is ApiException ? e.message : 'Something went wrong. Please try again.';
 
   void _err(String m) {
     if (!mounted) return;

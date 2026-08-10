@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/",
     "virtual": "node virtual_mqtt_device.js",
     "dev": "node server.js & node virtual_mqtt_device.js"
   },

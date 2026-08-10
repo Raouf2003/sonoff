@@ -18,6 +18,7 @@ class _RulesPageState extends State<RulesPage> {
   List<Map<String, dynamic>> _rules = [];
   List<Map<String, dynamic>> _sensors = [];
   bool _loading = true;
+  bool _loadError = false;
 
   @override
   void initState() {
@@ -26,7 +27,10 @@ class _RulesPageState extends State<RulesPage> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
     try {
       final results = await Future.wait([_api.getRules(), _api.getSensors()]);
       if (mounted) {
@@ -37,7 +41,14 @@ class _RulesPageState extends State<RulesPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          // Only surface the error screen when nothing is loaded yet; a failed
+          // refresh against existing data keeps showing the list.
+          _loadError = _rules.isEmpty;
+        });
+      }
     }
   }
 
@@ -55,7 +66,9 @@ class _RulesPageState extends State<RulesPage> {
     try {
       await _api.toggleRule(id);
     } catch (e) {
+      if (!mounted) return;
       setState(() => rule['enabled'] = !target);
+      _showError(e is ApiException ? e.message : 'Could not update the rule');
     }
   }
 
@@ -80,10 +93,25 @@ class _RulesPageState extends State<RulesPage> {
     if (ok != true) return;
     try {
       await _api.deleteRule(rule['_id'] as String);
-      _load();
+      if (mounted) _load();
     } catch (e) {
-      // ignore
+      if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the rule');
     }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    final colors = context.steesColors;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 13)),
+        backgroundColor: colors.danger,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+        margin: const EdgeInsets.all(AppSpacing.lg),
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   void _openRule(Map<String, dynamic> rule) {
@@ -246,6 +274,20 @@ class _RulesPageState extends State<RulesPage> {
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     if (_loading) return const SteesLoading();
+    if (_loadError) {
+      return Column(
+        children: [
+          _buildHeader(),
+          Expanded(
+            child: SteesError(
+              title: 'Could not load rules',
+              subtitle: 'Check your connection and try again.',
+              onRetry: _load,
+            ),
+          ),
+        ],
+      );
+    }
     if (_rules.isEmpty) {
       return Column(
         children: [

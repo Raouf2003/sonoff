@@ -114,6 +114,89 @@ class SteesEmpty extends StatelessWidget {
 }
 
 // ──────────────────────────────────────────────────────────────
+// SteesError
+// ──────────────────────────────────────────────────────────────
+
+class SteesError extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final VoidCallback? onRetry;
+
+  const SteesError({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xxxl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: colors.danger.withValues(alpha: 0.1),
+                border: Border.all(color: colors.danger.withValues(alpha: 0.18)),
+              ),
+              child: Icon(
+                Icons.cloud_off_rounded,
+                size: 32,
+                color: colors.danger.withValues(alpha: 0.7),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            Text(
+              title,
+              style: GoogleFonts.sora(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: colors.foam,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(
+                fontSize: 13,
+                height: 1.5,
+                color: colors.mist.withValues(alpha: 0.7),
+              ),
+            ),
+            if (onRetry != null) ...[
+              const SizedBox(height: AppSpacing.xl),
+              FilledButton.tonalIcon(
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: Text(
+                  'Retry',
+                  style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: colors.danger.withValues(alpha: 0.12),
+                  foregroundColor: colors.danger,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // SteesLoading
 // ──────────────────────────────────────────────────────────────
 

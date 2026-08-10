@@ -18,6 +18,7 @@ class _SensorsPageState extends State<SensorsPage> {
   List<Map<String, dynamic>> _sensors = [];
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
+  bool _loadError = false;
 
   @override
   void initState() {
@@ -26,7 +27,10 @@ class _SensorsPageState extends State<SensorsPage> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
     try {
       final results = await Future.wait([_api.getSensors(), _api.getDevices()]);
       if (mounted) {
@@ -37,7 +41,14 @@ class _SensorsPageState extends State<SensorsPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          // Only surface the error screen when nothing is loaded yet; a failed
+          // refresh against existing data keeps showing the list.
+          _loadError = _sensors.isEmpty;
+        });
+      }
     }
   }
 
@@ -62,6 +73,13 @@ class _SensorsPageState extends State<SensorsPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) return const SteesLoading();
+    if (_loadError) {
+      return SteesError(
+        title: 'Could not load sensors',
+        subtitle: 'Check your connection and try again.',
+        onRetry: _load,
+      );
+    }
     if (_sensors.isEmpty) return _buildEmpty();
     return _buildSensorList();
   }

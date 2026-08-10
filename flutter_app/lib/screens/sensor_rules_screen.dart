@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
+import '../widgets/stees_widgets.dart';
 import 'rule_form_screen.dart';
 
 class SensorRulesScreen extends StatefulWidget {
@@ -17,6 +18,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
   final _api = ApiService();
   List<Map<String, dynamic>> _rules = [];
   bool _loading = true;
+  bool _loadError = false;
 
   @override
   void initState() {
@@ -25,7 +27,10 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
     try {
       final rules = await _api.getRules();
       if (mounted) {
@@ -37,8 +42,12 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
-      _err('Failed to load rules');
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _loadError = _rules.isEmpty;
+        });
+      }
     }
   }
 
@@ -76,8 +85,9 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     try {
       await _api.toggleRule(id);
     } catch (e) {
+      if (!mounted) return;
       setState(() => _rule!['enabled'] = !target);
-      _err('Failed to update rule');
+      _err(e is ApiException ? e.message : 'Failed to update rule');
     }
   }
 
@@ -162,9 +172,15 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
         child: SafeArea(
           child: _loading
               ? Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream)))
-              : _hasRule
-                  ? _buildRuleView()
-                  : _buildEmpty(),
+              : _loadError
+                  ? SteesError(
+                      title: 'Could not load the rule',
+                      subtitle: 'Check your connection and try again.',
+                      onRetry: _load,
+                    )
+                  : _hasRule
+                      ? _buildRuleView()
+                      : _buildEmpty(),
         ),
       ),
     );

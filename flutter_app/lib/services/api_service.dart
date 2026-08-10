@@ -1,8 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 
 const String kBaseUrl = 'https://sonoff-3na2.onrender.com';
+
+/// Upper bound for any single HTTP call. Prevents a hung socket from leaving
+/// the UI in an endless spinner.
+const Duration kApiTimeout = Duration(seconds: 15);
 
 /// HTTP error carrying the status code so callers can give phase-appropriate
 /// feedback instead of a generic "make sure you have internet access". When the
@@ -22,6 +28,10 @@ class ApiException implements Exception {
 class ApiService {
   final AuthService _auth = AuthService();
 
+  /// Registered by the app shell to log the user out when any request returns
+  /// 401 (missing/expired/invalid token). No-op by default.
+  static void Function()? onUnauthorized;
+
   Future<Map<String, String>> _headers() async {
     final token = await _auth.getToken();
     return {
@@ -30,12 +40,86 @@ class ApiService {
     };
   }
 
+  // Runs a request under a timeout and maps low-level failures (timeout, no
+  // network, TLS handshake) to a classified ApiException so callers never see
+  // raw transport exceptions or a permanently-pending future.
+  Future<http.Response> _send(Future<http.Response> Function() run) async {
+    try {
+      return await run().timeout(kApiTimeout);
+    } on TimeoutException {
+      throw const ApiException(
+        'The request timed out. Please try again.',
+        code: 'TIMEOUT',
+      );
+    } on SocketException {
+      throw const ApiException(
+        'Could not reach the server. Check your connection.',
+        code: 'NETWORK_ERROR',
+      );
+    } on http.ClientException {
+      throw const ApiException(
+        'Could not reach the server. Check your connection.',
+        code: 'NETWORK_ERROR',
+      );
+    }
+  }
+
+  // Decode a JSON-object response or throw a classified ApiException.
+  Map<String, dynamic> _checkObject(
+    http.Response res,
+    List<int> okCodes,
+    String fallbackMessage,
+  ) {
+    if (okCodes.contains(res.statusCode)) {
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    }
+    _notifyUnauthorized(res.statusCode);
+    Map<String, dynamic> body = const {};
+    try {
+      body = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {}
+    throw ApiException(
+      (body['error'] as String?) ??
+          (body['message'] as String?) ??
+          fallbackMessage,
+      statusCode: res.statusCode,
+      code: body['code'] as String?,
+    );
+  }
+
+  // Decode a JSON-array response or throw a classified ApiException.
+  List<dynamic> _checkList(http.Response res, String fallbackMessage) {
+    if (res.statusCode == 200) {
+      return jsonDecode(res.body) as List<dynamic>;
+    }
+    _notifyUnauthorized(res.statusCode);
+    Map<String, dynamic> body = const {};
+    try {
+      body = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {}
+    throw ApiException(
+      (body['error'] as String?) ??
+          (body['message'] as String?) ??
+          fallbackMessage,
+      statusCode: res.statusCode,
+      code: body['code'] as String?,
+    );
+  }
+
+  void _notifyUnauthorized(int statusCode) {
+    if (statusCode == 401 && ApiService.onUnauthorized != null) {
+      ApiService.onUnauthorized!();
+    }
+  }
+
   Future<http.Response> post(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
-    return await http.post(
-      Uri.parse('$kBaseUrl$path'),
-      headers: headers,
-      body: jsonEncode(body),
+    return _send(
+      () => http.post(
+        Uri.parse('$kBaseUrl$path'),
+        headers: headers,
+        body: jsonEncode(body),
+      ),
     );
   }
 
@@ -45,30 +129,34 @@ class ApiService {
     if (query != null) {
       uri = uri.replace(queryParameters: query);
     }
-    return await http.get(uri, headers: headers);
+    return _send(() => http.get(uri, headers: headers));
   }
 
   Future<http.Response> put(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
-    return await http.put(
-      Uri.parse('$kBaseUrl$path'),
-      headers: headers,
-      body: jsonEncode(body),
+    return _send(
+      () => http.put(
+        Uri.parse('$kBaseUrl$path'),
+        headers: headers,
+        body: jsonEncode(body),
+      ),
     );
   }
 
   Future<http.Response> patch(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
-    return await http.patch(
-      Uri.parse('$kBaseUrl$path'),
-      headers: headers,
-      body: jsonEncode(body),
+    return _send(
+      () => http.patch(
+        Uri.parse('$kBaseUrl$path'),
+        headers: headers,
+        body: jsonEncode(body),
+      ),
     );
   }
 
   Future<http.Response> delete(String path) async {
     final headers = await _headers();
-    return await http.delete(Uri.parse('$kBaseUrl$path'), headers: headers);
+    return _send(() => http.delete(Uri.parse('$kBaseUrl$path'), headers: headers));
   }
 
   Future<Map<String, dynamic>> signup(String username, String password) async {
@@ -76,11 +164,7 @@ class ApiService {
       'username': username,
       'password': password,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 201) {
-      throw Exception(body['error'] ?? 'Signup failed');
-    }
-    return body;
+    return _checkObject(res, const [201], 'Signup failed');
   }
 
   Future<Map<String, dynamic>> login(String username, String password) async {
@@ -88,19 +172,12 @@ class ApiService {
       'username': username,
       'password': password,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Login failed');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Login failed');
   }
 
   Future<List<dynamic>> getDevices() async {
     final res = await get('/api/devices');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch devices');
-    }
-    return jsonDecode(res.body) as List<dynamic>;
+    return _checkList(res, 'Failed to fetch devices');
   }
 
   // Provisioning session: the backend issues a secret deviceId (== the MQTT
@@ -109,29 +186,13 @@ class ApiService {
   // announcing on MQTT. The claim token is returned here exactly once.
   Future<Map<String, dynamic>> createProvisioningSession() async {
     final res = await post('/api/provisioning/sessions', <String, dynamic>{});
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 201) {
-      throw ApiException(
-        body['error'] ?? 'Could not start provisioning session',
-        statusCode: res.statusCode,
-        code: body['code'] as String?,
-      );
-    }
-    return body;
+    return _checkObject(res, const [201], 'Could not start provisioning session');
   }
 
   // Scoped status of one provisioning session (never exposes the claim token).
   Future<Map<String, dynamic>> getProvisioningSession(String sessionId) async {
     final res = await get('/api/provisioning/sessions/$sessionId');
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw ApiException(
-        body['error'] ?? 'Could not fetch provisioning status',
-        statusCode: res.statusCode,
-        code: body['code'] as String?,
-      );
-    }
-    return body;
+    return _checkObject(res, const [200], 'Could not fetch provisioning status');
   }
 
   // Best-effort: attach the Tasmota MAC read from the device during the
@@ -140,14 +201,7 @@ class ApiService {
     final res = await post('/api/provisioning/sessions/$sessionId/hardware', {
       'hardwareId': hardwareId,
     });
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw ApiException(
-        body['error'] ?? 'Could not store hardware id',
-        statusCode: res.statusCode,
-        code: body['code'] as String?,
-      );
-    }
+    _checkObject(res, const [200], 'Could not store hardware id');
   }
 
   Future<Map<String, dynamic>> claimDeviceWithSession({
@@ -163,23 +217,12 @@ class ApiService {
       'channels': channels,
       'hardwareId': ?hardwareId,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw ApiException(
-        body['error'] ?? 'Claim failed',
-        statusCode: res.statusCode,
-        code: body['code'] as String?,
-      );
-    }
-    return body;
+    return _checkObject(res, const [200], 'Claim failed');
   }
 
   Future<Map<String, dynamic>> getStatus(String deviceId) async {
     final res = await get('/api/status', query: {'deviceId': deviceId});
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch status');
-    }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return _checkObject(res, const [200], 'Failed to fetch status');
   }
 
   Future<Map<String, dynamic>> control(String deviceId, int channel, String state) async {
@@ -188,35 +231,22 @@ class ApiService {
       'channel': channel,
       'state': state,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Control failed');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Control failed');
   }
 
   Future<void> unclaimDevice(String deviceId) async {
     final res = await post('/api/devices/unclaim', {'deviceId': deviceId});
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Failed to unclaim device');
-    }
+    _checkObject(res, const [200], 'Failed to unclaim device');
   }
 
   Future<void> deleteDevice(String deviceId) async {
     final res = await delete('/api/devices/$deviceId');
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Failed to delete device');
-    }
+    _checkObject(res, const [200], 'Failed to delete device');
   }
 
   Future<List<dynamic>> getSensors() async {
     final res = await get('/api/sensors');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch sensors');
-    }
-    return jsonDecode(res.body) as List<dynamic>;
+    return _checkList(res, 'Failed to fetch sensors');
   }
 
   Future<Map<String, dynamic>> createSensor(String name, String sensorId, String deviceId) async {
@@ -225,27 +255,17 @@ class ApiService {
       'sensorId': sensorId,
       'deviceId': deviceId,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['message'] ?? body['error'] ?? 'Failed to add sensor');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Failed to add sensor');
   }
 
   Future<void> deleteSensor(String sensorId) async {
     final res = await delete('/api/sensors/$sensorId');
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Failed to delete sensor');
-    }
+    _checkObject(res, const [200], 'Failed to delete sensor');
   }
 
   Future<List<dynamic>> getRules() async {
     final res = await get('/api/rules');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch rules');
-    }
-    return jsonDecode(res.body) as List<dynamic>;
+    return _checkList(res, 'Failed to fetch rules');
   }
 
   Future<Map<String, dynamic>> createRule({
@@ -264,11 +284,7 @@ class ApiService {
       'threshold': threshold,
       'action': action,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 201) {
-      throw Exception(body['error'] ?? 'Failed to create rule');
-    }
-    return body;
+    return _checkObject(res, const [201], 'Failed to create rule');
   }
 
   Future<Map<String, dynamic>> updateRule(String ruleId, {
@@ -285,36 +301,22 @@ class ApiService {
     if (threshold != null) body['threshold'] = threshold;
     if (action != null) body['action'] = action;
     final res = await patch('/api/rules/$ruleId', body);
-    final json = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(json['error'] ?? 'Failed to update rule');
-    }
-    return json;
+    return _checkObject(res, const [200], 'Failed to update rule');
   }
 
   Future<Map<String, dynamic>> toggleRule(String ruleId) async {
     final res = await patch('/api/rules/$ruleId/enable', {});
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Failed to toggle rule');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Failed to toggle rule');
   }
 
   Future<void> deleteRule(String ruleId) async {
     final res = await delete('/api/rules/$ruleId');
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Failed to delete rule');
-    }
+    _checkObject(res, const [200], 'Failed to delete rule');
   }
 
   Future<List<dynamic>> getSchedules() async {
     final res = await get('/api/schedules');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch schedules');
-    }
-    return jsonDecode(res.body) as List<dynamic>;
+    return _checkList(res, 'Failed to fetch schedules');
   }
 
   Future<Map<String, dynamic>> createSchedule({
@@ -331,11 +333,7 @@ class ApiService {
       'recurrence': recurrence,
       'timeRanges': timeRanges,
     });
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 201) {
-      throw Exception(body['error'] ?? 'Failed to create schedule');
-    }
-    return body;
+    return _checkObject(res, const [201], 'Failed to create schedule');
   }
 
   Future<Map<String, dynamic>> updateSchedule(
@@ -343,27 +341,16 @@ class ApiService {
     Map<String, dynamic> payload,
   ) async {
     final res = await patch('/api/schedules/$id', payload);
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Failed to update schedule');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Failed to update schedule');
   }
 
   Future<Map<String, dynamic>> toggleSchedule(String id) async {
     final res = await patch('/api/schedules/$id/enable', {});
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Failed to toggle schedule');
-    }
-    return body;
+    return _checkObject(res, const [200], 'Failed to toggle schedule');
   }
 
   Future<void> deleteSchedule(String id) async {
     final res = await delete('/api/schedules/$id');
-    if (res.statusCode != 200) {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Failed to delete schedule');
-    }
+    _checkObject(res, const [200], 'Failed to delete schedule');
   }
 }

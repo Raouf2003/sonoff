@@ -186,7 +186,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
-      _err(e.toString().replaceFirst('Exception: ', ''));
+      _err(e is ApiException ? e.message : 'Could not save the schedule');
     } finally {
       if (mounted) setState(() => _saving = false);
     }

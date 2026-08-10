@@ -36,8 +36,9 @@ class RuntimeState {
     if (!state) return false;
     if (state.online) return true;
     // Fallback: recent telemetry counts as alive even without an LWT event.
-    const FRESH_MS = 60 * 1000;
-    return !!state.lastSeen && Date.now() - state.lastSeen < FRESH_MS;
+    // Uses the same freshMs window as `touchDevice` so devices don't flicker
+    // offline between telemetry bursts (Tasmota TelePeriod default 300s).
+    return !!state.lastSeen && Date.now() - state.lastSeen < this.freshMs;
   }
 
   getDeviceState(deviceId) {

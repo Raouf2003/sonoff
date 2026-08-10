@@ -71,9 +71,10 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
         ),
       );
       if (mounted) Navigator.of(context).pop(true);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
+      final msg = e is ApiException ? e.message : 'Check the Sensor ID and make sure the ESP32 is connected.';
       await showDialog(
         context: context,
         barrierDismissible: true,
@@ -81,7 +82,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
           icon: Icons.error_outline,
           color: colors.danger,
           title: 'Sensor not found',
-          message: 'Check the Sensor ID and make sure the ESP32 is connected.',
+          message: msg,
         ),
       );
       if (mounted) setState(() => _adding = false);
