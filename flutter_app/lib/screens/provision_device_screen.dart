@@ -42,6 +42,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // was briefly seen is not missed, but not spin forever on a lost network.
   static const Duration _waitDeadline = Duration(minutes: 6);
 
+  // Cosmetic pacing of the WAIT stage labels: the device reboots and joins
+  // home Wi-Fi during this window, before it can reach the MQTT broker.
+  static const Duration _stageAdvance = Duration(seconds: 25);
+
   // Absolute bound for the whole Tasmota configuration sweep (broker, topic,
   // fulltopic, device name, Wi-Fi, verify, restart). Each command already has
   // its own HTTP timeout and retry loop; this is a coarse backstop so a device
@@ -95,6 +99,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // only case where "Wait a bit longer" makes sense. Claim conflicts and other
   // terminal errors get a Close-only recovery instead of a pointless re-arm.
   bool _allowWaitRetry = false;
+  // Set when the wizard enters the Reconfigure-Wi-Fi recovery flow. Reuses the
+  // existing provisioning session / deviceId / claim token - a Wi-Fi correction
+  // is never a new session. Drives the recovery-aware connect screen.
+  bool _recoveryMode = false;
+  // Paces the WAIT stage labels: Wi-Fi for the early device-reboot window, then
+  // MQTT. Labels are cosmetic pacing, never a functional timeout.
+  Timer? _waitStageTimer;
 
   String get _phaseLabel {
     switch (_step) {
@@ -157,6 +168,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     unawaited(_releaseWifiBinding());
     _reachTimer?.cancel();
     _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
     _closeProvisionSocket();
     _ssidCtl.dispose();
     _wifiPassCtl.dispose();
@@ -377,10 +389,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
     if (await _isReachable()) {
       _reachTimer?.cancel();
+      _waitStageTimer?.cancel();
       debugPrint('[PROVISION] device AP reachable');
       if (!mounted || _step != _Step.connect) return;
       _trace.enter(ProvisionPhase.ap, 'AP_DETECTED');
       debugPrint('[PROVISION] AP_CONNECTED');
+      if (_recoveryMode) {
+        traceLog('RECOVERY', 'AP_FOUND total=${_trace.elapsedMs}ms');
+        traceLog('RECONFIGURE',
+            'START total=${_trace.elapsedMs}ms session=$_sessionId');
+      }
       setState(() {
         _searching = false;
         _error = null;
@@ -402,6 +420,9 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
 
     // Grace period exhausted — only now is a failure surfaced to the user.
+    if (_recoveryMode) {
+      traceLog('RECOVERY', 'AP_NOT_FOUND total=${_trace.elapsedMs}ms');
+    }
     debugPrint('[PROVISION] AP detection grace ${_apProbeGrace.inSeconds}s elapsed, giving up');
     if (!mounted || _step != _Step.connect) return;
     setState(() {
@@ -813,6 +834,17 @@ Future<bool> _sendTasmotaConfig() async {
     _trace.enter(ProvisionPhase.mqtt, 'WAIT_MQTT_DEVICE');
     _waitStart = DateTime.now();
     _claimed = false;
+    // Stage label pacing: "Connecting device to Wi-Fi…" for the boot window,
+    // then "Connecting device to MQTT…". Pure UX - the deadline and polling
+    // cadence are untouched by it.
+    _state = ProvisionState.waitingForWifi;
+    _waitStageTimer?.cancel();
+    _waitStageTimer = Timer(_stageAdvance, () {
+      if (!mounted || _step != _Step.waiting) return;
+      setState(() {
+        _state = ProvisionState.waitingForMqtt;
+      });
+    });
     // Authoritative fallback: scoped, authenticated polling (source of truth).
     _pollSessionStatus();
     // Optional fast path: Socket.IO wake-up for this session's device only.
@@ -901,22 +933,26 @@ Future<bool> _sendTasmotaConfig() async {
 
   // Terminal stop of the wait loop. The device never appeared before the
   // deadline (or its session could not be reached). This is a RECOVERY state,
-  // not a dead-end: the wizard keeps its identity and offers Wait Again (fresh
-  // deadline - the device may still be slow to reboot) and Close (leave with
-  // the session still valid so the user can power-cycle and retry).
+  // not a dead-end: the wizard keeps its identity and offers Reconfigure Wi-Fi
+  // (re-acquire the Tasmota AP, correct credentials, reuse the same session),
+  // Try again (fresh deadline - the device may still be slow to reboot) and
+  // Close (leave with the session still valid so the user can continue later).
+  // The cause is deliberately non-specific: the backend cannot distinguish a
+  // wrong password from a wrong network, 5 GHz-only Wi-Fi, an unavailable
+  // network, a device power loss or an MQTT/backend hiccup - recovery for all
+  // of them is the same, so the wording stays evidence-based.
   void _finishWaitFailed() {
     _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
     _closeProvisionSocket();
     _allowWaitRetry = true;
     traceLog('WAIT',
-        'DEADLINE total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
+        'TIMEOUT total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
     if (!mounted) return;
     setState(() {
       _state = ProvisionState.failed;
       _error =
-          "The device hasn't connected to STEES yet. Check the home Wi-Fi "
-          'password and that the device can reach the internet, or power-cycle '
-          'the device so it reconnects, then try again.';
+          "The device didn't connect to the Wi-Fi network it was configured for.";
     });
   }
 
@@ -958,6 +994,7 @@ Future<bool> _sendTasmotaConfig() async {
         hardwareId: _hardwareId,
       );
       _trace.enter(ProvisionPhase.claim, 'CLAIMED');
+      _recoveryMode = false;
       debugPrint('[PROVISION] CLAIM_SUCCESS deviceId=$_issuedDeviceId');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       if (!mounted) return;
@@ -1137,6 +1174,7 @@ Future<bool> _sendTasmotaConfig() async {
   }
 
   Widget _buildConnect(SteesColors colors) {
+    final recovering = _recoveryMode;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1151,12 +1189,22 @@ Future<bool> _sendTasmotaConfig() async {
           ),
           child: Column(
             children: [
-              Icon(Icons.wifi_outlined, size: 40, color: colors.stream.withValues(alpha: 0.5)),
+              Icon(
+                recovering ? Icons.wifi_tethering : Icons.wifi_outlined,
+                size: 40,
+                color: colors.stream.withValues(alpha: 0.5),
+              ),
               const SizedBox(height: AppSpacing.md),
               Text(
-                'Connect your phone to the device Wi-Fi.\n\n'
-                "Tap below, pick the device's access point (tasmota-XXXX), "
-                'then return here.',
+                recovering
+                    ? 'Reconnect to your device Wi-Fi.\n\n'
+                        'Your device ID is kept - this is a Wi-Fi correction, not a '
+                        'new registration.\n\n'
+                        'Power-cycle the device, pick its access point '
+                        '(tasmota-XXXX) in Wi-Fi Settings, then return here.'
+                    : 'Connect your phone to the device Wi-Fi.\n\n'
+                        "Tap below, pick the device's access point (tasmota-XXXX), "
+                        'then return here.',
                 style: GoogleFonts.inter(fontSize: 13, color: colors.mist, height: 1.5),
                 textAlign: TextAlign.center,
               ),
@@ -1212,11 +1260,92 @@ Future<bool> _sendTasmotaConfig() async {
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(fontSize: 12, color: colors.danger),
                 ),
+                if (recovering) ...[
+                  const SizedBox(height: AppSpacing.xl),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 46,
+                          child: OutlinedButton(
+                            onPressed: _startSearch,
+                            style: _outlinedStyle(colors),
+                            child: Text(
+                              'Search Again',
+                              style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        child: SizedBox(
+                          height: 46,
+                          child: OutlinedButton(
+                            onPressed: _openWifiSettings,
+                            style: _outlinedStyle(colors),
+                            child: Text(
+                              'Open Wi-Fi Settings',
+                              style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: OutlinedButton(
+                      onPressed: _showRecoveryInstructions,
+                      style: _outlinedStyle(colors),
+                      child: const Text(
+                        'Recovery Instructions',
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  TextButton(
+                    onPressed: _leaveWizard,
+                    child: Text(
+                      'Close',
+                      style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+                    ),
+                  ),
+                ],
               ],
             ],
           ),
         ),
       ],
+    );
+  }
+
+  // Dialog with concrete recovery steps, shown from the recovery flow. Stays
+  // open until dismissed - the phone has no internet while on the Tasmota AP,
+  // so everything here must be actionable without backend calls.
+  void _showRecoveryInstructions() {
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text('Recovery steps'),
+        content: const Text(
+          '1. Power-cycle the device and wait 30 seconds for its setup AP '
+          '(tasmota-XXXX) to appear.\n\n'
+          '2. Open Wi-Fi Settings and connect to the tasmota-XXXX network.\n\n'
+          '3. Return here and tap Continue.\n\n'
+          '4. Make sure the home Wi-Fi name and password are correct, then tap '
+          'Provision Device.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1447,16 +1576,33 @@ Future<bool> _sendTasmotaConfig() async {
           ),
         ],
         if (failed) ...[
-          const SizedBox(height: AppSpacing.xxl),
+          const SizedBox(height: AppSpacing.lg),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton.icon(
+              onPressed: _startRecovery,
+              icon: const Icon(Icons.wifi_tethering, size: 18),
+              label: const Text('Reconfigure Wi-Fi'),
+              style: _filledStyle(colors),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
           if (_allowWaitRetry) ...[
             SizedBox(
               width: double.infinity,
               height: 50,
-              child: FilledButton(
+              child: OutlinedButton(
                 onPressed: _retryWait,
-                style: _filledStyle(colors),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: colors.foam,
+                  side: BorderSide(color: colors.stream.withValues(alpha: 0.4)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.xl),
+                  ),
+                ),
                 child: Text('Wait a bit longer',
-                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
               ),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -1501,6 +1647,7 @@ Future<bool> _sendTasmotaConfig() async {
   // and claim token are all still valid - this is a continuation, not a restart.
   void _retryWait() {
     _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
     _closeProvisionSocket();
     if (!mounted) return;
     setState(() {
@@ -1513,11 +1660,37 @@ Future<bool> _sendTasmotaConfig() async {
     _waitForDeviceOnline();
   }
 
+  // Recovery from a failed WAIT. Returns to the CONNECT step to re-acquire the
+  // Tasmota AP WITHOUT creating a new session/deviceId: the currently valid
+  // session, one-time claim token and backend-issued identity are all kept, so
+  // a Wi-Fi correction is a continuation, never a fresh (possibly duplicate)
+  // provisioning attempt.
+  void _startRecovery() {
+    _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
+    _closeProvisionSocket();
+    _recoveryMode = true;
+    traceLog('RECOVERY',
+        'REQUIRED total=${_trace.elapsedMs}ms session=$_sessionId');
+    debugPrint('[PROVISION] phase=RECOVERY_AP session preserved=$_sessionId '
+        'deviceId=$_issuedDeviceId');
+    if (!mounted) return;
+    setState(() {
+      _recoveryMode = true;
+      _step = _Step.connect;
+      _state = ProvisionState.recoveryRequired;
+      _searching = false;
+      _error = null;
+    });
+    _startApDetection();
+  }
+
   // Leaves the wizard. The backend provisioning session stays valid for its
   // TTL window, so the user can power-cycle the device and start over without
   // losing the issued identity.
   void _leaveWizard() {
     _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
     _closeProvisionSocket();
     traceLog('EXIT', 'CANCELLED total=${_trace.elapsedMs}ms');
     if (mounted) Navigator.of(context).pop(false);
@@ -1537,6 +1710,14 @@ Future<bool> _sendTasmotaConfig() async {
     return FilledButton.styleFrom(
       backgroundColor: colors.stream,
       foregroundColor: colors.well,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
+    );
+  }
+
+  ButtonStyle _outlinedStyle(SteesColors colors) {
+    return OutlinedButton.styleFrom(
+      foregroundColor: colors.foam,
+      side: BorderSide(color: colors.stream.withValues(alpha: 0.4)),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
     );
   }

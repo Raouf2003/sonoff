@@ -9,6 +9,7 @@ enum ProvisionState {
   idle,
   connectingToAp,
   apConnected,
+  recoveryRequired,
   creatingSession,
   configuringBroker,
   configuringIdentity,
@@ -35,6 +36,8 @@ String provisionUserLabel(ProvisionState state) {
       return 'Connecting to device';
     case ProvisionState.apConnected:
       return 'Connecting to device';
+    case ProvisionState.recoveryRequired:
+      return 'Reconnecting to device';
     case ProvisionState.creatingSession:
       return 'Preparing device';
     case ProvisionState.configuringBroker:
@@ -48,17 +51,17 @@ String provisionUserLabel(ProvisionState state) {
     case ProvisionState.readyToRestart:
       return 'Configuring device';
     case ProvisionState.restarting:
-      return 'Connecting to Wi-Fi';
+      return 'Connecting device to Wi-Fi…';
     case ProvisionState.waitingForWifi:
-      return 'Connecting to Wi-Fi';
+      return 'Connecting device to Wi-Fi…';
     case ProvisionState.waitingForMqtt:
-      return 'Connecting to cloud…';
+      return 'Connecting device to MQTT…';
     case ProvisionState.deviceDetected:
-      return 'Registering device';
+      return 'Registering device…';
     case ProvisionState.verifyingPossession:
-      return 'Registering device';
+      return 'Registering device…';
     case ProvisionState.claiming:
-      return 'Registering device';
+      return 'Claiming device…';
     case ProvisionState.completed:
       return 'Device ready';
     case ProvisionState.failed:
