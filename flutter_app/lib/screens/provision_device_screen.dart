@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -40,6 +41,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // Must comfortably exceed the backend's recentDevices window so a device that
   // was briefly seen is not missed, but not spin forever on a lost network.
   static const Duration _waitDeadline = Duration(minutes: 6);
+
+  // Absolute bound for the whole Tasmota configuration sweep (broker, topic,
+  // fulltopic, device name, Wi-Fi, verify, restart). Each command already has
+  // its own HTTP timeout and retry loop; this is a coarse backstop so a device
+  // that wedges mid-sweep cannot pin the UI forever. On expiry the wizard shows
+  // a bounded recovery (power-cycle + retry), never blind auto-retries.
+  static const Duration _configStepDeadline = Duration(minutes: 3);
 
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
@@ -83,6 +91,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   bool _creating = false;
   bool _claimed = false;
   int? _sessionCreateStatus;
+  // Whether the terminal failure was a wait-deadline (device never seen) - the
+  // only case where "Wait a bit longer" makes sense. Claim conflicts and other
+  // terminal errors get a Close-only recovery instead of a pointless re-arm.
+  bool _allowWaitRetry = false;
 
   String get _phaseLabel {
     switch (_step) {
@@ -212,7 +224,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // requestNetwork() approach this never lets Android pick a different network
   // (e.g. the router) — getActiveNetwork() returns exactly the user's choice.
   Future<void> _ensureBoundToWifi() async {
-    if (Theme.of(context).platform == TargetPlatform.iOS) return;
+    if (defaultTargetPlatform == TargetPlatform.iOS) return;
     if (_wifiBound) return;
     final expected = _tasmotaApSsid;
     try {
@@ -243,7 +255,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   Future<void> _releaseWifiBinding() async {
-    if (Theme.of(context).platform == TargetPlatform.iOS) return;
+    if (defaultTargetPlatform == TargetPlatform.iOS) return;
     try {
       await _wifiBindChannel.invokeMethod<void>('releaseWifiBinding');
       debugPrint('[PROVISION] wifi binding released');
@@ -303,7 +315,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   Future<bool> _logNetworkInfo(String tag) async {
-    if (Theme.of(context).platform == TargetPlatform.iOS) return false;
+    if (defaultTargetPlatform == TargetPlatform.iOS) return false;
     try {
       final info = await _wifiBindChannel
           .invokeMethod<Map<dynamic, dynamic>>('getNetworkInfo');
@@ -464,12 +476,21 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] device MAC read locally (sent on claim): $mac');
     }
 
-    final ok = await _sendTasmotaConfig();
+    final ok = await _sendTasmotaConfig().timeout(
+      _configStepDeadline,
+      onTimeout: () {
+        debugPrint(
+            '[PROVISION] config step exceeded ${_configStepDeadline.inMinutes}m deadline');
+        return false;
+      },
+    );
     if (!mounted) return;
     if (!ok) {
       setState(() {
         _provisioning = false;
-        _error = 'Configuration failed. The device rejected the settings.';
+        _error = 'The device did not accept all settings. Power-cycle it (hold '
+            'its button ~10s to factory-reset if it no longer shows the '
+            'tasmota-XXXX access point), then try again.';
       });
       return;
     }
@@ -851,12 +872,7 @@ Future<bool> _sendTasmotaConfig() async {
         DateTime.now().difference(started) > _waitDeadline) {
       debugPrint(
           '[PROVISION] wait deadline of ${_waitDeadline.inMinutes}m elapsed, giving up');
-      if (!mounted) return;
-      setState(() {
-        _error =
-            "The device hasn't connected to the server. Check the home Wi-Fi "
-            'password and that the device can reach the internet, then try again.';
-      });
+      _finishWaitFailed();
       return;
     }
     final sessionId = _sessionId;
@@ -881,6 +897,27 @@ Future<bool> _sendTasmotaConfig() async {
       return;
     }
     _waitTimer = Timer(const Duration(seconds: 3), () => _pollSessionStatus());
+  }
+
+  // Terminal stop of the wait loop. The device never appeared before the
+  // deadline (or its session could not be reached). This is a RECOVERY state,
+  // not a dead-end: the wizard keeps its identity and offers Wait Again (fresh
+  // deadline - the device may still be slow to reboot) and Close (leave with
+  // the session still valid so the user can power-cycle and retry).
+  void _finishWaitFailed() {
+    _waitTimer?.cancel();
+    _closeProvisionSocket();
+    _allowWaitRetry = true;
+    traceLog('WAIT',
+        'DEADLINE total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
+    if (!mounted) return;
+    setState(() {
+      _state = ProvisionState.failed;
+      _error =
+          "The device hasn't connected to STEES yet. Check the home Wi-Fi "
+          'password and that the device can reach the internet, or power-cycle '
+          'the device so it reconnects, then try again.';
+    });
   }
 
   Future<void> _onDeviceDetected() async {
@@ -925,25 +962,115 @@ Future<bool> _sendTasmotaConfig() async {
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       if (!mounted) return;
       Navigator.of(context).pop(true);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _claimed = false;
+      debugPrint('[PROVISION] CLAIM_FAILED status=${e.statusCode} '
+          'code=${e.code} msg=${e.message}');
+      if (_isTerminalClaimError(e)) {
+        // Graded, phase-appropriate recovery. Terminal errors are NOT retried
+        // (they would re-fail forever). The wizard shows a recovery screen
+        // with a resumable session instead of looping.
+        _allowWaitRetry = false;
+        traceLog('CLAIM', 'TERMINAL total=${_trace.elapsedMs}ms');
+        setState(() {
+          _state = ProvisionState.failed;
+          _error = _claimFailureMessage(e);
+        });
+        return;
+      }
+      // Recoverable (device not on MQTT yet, transient 5xx/429/network):
+      // keep waiting so a slow MQTT connect still completes - never leave
+      // the device silently orphaned.
+      _setError(_claimRecoveryMessage(e));
+      setState(() {
+        _state = ProvisionState.waitingForMqtt;
+      });
+      _waitTimer = Timer(const Duration(seconds: 3), () => _pollSessionStatus());
     } catch (e) {
       if (!mounted) return;
       _claimed = false;
-      final msg = e.toString().replaceFirst('Exception: ', '');
-      final lower = msg.toLowerCase();
-      if (lower.contains('already claimed') ||
-          lower.contains('session already used')) {
-        _setError('This device is already linked to another account.');
-      } else if (lower.contains('session expired') ||
-          lower.contains('invalid claim token')) {
-        _setError('This provisioning attempt has expired. Please try again.');
-      } else {
-        // Recoverable (device not on MQTT yet, transient network/5xx):
-        // keep waiting so a slow MQTT connect still completes - never leave
-        // the device silently orphaned.
-        _setError('Could not claim the device yet. Waiting and retrying…');
-        _waitTimer = Timer(
-            const Duration(seconds: 3), () => _pollSessionStatus());
+      debugPrint('[PROVISION] CLAIM_FAILED network: $e');
+      // Network / timeout: recoverable. Fall back to polling for the device.
+      _setError('Could not reach STEES. Waiting and retrying…');
+      setState(() {
+        _state = ProvisionState.waitingForMqtt;
+      });
+      _waitTimer = Timer(const Duration(seconds: 3), () => _pollSessionStatus());
+    }
+  }
+
+  // Distinguishes terminal claim failures (never worth retrying) from
+  // transient ones (device not seen, rate-limited, server hiccup, network).
+  bool _isTerminalClaimError(ApiException e) {
+    final code = e.code;
+    if (code != null) {
+      switch (code) {
+        case 'BAD_HARDWARE':
+        case 'BAD_CHANNELS':
+        case 'BAD_NAME':
+        case 'BAD_DEVICE_ID':
+        case 'ALREADY_CLAIMED':
+        case 'SESSION_USED':
+        case 'SESSION_NOT_PENDING':
+        case 'SESSION_EXPIRED':
+        case 'SESSION_NOT_FOUND':
+        case 'INVALID_TOKEN':
+          return true;
+        case 'DEVICE_NOT_SEEN':
+        case 'SESSION_BUSY':
+        case 'RATE_LIMITED':
+        default:
+          return false;
       }
+    }
+    // Fall back to status codes when the body had no machine-readable code.
+    final status = e.statusCode;
+    return status == 401 || status == 403 || status == 404 || status == 400 ||
+        status == 409 || status == 410;
+  }
+
+  // User-facing, non-technical wording for a TERMINAL claim failure.
+  String _claimFailureMessage(ApiException e) {
+    switch (e.code) {
+      case 'ALREADY_CLAIMED':
+        return 'This device is already linked to an account. If you own it, '
+            'unlink it from that account first, then provision it again.';
+      case 'SESSION_EXPIRED':
+        return 'This provisioning attempt has expired. Close and start over.';
+      case 'INVALID_TOKEN':
+        return 'This provisioning attempt is no longer valid. Close and start over.';
+      case 'SESSION_USED':
+      case 'SESSION_NOT_PENDING':
+      case 'SESSION_NOT_FOUND':
+        return 'This provisioning attempt has already been used. Close and start over.';
+      case 'BAD_NAME':
+      case 'BAD_CHANNELS':
+      case 'BAD_DEVICE_ID':
+      case 'BAD_HARDWARE':
+        return 'This device could not be registered with STEES. Close and try again.';
+      default:
+        if (e.statusCode == 401) {
+          return 'You appear to be signed out. Sign in again and retry.';
+        }
+        if (e.statusCode == 403) {
+          return 'Access was denied. Sign in again and retry.';
+        }
+        return 'STEES rejected this device. Close and try again.';
+    }
+  }
+
+  // Wording for a RECOVERABLE claim failure (the wizard keeps waiting).
+  String _claimRecoveryMessage(ApiException e) {
+    switch (e.code) {
+      case 'DEVICE_NOT_SEEN':
+        return 'The device is not on the cloud yet. Waiting and retrying…';
+      case 'RATE_LIMITED':
+        return 'Too many requests to STEES. Waiting a moment and retrying…';
+      case 'SESSION_BUSY':
+        return 'Registration is still in progress. Continuing…';
+      default:
+        return 'STEES was busy. Waiting and retrying…';
     }
   }
 
@@ -1013,6 +1140,8 @@ Future<bool> _sendTasmotaConfig() async {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const SizedBox(height: AppSpacing.xl),
+        _PhaseProgress(active: 0, colors: colors),
         const SizedBox(height: AppSpacing.xl),
         Container(
           padding: const EdgeInsets.all(AppSpacing.xxl),
@@ -1095,6 +1224,13 @@ Future<bool> _sendTasmotaConfig() async {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const SizedBox(height: AppSpacing.xl),
+        _PhaseProgress(
+          active: 1,
+          colors: colors,
+          subLabel: _provisioning ? provisionUserLabel(_state) : null,
+        ),
+        const SizedBox(height: AppSpacing.xl),
         _section(colors, 'HOME WI-FI'),
         _buildWifiSelector(colors),
         const SizedBox(height: AppSpacing.md),
@@ -1255,9 +1391,12 @@ Future<bool> _sendTasmotaConfig() async {
   }
 
   Widget _buildWaiting(SteesColors colors) {
+    final failed = _state == ProvisionState.failed;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const SizedBox(height: AppSpacing.xl),
+        _PhaseProgress(active: 2, colors: colors),
         const SizedBox(height: AppSpacing.xxxl),
         Center(
           child: Container(
@@ -1265,33 +1404,88 @@ Future<bool> _sendTasmotaConfig() async {
             height: 72,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: colors.stream.withValues(alpha: 0.06),
-              border: Border.all(color: colors.stream.withValues(alpha: 0.12)),
+              color: failed
+                  ? colors.danger.withValues(alpha: 0.06)
+                  : colors.stream.withValues(alpha: 0.06),
+              border: Border.all(
+                color: (failed ? colors.danger : colors.stream).withValues(alpha: 0.12),
+              ),
             ),
-            child: Icon(Icons.cloud_done_outlined, size: 32, color: colors.stream.withValues(alpha: 0.5)),
+            child: Icon(
+              failed
+                  ? Icons.error_outline
+                  : Icons.cloud_done_outlined,
+              size: 32,
+              color: (failed ? colors.danger : colors.stream).withValues(alpha: 0.5),
+            ),
           ),
         ),
         const SizedBox(height: AppSpacing.xl),
         Text(
-          provisionUserLabel(_state),
+          failed
+              ? 'Device is not connected yet'
+              : provisionUserLabel(_state),
           textAlign: TextAlign.center,
           style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
         ),
         const SizedBox(height: AppSpacing.sm),
         Text(
-          'The device will join your Wi-Fi and connect to the cloud automatically.',
+          failed
+              ? _error ?? 'Something went wrong. Please try again.'
+              : 'The device will join your Wi-Fi and connect to the cloud automatically.',
           textAlign: TextAlign.center,
           style: GoogleFonts.inter(fontSize: 13, height: 1.5, color: colors.mist.withValues(alpha: 0.7)),
         ),
-        const SizedBox(height: AppSpacing.xxl),
-        Center(
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2.5),
+        if (!failed) ...[
+          const SizedBox(height: AppSpacing.xxl),
+          Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
           ),
-        ),
-        if (_error != null) ...[
+        ],
+        if (failed) ...[
+          const SizedBox(height: AppSpacing.xxl),
+          if (_allowWaitRetry) ...[
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: FilledButton(
+                onPressed: _retryWait,
+                style: _filledStyle(colors),
+                child: Text('Wait a bit longer',
+                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              'You can also power-cycle the device so it reconnects, then '
+              'continue waiting here.',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+          ],
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: OutlinedButton(
+              onPressed: _leaveWizard,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: colors.mist,
+                side: BorderSide(color: colors.mist.withValues(alpha: 0.35)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.xl),
+                ),
+              ),
+              child: Text('Close',
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+        if (_error != null && !failed) ...[
           const SizedBox(height: AppSpacing.xl),
           Text(
             _error!,
@@ -1301,6 +1495,32 @@ Future<bool> _sendTasmotaConfig() async {
         ],
       ],
     );
+  }
+
+  // Re-arms the device wait for a fresh deadline window. The session, deviceId
+  // and claim token are all still valid - this is a continuation, not a restart.
+  void _retryWait() {
+    _waitTimer?.cancel();
+    _closeProvisionSocket();
+    if (!mounted) return;
+    setState(() {
+      _error = null;
+      _state = ProvisionState.waitingForMqtt;
+      _waitStart = DateTime.now();
+    });
+    debugPrint('[PROVISION] wait re-armed for a fresh deadline');
+    traceLog('WAIT', 'RETRY total=${_trace.elapsedMs}ms');
+    _waitForDeviceOnline();
+  }
+
+  // Leaves the wizard. The backend provisioning session stays valid for its
+  // TTL window, so the user can power-cycle the device and start over without
+  // losing the issued identity.
+  void _leaveWizard() {
+    _waitTimer?.cancel();
+    _closeProvisionSocket();
+    traceLog('EXIT', 'CANCELLED total=${_trace.elapsedMs}ms');
+    if (mounted) Navigator.of(context).pop(false);
   }
 
   Widget _section(SteesColors colors, String title) {
@@ -1318,6 +1538,112 @@ Future<bool> _sendTasmotaConfig() async {
       backgroundColor: colors.stream,
       foregroundColor: colors.well,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
+    );
+  }
+}
+
+class _PhaseProgress extends StatelessWidget {
+  /// Which wizard step is active: 0 = connect, 1 = configure, 2 = wait.
+  final int active;
+  final SteesColors colors;
+  final String? subLabel;
+
+  const _PhaseProgress({
+    required this.active,
+    required this.colors,
+    this.subLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = ['Connect', 'Configure', 'Wait'];
+    return Column(
+      children: [
+        Row(
+          children: List.generate(labels.length, (i) {
+            final state = i < active
+                ? _PhaseDone.done
+                : (i == active ? _PhaseDone.current : _PhaseDone.todo);
+            return Expanded(
+              child: _PhaseItem(
+                label: labels[i],
+                step: i + 1,
+                state: state,
+                colors: colors,
+              ),
+            );
+          }),
+        ),
+        if (subLabel != null) ...[
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            subLabel!,
+            style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+enum _PhaseDone { done, current, todo }
+
+class _PhaseItem extends StatelessWidget {
+  final String label;
+  final int step;
+  final _PhaseDone state;
+  final SteesColors colors;
+
+  const _PhaseItem({
+    required this.label,
+    required this.step,
+    required this.state,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final activeColor =
+        state == _PhaseDone.done ? colors.stream : colors.mist.withValues(alpha: 0.55);
+    final activeFont =
+        state == _PhaseDone.todo ? colors.mist.withValues(alpha: 0.45) : colors.foam;
+    return Column(
+      children: [
+        Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: state == _PhaseDone.done
+                ? colors.stream.withValues(alpha: 0.15)
+                : colors.well,
+            border: Border.all(
+              color: state == _PhaseDone.todo
+                  ? colors.mist.withValues(alpha: 0.25)
+                  : activeColor,
+              width: state == _PhaseDone.current ? 2 : 1,
+            ),
+          ),
+          child: state == _PhaseDone.done
+              ? Icon(Icons.check, size: 15, color: colors.stream)
+              : Text(
+                  '$step',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.sora(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: state == _PhaseDone.todo
+                        ? colors.mist.withValues(alpha: 0.5)
+                        : colors.foam,
+                  ),
+                ),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          label,
+          style: GoogleFonts.inter(fontSize: 11, color: activeFont),
+        ),
+      ],
     );
   }
 }

@@ -5,11 +5,15 @@ import 'auth_service.dart';
 const String kBaseUrl = 'https://sonoff-3na2.onrender.com';
 
 /// HTTP error carrying the status code so callers can give phase-appropriate
-/// feedback instead of a generic "make sure you have internet access".
+/// feedback instead of a generic "make sure you have internet access". When the
+/// backend also returns a machine-readable `code`, it is preserved so callers
+/// can distinguish e.g. ALREADY_CLAIMED (terminal) from DEVICE_NOT_SEEN
+/// (recoverable) without parsing display text.
 class ApiException implements Exception {
-  const ApiException(this.message, {this.statusCode});
+  const ApiException(this.message, {this.statusCode, this.code});
   final String message;
   final int? statusCode;
+  final String? code;
 
   @override
   String toString() => message;
@@ -110,6 +114,7 @@ class ApiService {
       throw ApiException(
         body['error'] ?? 'Could not start provisioning session',
         statusCode: res.statusCode,
+        code: body['code'] as String?,
       );
     }
     return body;
@@ -123,6 +128,7 @@ class ApiService {
       throw ApiException(
         body['error'] ?? 'Could not fetch provisioning status',
         statusCode: res.statusCode,
+        code: body['code'] as String?,
       );
     }
     return body;
@@ -139,6 +145,7 @@ class ApiService {
       throw ApiException(
         body['error'] ?? 'Could not store hardware id',
         statusCode: res.statusCode,
+        code: body['code'] as String?,
       );
     }
   }
@@ -161,6 +168,7 @@ class ApiService {
       throw ApiException(
         body['error'] ?? 'Claim failed',
         statusCode: res.statusCode,
+        code: body['code'] as String?,
       );
     }
     return body;

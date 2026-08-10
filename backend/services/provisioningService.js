@@ -24,6 +24,10 @@ class ProvisioningService {
     // Optional post-claim notification hook (Socket.IO fast path). Wired by
     // server.js so this service stays decoupled from io.
     this.onClaimed = null; // (deviceId) => void
+    // In-memory re-entrancy guard. The DB's atomic status flip is the real
+    // serialization point, but a concurrent duplicate (double-tap / retry) is
+    // rejected here early instead of racing through the expensive checks.
+    this._claimBusy = new Set();
   }
 
   async create(ownerId) {
@@ -56,6 +60,23 @@ class ProvisioningService {
   }
 
   async claim({ sessionId, ownerId, claimToken, name, channels, hardwareId }) {
+    // Early re-entrancy guard: only one claim in flight per session at a time.
+    // The DB's atomic status flip below is the real serialization point; this
+    // only avoids redundant work for genuinely concurrent duplicates.
+    if (this._claimBusy.has(sessionId)) {
+      const err = new Error('Provisioning session claim already in progress');
+      err.code = 'SESSION_BUSY';
+      throw err;
+    }
+    this._claimBusy.add(sessionId);
+    try {
+      return await this._claim({ sessionId, ownerId, claimToken, name, channels, hardwareId });
+    } finally {
+      this._claimBusy.delete(sessionId);
+    }
+  }
+
+  async _claim({ sessionId, ownerId, claimToken, name, channels, hardwareId }) {
     const session = await ProvisioningSession.findOne({ sessionId });
     if (!session) {
       const err = new Error('Provisioning session not found');
@@ -103,7 +124,7 @@ class ProvisioningService {
       throw err;
     }
 
-    const ch = channels === undefined ? 4 : Number(channels);
+const ch = channels === undefined ? 4 : Number(channels);
     if (!Number.isInteger(ch) || ch < 1 || ch > 16) {
       const err = new Error('channels must be an integer between 1 and 16');
       err.code = 'BAD_CHANNELS';
@@ -119,6 +140,25 @@ class ProvisioningService {
     // Prefer the hardwareId already attached to the session during the SoftAP
     // step; fall back to the value (re)sent on the claim request.
     const anchorHardwareId = session.hardwareId || hardwareId || null;
+    if (anchorHardwareId) {
+      if (typeof anchorHardwareId !== 'string' || anchorHardwareId.length > 64) {
+        const err = new Error('hardwareId must be a short string');
+        err.code = 'BAD_HARDWARE';
+        throw err;
+      }
+      // A MAC that is already owned must not be silently re-claimed under a new
+      // identity (re-provisioned device): it would leave a duplicate/orphaned
+      // record. Block with a clear, replayable error so the app can explain.
+      const owned = await Device.findOne({
+        hardwareId: anchorHardwareId,
+        ownerId: { $ne: null },
+      });
+      if (owned) {
+        const err = new Error('This physical device is already linked to an account');
+        err.code = 'ALREADY_CLAIMED';
+        throw err;
+      }
+    }
 
     // Mark the session claimed FIRST. This is the atomic guard that makes two
     // simultaneous claims for the same session resolve to exactly one winner.
@@ -209,7 +249,7 @@ class ProvisioningService {
 
     deviceRegistry.update(device);
 
-    if (this.onClaimed) {
+if (this.onClaimed) {
       try {
         await this.onClaimed(deviceId);
       } catch (_) {
@@ -219,10 +259,24 @@ class ProvisioningService {
     return device;
   }
 
+  // Housekeeping for abandoned wizard attempts. Pending sessions past their
+  // TTL are dropped immediately (expired sessions are never claimable). Claimed
+  // sessions are ALSO cleaned up once they are old enough per [claimedAt] - a
+  // finished claim no longer needs its session row, and leaving it forever
+  // would let the collection grow unboundedly.
   async expireStale() {
+    const now = new Date();
     const res = await ProvisioningSession.deleteMany({
-      status: 'pending',
-      expiresAt: { $lt: new Date() },
+      $or: [
+        // Never-used sessions: drop as soon as the TTL has passed.
+        { status: 'pending', expiresAt: { $lt: now } },
+        // Used sessions: keep the row long enough to detect `SESSION_USED`
+        // replays / audit, then purge.
+        {
+          status: 'claimed',
+          claimedAt: { $lt: new Date(now.getTime() - SESSION_TTL_MS) },
+        },
+      ],
     });
     return res.deletedCount || 0;
   }
