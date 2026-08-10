@@ -146,10 +146,11 @@ WifiTestResult classifyWifiTest(String rawJson) {
 /// Extracts the `WifiTest` verdict string from a `/cm?cmnd=WifiTest` (or
 /// `WifiTest3`) response, no matter how Tasmota wraps it.
 ///
-/// Handles all documented shapes:
-///   * flat:              `{"WifiTest":"Successful"}`
-///   * per-index trigger: `{"WifiTest3":"Testing"}`
-///   * wrapped:           `{"Command":{"WifiTest":"..."}}` — the `/cm` web layer
+/// Handles all documented shapes (keys compared case-insensitively — a real
+/// 15.5.x device spells them `WiFiTest`/`WiFiTest3` with a capital `F`):
+///   * flat:              `{"WiFiTest":"Successful"}` / `{"WifiTest":"Successful"}`
+///   * per-index trigger: `{"WiFiTest3":"Testing"}`
+///   * wrapped:           `{"Command":{"WiFiTest":"..."}}` — the `/cm` web layer
 ///                        may nest command results, so the whole tree is walked.
 ///
 /// Only String values are accepted; a bare `42` under `WifiTest` is NOT a
@@ -167,14 +168,21 @@ String? extractWifiTestValue(String body) {
 }
 
 /// Depth-first search for the first non-empty String under a `WifiTest`-ish
-/// key. Exact key matches (`WifiTest`, `WifiTest3`, ...) win over recursion so
-/// a wrapped response cannot shadow a flat top-level verdict; container values
-/// (Maps/Lists) are recursed into to resolve `/cm`-wrapped shapes.
+/// key. Container values (Maps/Lists) are recursed into to resolve `/cm`-wrapped
+/// shapes.
+///
+/// Key comparison is CASE-INSENSITIVE and digitally verified against a real
+/// Tasmota 15.5.x device: the `/cm` response keys are spelled `WiFiTest` /
+/// `WiFiTest3` (capital `F`), while docs/comments historically say `WifiTest`.
+/// Both spellings (and nested wrappers) must resolve for a successful poll body
+/// like `{"WiFiTest":"Successful"}` to classify as [WifiTestResult.success].
 String? _findWifiTestValue(Object? node) {
   if (node is Map) {
-    for (final key in const ['WifiTest', 'WifiTest3', 'WifiTest4']) {
-      final v = node[key];
-      if (v is String && v.trim().isNotEmpty) return v;
+    for (final entry in node.entries) {
+      if (entry.key is String && _isWifiTestKey(entry.key as String)) {
+        final v = entry.value;
+        if (v is String && v.trim().isNotEmpty) return v;
+      }
     }
     for (final v in node.values) {
       final found = _findWifiTestValue(v);
@@ -189,6 +197,21 @@ String? _findWifiTestValue(Object? node) {
     }
   }
   return null;
+}
+
+/// True for the documented WifiTest response keys, case-insensitively:
+/// `WifiTest`, `WiFiTest`, and their per-index trigger forms (`WifiTest3`,
+/// `WiFiTest3`, `WifiTest4`). Anchored equality (not substring) so an unrelated
+/// key like `WifiResult` can never match.
+bool _isWifiTestKey(String key) {
+  switch (key.toLowerCase()) {
+    case 'wifitest':
+    case 'wifitest3':
+    case 'wifitest4':
+      return true;
+    default:
+      return false;
+  }
 }
 
 /// True while the firmware's background Wi-Fi test is still running (i.e. the

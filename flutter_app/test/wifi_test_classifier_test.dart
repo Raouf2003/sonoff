@@ -16,6 +16,24 @@ void main() {
           WifiTestResult.success);
     });
 
+    test('success response as observed on a real device (WiFiTest, capital F)',
+        () {
+      // Digitally verified against Tasmota 15.5.x: the /cm poll body is
+      // {"WiFiTest":"Successful"}. This exact spelling previously parsed as
+      // null -> unknown -> phantom "wrong password". Must be success.
+      expect(classifyWifiTest('{"WiFiTest":"Successful"}'),
+          WifiTestResult.success);
+      expect(extractWifiTestValue('{"WiFiTest":"Successful"}'), 'Successful');
+      expect(isWifiTestPending('{"WiFiTest":"Successful"}'), isFalse);
+    });
+
+    test('trigger response spelling as observed (WiFiTest3, capital F)', () {
+      expect(classifyWifiTest('{"WiFiTest3":"Testing"}'),
+          WifiTestResult.unknown);
+      expect(extractWifiTestValue('{"WiFiTest3":"Testing"}'), 'Testing');
+      expect(isWifiTestPending('{"WiFiTest3":"Testing"}'), isTrue);
+    });
+
     test('success with per-index key', () {
       expect(classifyWifiTest('{"WifiTest3":"Successful"}'),
           WifiTestResult.success);
@@ -166,6 +184,7 @@ void main() {
   group('isWifiTestPending across wrapping', () {
     test('pending verdict still pending when wrapped', () {
       expect(isWifiTestPending('{"Command":{"WifiTest":"Testing"}}'), isTrue);
+      expect(isWifiTestPending('{"Command":{"WiFiTest":"Testing"}}'), isTrue);
       expect(
           isWifiTestPending('{"WifiTest":"Not Started",'
               '"Command":{"WifiTest":"Successful"}}'),
