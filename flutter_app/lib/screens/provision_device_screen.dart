@@ -938,8 +938,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     );
     try {
       final res = await http.get(startUri).timeout(_wifiTestHttpTimeout);
-      debugPrint(
-          '[PROVISION][WIFI_TEST] start HTTP status=${res.statusCode}');
+      final body = res.body.trim();
+      // The trigger response never echoes the credentials; it is either
+      // `{"WifiTest3":"Testing"}` or an error — safe to log raw for diagnosis.
+      debugPrint('[PROVISION][WIFI_TEST] TRIGGER_RESPONSE '
+          'status=${res.statusCode} body=$body');
       if (res.statusCode != 200) {
         debugPrint('[PROVISION][WIFI_TEST] HTTP_ERROR (non-200)');
         return WifiTestResult.localError;
@@ -959,12 +962,19 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     );
     final deadline = DateTime.now().add(_wifiTestTotalDeadline);
     bool sawTransientException = false;
+    var pollNumber = 0;
     while (DateTime.now().isBefore(deadline)) {
+      pollNumber++;
       try {
         final res = await http.get(pollUri).timeout(_wifiTestHttpTimeout);
         final body = res.body.trim();
-        debugPrint(
-            '[PROVISION][WIFI_TEST] poll HTTP status=${res.statusCode} '
+        // Log the RAW poll body: it is decisive for diagnosing whether the
+        // firmware returns a flat/wrapped/nested `WifiTest` verdict (or a
+        // localized string) — none of which contain credentials.
+        // ignore: lines_longer_than_80_chars
+        debugPrint('[PROVISION][WIFI_TEST] POLL #$pollNumber '
+            'status=${res.statusCode} body=$body '
+            'extracted=${extractWifiTestValue(body)} '
             'pending=${isWifiTestPending(body)}');
         if (res.statusCode != 200 || body.isEmpty) {
           sawTransientException = true;
@@ -977,7 +987,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           continue;
         }
         final result = classifyWifiTest(body);
-        debugPrint('[PROVISION][WIFI_TEST] FINAL verdict=${result.name}');
+        debugPrint('[PROVISION][WIFI_TEST] FINAL #$pollNumber '
+            'verdict=${result.name}');
         _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_VERDICT');
         return result;
       } catch (e) {

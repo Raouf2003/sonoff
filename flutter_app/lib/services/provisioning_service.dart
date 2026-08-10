@@ -125,7 +125,7 @@ WifiTestResult classifyWifiTest(String rawJson) {
   final body = rawJson.trim();
   if (body.isEmpty) return WifiTestResult.unknown;
   // The poll response may be wrapped or contain the key we care about.
-  final value = _extractWifiTestValue(body);
+  final value = extractWifiTestValue(body);
   if (value == null) return WifiTestResult.unknown;
   final v = value.replaceAll('\n', ' ').trim();
 
@@ -143,24 +143,50 @@ WifiTestResult classifyWifiTest(String rawJson) {
   }
 }
 
-String? _extractWifiTestValue(String body) {
+/// Extracts the `WifiTest` verdict string from a `/cm?cmnd=WifiTest` (or
+/// `WifiTest3`) response, no matter how Tasmota wraps it.
+///
+/// Handles all documented shapes:
+///   * flat:              `{"WifiTest":"Successful"}`
+///   * per-index trigger: `{"WifiTest3":"Testing"}`
+///   * wrapped:           `{"Command":{"WifiTest":"..."}}` — the `/cm` web layer
+///                        may nest command results, so the whole tree is walked.
+///
+/// Only String values are accepted; a bare `42` under `WifiTest` is NOT a
+/// verdict. Null-safe: empty / non-JSON / malformed bodies return null (never
+/// throw), which the classifier maps to [WifiTestResult.unknown].
+String? extractWifiTestValue(String body) {
+  final trimmed = body.trim();
+  if (trimmed.isEmpty) return null;
   try {
-    final decoded = jsonDecode(body);
-    if (decoded is Map) {
-      final v = decoded['WifiTest'];
-      if (v is String) return v;
-      // Tasmota may respond with a per-index key.
-      for (final e in decoded.entries) {
-        if (e.key is String &&
-            e.key.toString().contains(RegExp(r'WifiTest\d?')) &&
-            e.value is String) {
-          return e.value as String;
-        }
-      }
-    }
+    return _findWifiTestValue(jsonDecode(trimmed));
   } catch (_) {
-    // Not JSON at all (e.g. an HTTP error page) — cannot parse a verdict.
+    // Not JSON at all (e.g. an HTTP error page) — cannot extract a verdict.
     return null;
+  }
+}
+
+/// Depth-first search for the first non-empty String under a `WifiTest`-ish
+/// key. Exact key matches (`WifiTest`, `WifiTest3`, ...) win over recursion so
+/// a wrapped response cannot shadow a flat top-level verdict; container values
+/// (Maps/Lists) are recursed into to resolve `/cm`-wrapped shapes.
+String? _findWifiTestValue(Object? node) {
+  if (node is Map) {
+    for (final key in const ['WifiTest', 'WifiTest3', 'WifiTest4']) {
+      final v = node[key];
+      if (v is String && v.trim().isNotEmpty) return v;
+    }
+    for (final v in node.values) {
+      final found = _findWifiTestValue(v);
+      if (found != null) return found;
+    }
+    return null;
+  }
+  if (node is List) {
+    for (final v in node) {
+      final found = _findWifiTestValue(v);
+      if (found != null) return found;
+    }
   }
   return null;
 }
@@ -174,7 +200,7 @@ String? _extractWifiTestValue(String body) {
 /// terminal unknown failure rather than being mistaken for "still running" —
 /// safe by construction: an unrecognized verdict can never cause a Restart.
 bool isWifiTestPending(String rawJson) {
-  final value = _extractWifiTestValue(rawJson);
+  final value = extractWifiTestValue(rawJson);
   switch (value) {
     case 'Testing':
     case 'Not Started':

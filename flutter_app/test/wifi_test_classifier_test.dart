@@ -64,6 +64,51 @@ void main() {
       // cause a Restart.
       expect(classifyWifiTest('{"WifiTest":"سیستم موفق"}'),
           WifiTestResult.unknown);
+      expect(classifyWifiTest('{"WifiTest":"Verbunden"}'),
+          WifiTestResult.unknown);
+    });
+
+    test('wrapped /cm response with nested Command map', () {
+      expect(
+          classifyWifiTest('{"Command":{"WifiTest":"Successful"}}'),
+          WifiTestResult.success);
+      expect(
+          classifyWifiTest('{"Command":{"WifiTest":"Connect failed"}}'),
+          WifiTestResult.wrongPassword);
+    });
+
+    test('nested WifiTest key at any depth resolves', () {
+      expect(
+          classifyWifiTest('{"WifiResult":{"Inner":{"WifiTest":"Successful"}}}'),
+          WifiTestResult.success);
+      expect(
+          classifyWifiTest(
+              '{"WifiResult":{"Inner":{"WifiTest":"Connect failed as AP cannot be reached"}}}'),
+          WifiTestResult.ssidNotFound);
+    });
+
+    test('non-String WifiTest value anywhere is unknown (never verdict)', () {
+      expect(classifyWifiTest('{"WifiTest":{"Depth":42}}'),
+          WifiTestResult.unknown);
+      expect(classifyWifiTest('{"Command":{"WifiTest":42}}'),
+          WifiTestResult.unknown);
+    });
+
+    test('unrelated nested key alone is unknown', () {
+      expect(classifyWifiTest('{"Command":{"Other":"Successful"}}'),
+          WifiTestResult.unknown);
+    });
+
+    test('decoder-level timeout / local error are NOT wrongPassword', () {
+      // The HTTP timeout path and local-AP-error path map to localError/unknown
+      // upstream in _runWifiTest; the message mapping must never claim a wrong
+      // password for those two outcomes.
+      expect(wifiTestMessage(WifiTestResult.localError),
+          isNot(contains('password may be incorrect')));
+      expect(wifiTestMessage(WifiTestResult.unknown),
+          isNot(contains('password may be incorrect')));
+      expect(WifiTestResult.localError, isNot(WifiTestResult.wrongPassword));
+      expect(WifiTestResult.unknown, isNot(WifiTestResult.wrongPassword));
     });
   });
 
@@ -81,6 +126,55 @@ void main() {
     test('false on empty/malformed (cannot wait for a dead endpoint)', () {
       expect(isWifiTestPending(''), isFalse);
       expect(isWifiTestPending('garbage'), isFalse);
+    });
+  });
+
+  group('extractWifiTestValue (public raw extractor)', () {
+    test('flat and per-index forms', () {
+      expect(extractWifiTestValue('{"WifiTest":"Successful"}'),
+          'Successful');
+      expect(extractWifiTestValue('{"WifiTest3":"Testing"}'), 'Testing');
+    });
+
+    test('wrapped /cm nesting is followed depth-first', () {
+      expect(
+          extractWifiTestValue('{"Command":{"WifiTest":"Successful"}}'),
+          'Successful');
+      expect(
+          extractWifiTestValue(
+              '{"WifiResult":{"Inner":{"WifiTest":"Connect failed"}}}'),
+          'Connect failed');
+    });
+
+    test('non-String values and missing fields yield null', () {
+      expect(extractWifiTestValue('{"WifiTest":42}'), isNull);
+      expect(extractWifiTestValue('{"WifiTest":{"Nested":42}}'), isNull);
+      expect(extractWifiTestValue('{"Other":"Successful"}'), isNull);
+      expect(extractWifiTestValue(''), isNull);
+      expect(extractWifiTestValue('not json'), isNull);
+    });
+
+    test('top-level exact key wins over nested shadowing', () {
+      // A wrapped response cannot shadow a flat top-level verdict.
+      expect(
+          extractWifiTestValue(
+              '{"WifiTest":"Successful","Command":{"WifiTest":"Connect failed"}}'),
+          'Successful');
+    });
+  });
+
+  group('isWifiTestPending across wrapping', () {
+    test('pending verdict still pending when wrapped', () {
+      expect(isWifiTestPending('{"Command":{"WifiTest":"Testing"}}'), isTrue);
+      expect(
+          isWifiTestPending('{"WifiTest":"Not Started",'
+              '"Command":{"WifiTest":"Successful"}}'),
+          isTrue);
+    });
+
+    test('missing verdict is not pending (never wait forever)', () {
+      expect(isWifiTestPending('{"Other":"Testing"}'), isFalse);
+      expect(isWifiTestPending('{"WifiTest":42}'), isFalse);
     });
   });
 
