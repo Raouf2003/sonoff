@@ -1162,6 +1162,14 @@ Future<bool> _sendTasmotaConfig() async {
           ),
         ),
         const SizedBox(height: AppSpacing.xxl),
+        if (_error != null) ...[
+          Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.4),
+          ),
+          const SizedBox(height: AppSpacing.md),
+        ],
         SizedBox(
           width: double.infinity,
           height: 50,
