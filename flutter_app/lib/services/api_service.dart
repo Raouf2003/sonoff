@@ -88,11 +88,53 @@ class ApiService {
     return jsonDecode(res.body) as List<dynamic>;
   }
 
-  Future<Map<String, dynamic>> claimDevice(String deviceId, String name, {int channels = 4}) async {
-    final res = await post('/api/devices/claim', {
-      'deviceId': deviceId,
+  // Provisioning session: the backend issues a secret deviceId (== the MQTT
+  // topic) and a one-time claim token. The deviceId is what the wizard burns
+  // into the physical device; possession is proven by that exact device
+  // announcing on MQTT. The claim token is returned here exactly once.
+  Future<Map<String, dynamic>> createProvisioningSession() async {
+    final res = await post('/api/provisioning/sessions', <String, dynamic>{});
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 201) {
+      throw Exception(body['error'] ?? 'Could not start provisioning session');
+    }
+    return body;
+  }
+
+  // Scoped status of one provisioning session (never exposes the claim token).
+  Future<Map<String, dynamic>> getProvisioningSession(String sessionId) async {
+    final res = await get('/api/provisioning/sessions/$sessionId');
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(body['error'] ?? 'Could not fetch provisioning status');
+    }
+    return body;
+  }
+
+  // Best-effort: attach the Tasmota MAC read from the device during the
+  // SoftAP step so the claim is anchored to the physical hardware too.
+  Future<void> attachHardwareId(String sessionId, String hardwareId) async {
+    final res = await post('/api/provisioning/sessions/$sessionId/hardware', {
+      'hardwareId': hardwareId,
+    });
+    if (res.statusCode != 200) {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      throw Exception(body['error'] ?? 'Could not store hardware id');
+    }
+  }
+
+  Future<Map<String, dynamic>> claimDeviceWithSession({
+    required String sessionId,
+    required String claimToken,
+    required String name,
+    required int channels,
+    String? hardwareId,
+  }) async {
+    final res = await post('/api/provisioning/sessions/$sessionId/claim', {
+      'claimToken': claimToken,
       'name': name,
       'channels': channels,
+      'hardwareId': ?hardwareId,
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 200) {
@@ -105,16 +147,6 @@ class ApiService {
     final res = await get('/api/status', query: {'deviceId': deviceId});
     if (res.statusCode != 200) {
       throw Exception('Failed to fetch status');
-    }
-    return jsonDecode(res.body) as Map<String, dynamic>;
-  }
-
-  // Devices recently observed on the MQTT broker (public snapshot), used by the
-  // provisioning wizard to detect an unclaimed device coming online.
-  Future<Map<String, dynamic>> fetchSnapshot() async {
-    final res = await get('/api/mqtt/snapshot');
-    if (res.statusCode != 200) {
-      throw Exception('Failed to fetch snapshot');
     }
     return jsonDecode(res.body) as Map<String, dynamic>;
   }

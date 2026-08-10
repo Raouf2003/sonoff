@@ -34,6 +34,15 @@ const deviceSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
+  // Immutable hardware identifier (Tasmota MAC) captured during provisioning.
+  // Informational + de-duplication; never the lookup key. Null for legacy
+  // devices claimed before this field existed.
+  hardwareId: {
+    type: String,
+    default: null,
+    trim: true,
+    maxlength: 64,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

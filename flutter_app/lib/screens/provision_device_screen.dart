@@ -5,10 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/device_type.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
+import '../services/provisioning_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../widgets/device_type_picker.dart';
@@ -52,19 +55,33 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   final _mqttUserCtl = TextEditingController();
   final _mqttPassCtl = TextEditingController();
   final _deviceNameCtl = TextEditingController();
-  final _topicCtl = TextEditingController();
 
   bool _manualWifi = false;
   DeviceType _deviceType = DeviceType.fourRelay;
 
   _Step _step = _Step.connect;
+  // Explicit state machine. The UI renders only [provisionUserLabel]; the log
+  // emits a measured trace for every phase (see provisioning_service.dart).
+  ProvisionState _state = ProvisionState.idle;
+  final ProvisionTrace _trace = ProvisionTrace();
   bool _searching = false;
   bool _provisioning = false;
   String? _error;
   Timer? _reachTimer;
   Timer? _waitTimer;
-  String? _pollingTopic;
   DateTime? _waitStart;
+
+  // Backend-issued provisioning session. The deviceId (== MQTT topic) is
+  // issued by the backend and serves as the possession secret; the one-time
+  // claim token is returned at session creation and must be replayed to claim.
+  String? _sessionId;
+  String? _claimToken;
+  String _issuedDeviceId = '';
+  String? _hardwareId;
+  io.Socket? _provisionSocket;
+  bool _watchAcked = false;
+  bool _creating = false;
+  bool _claimed = false;
 
   String get _phaseLabel {
     switch (_step) {
@@ -103,16 +120,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     switch (_step) {
       case _Step.connect:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
-        // Start a fresh, single, phase-gated detection cycle. The internal
-        // stabilization delay + retry loop absorb the Wi-Fi transition.
+        // Re-prepare the backend session in the background while the phone
+        // still has internet (best-effort; `_startSearch` gates on it later).
+        unawaited(_ensureSessionSilent());
         _startApDetection();
       case _Step.provision:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
       case _Step.waiting:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped: provisioning already completed');
         _waitTimer?.cancel();
-        final topic = _pollingTopic;
-        if (topic != null) _pollSnapshot(topic);
+        _pollSessionStatus();
     }
   }
 
@@ -122,6 +139,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     unawaited(_releaseWifiBinding());
     _reachTimer?.cancel();
     _waitTimer?.cancel();
+    _closeProvisionSocket();
     _ssidCtl.dispose();
     _wifiPassCtl.dispose();
     _mqttBrokerCtl.dispose();
@@ -129,8 +147,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _mqttUserCtl.dispose();
     _mqttPassCtl.dispose();
     _deviceNameCtl.dispose();
-    _topicCtl.dispose();
     super.dispose();
+  }
+
+  void _closeProvisionSocket() {
+    _watchAcked = false;
+    _provisionSocket?.disconnect();
+    _provisionSocket?.dispose();
+    _provisionSocket = null;
   }
 
   // ──────────────────────────────────────────────────────────
@@ -155,8 +179,25 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
   }
 
-  void _startSearch() {
+  Future<void> _startSearch() async {
     debugPrint('[PROVISION] phase=$_phaseLabel start search');
+    // The backend-issued deviceId is required before we can write the Topic.
+    // It is created here (and during resume) while the phone is still online;
+    // the AP phase itself stays offline.
+    if (_sessionId == null) {
+      await _ensureSessionSilent();
+      if (_sessionId == null) {
+        if (mounted) {
+          setState(() {
+            _searching = false;
+            _error = 'STEES could not prepare this device. Make sure your '
+                'phone has internet access, then reconnect to the device '
+                'Wi-Fi and try again.';
+          });
+        }
+        return;
+      }
+    }
     _startApDetection();
   }
 
@@ -320,11 +361,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _reachTimer?.cancel();
       debugPrint('[PROVISION] device AP reachable');
       if (!mounted || _step != _Step.connect) return;
+      _trace.enter(ProvisionPhase.ap, 'AP_DETECTED');
       setState(() {
         _searching = false;
         _error = null;
         _step = _Step.provision;
-        _syncTopic();
+        _state = ProvisionState.apConnected;
       });
       debugPrint('[PROVISION] AP detected, entering configuration');
       return;
@@ -351,24 +393,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     debugPrint('[PROVISION] grace period exhausted, showing final error');
   }
 
-  // Generated from the device name; kept stable for the current attempt so the
-  // topic/deviceId sent to Tasmota matches the one later used to detect/claim.
-  String _idSlug = '';
-  String _idSuffix = '';
-
-  void _syncTopic() {
-    final name = _deviceNameCtl.text.trim();
-    if (name.isEmpty) return;
-    final slug = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
-    if (slug != _idSlug) {
-      _idSlug = slug;
-      _idSuffix = (DateTime.now().millisecondsSinceEpoch % 0xFFFF)
-          .toRadixString(16)
-          .padLeft(4, '0');
-    }
-    _topicCtl.text = 'stees_${slug}_$_idSuffix';
-    setState(() {});
-  }
+  // The device identity is NO LONGER derived from the display name. It is
+  // issued by the backend when the provisioning session is created
+  // ([[_issuedDeviceId]]) and is immutable for the life of the device. Renaming
+  // the device later only edits the display name on the Device record - it
+  // never changes the MQTT topic or identity.
 
   // ──────────────────────────────────────────────────────────
   // Step 3 - provision via Tasmota HTTP + restart
@@ -385,12 +414,20 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _setError('Select or enter your home Wi-Fi network.');
       return;
     }
-    _syncTopic();
-    final topic = _topicCtl.text.trim();
-    if (topic.isEmpty) {
-      _setError('Could not generate a Device ID. Enter a Device Name first.');
-      return;
+    setState(() {
+      _provisioning = true;
+      _error = null;
+    });
+    // The backend-issued deviceId must exist before we can write the Topic.
+    // It is normally created as soon as the wizard opens (while the phone is
+    // still online); if that failed, retry once here before talking to the AP.
+    if (_sessionId == null || _issuedDeviceId.isEmpty) {
+      if (!await _createSession()) {
+        if (mounted) setState(() => _provisioning = false);
+        return;
+      }
     }
+
     if (!await _ensureSetupApReachable()) {
       if (!mounted) return;
       setState(() {
@@ -403,9 +440,25 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       return;
     }
     setState(() {
-      _provisioning = true;
-      _error = null;
+      _state = ProvisionState.configuringBroker;
     });
+
+    // Anchor the claim to the physical hardware. Status 5 is a read-only query
+    // (no reboot) so it is safe to add on the setup AP.
+    final mac = await _readDeviceMac();
+    if (mac != null && mac.isNotEmpty) {
+      _hardwareId = mac;
+      final sid = _sessionId;
+      if (sid != null) {
+        try {
+          await _api.attachHardwareId(sid, mac);
+          debugPrint('[PROVISION] hardwareId attached to session: $mac');
+        } catch (e) {
+          debugPrint('[PROVISION] attach hardwareId failed (non-fatal): $e');
+        }
+      }
+    }
+
     final ok = await _sendTasmotaConfig();
     if (!mounted) return;
     if (!ok) {
@@ -420,6 +473,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // now — stop AP probing and do NOT re-run Wi-Fi binding. The phone must go
     // back to normal routing and we wait for the device on the backend.
     _reachTimer?.cancel();
+    _trace.enter(ProvisionPhase.reboot, 'RESTART_SENT');
     debugPrint('[PROVISION] phase=WAITING_FOR_DEVICE');
     await _releaseWifiBinding();
     debugPrint('[PROVISION] wifi binding released');
@@ -427,9 +481,96 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     setState(() {
       _provisioning = false;
       _step = _Step.waiting;
+      _state = ProvisionState.waitingForMqtt;
       _error = null;
     });
-    _waitForDeviceOnline(topic);
+    _waitForDeviceOnline();
+  }
+
+  // Creates the backend provisioning session. Needs internet (regular Wi-Fi),
+  // so it must NOT be called while bound to the Tasmota AP.
+  Future<bool> _createSession() async {
+    try {
+      _trace.enter(ProvisionPhase.config, 'CREATE_SESSION');
+      final session = await _api.createProvisioningSession();
+      final sessionId = session['sessionId'] as String?;
+      final token = session['claimToken'] as String?;
+      final deviceId = session['deviceId'] as String? ?? '';
+      if (sessionId == null || token == null || deviceId.isEmpty) {
+        debugPrint('[PROVISION] session creation returned a partial payload');
+        return false;
+      }
+      _sessionId = sessionId;
+      _claimToken = token;
+      _issuedDeviceId = deviceId;
+      debugPrint('[PROVISION] session=$sessionId deviceId=$deviceId');
+      if (mounted) setState(() {});
+      return true;
+    } catch (e) {
+      debugPrint('[PROVISION] session creation failed: $e');
+      if (mounted) {
+        _setError(
+          'STEES could not prepare this device. Make sure you have internet '
+          'access, then try again.',
+        );
+      }
+      return false;
+    }
+  }
+
+  // Best-effort session creation for the connect phase (created in the
+  // background while the phone is still online so the AP phase stays offline).
+  Future<void> _ensureSessionSilent() async {
+    if (_sessionId != null) return;
+    if (_creating) return;
+    _creating = true;
+    try {
+      await _createSession();
+    } finally {
+      _creating = false;
+    }
+  }
+
+  // Reads the immutable Tasmota MAC via the read-only `Status 5` query.
+  Future<String?> _readDeviceMac() async {
+    try {
+      final uri = Uri.parse('$_deviceUrl/cm').replace(
+        queryParameters: {'cmnd': 'Status 5'},
+      );
+      debugPrint('[PROVISION] reading device MAC (Status 5)');
+      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      final body = res.body.trim();
+      if (res.statusCode != 200) {
+        debugPrint('[PROVISION] Status 5 HTTP ${res.statusCode}');
+        return null;
+      }
+      final mac = _findMac(jsonDecode(body));
+      debugPrint('[PROVISION] device MAC: $mac');
+      return mac;
+    } catch (e) {
+      debugPrint('[PROVISION] Status 5 read failed (non-fatal): $e');
+      return null;
+    }
+  }
+
+  String? _findMac(dynamic node) {
+    if (node is Map) {
+      final direct = node['Mac'];
+      if (direct is String && direct.trim().isNotEmpty &&
+          RegExp(r'^[0-9A-Fa-f:]{1,64}$').hasMatch(direct.trim())) {
+        return direct.trim();
+      }
+      for (final v in node.values) {
+        final found = _findMac(v);
+        if (found != null) return found;
+      }
+    } else if (node is List) {
+      for (final v in node) {
+        final found = _findMac(v);
+        if (found != null) return found;
+      }
+    }
+    return null;
   }
 
   // Provision the device.
@@ -461,6 +602,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 //     comes online under the expected topic.
 Future<bool> _sendTasmotaConfig() async {
   await _ensureBoundToWifi();
+  _trace.enter(ProvisionPhase.config, 'BROKER_BACKLOG');
 
   debugPrint('[PROVISION] configuring MQTT broker...');
   final brokerParts = <String>[
@@ -473,15 +615,22 @@ Future<bool> _sendTasmotaConfig() async {
   final brokerOk = await _sendCommand('Backlog ${brokerParts.join('; ')}');
   debugPrint('[PROVISION] MQTT broker response=${brokerOk ? 'OK' : 'FAILED'}');
   if (!brokerOk) return false;
+  _trace.debugTrace(ProvisionPhase.config, label: 'BROKER_VERIFY');
 
   debugPrint('[PROVISION] configuring MQTT identity...');
-  final topic = _topicCtl.text.trim();
+  final topic = _issuedDeviceId;
+  if (topic.isEmpty) {
+    debugPrint('[PROVISION] VERIFY FAILED: no deviceId issued by backend');
+    return false;
+  }
   // Pin the topic layout to the default "%prefix%/%topic%/" so the device
   // ALWAYS publishes on tele/<topic>/STATE (and stat/<topic>/...). A leftover
   // custom FullTopic on the device would shift the deviceId to a different
   // topic segment and the wizard would never match it.
   if (!await _setDeviceSetting('Topic', topic)) return false;
+  _trace.debugTrace(ProvisionPhase.config, label: 'TOPIC_VERIFIED');
   if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) return false;
+  _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
 
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
@@ -510,9 +659,12 @@ Future<bool> _sendTasmotaConfig() async {
     if (!await _verifySetting(entry.key, entry.value)) return false;
   }
   debugPrint('[PROVISION] persisted settings verified');
+  _trace.debugTrace(ProvisionPhase.config, label: 'ALL_VERIFIED');
 
   debugPrint('[PROVISION] sending restart command: Restart 1');
-  return _sendCommand('Restart 1');
+  final restartOk = await _sendCommand('Restart 1');
+  _trace.debugTrace(ProvisionPhase.config, label: 'RESTART_SENT_TO_DEVICE');
+  return restartOk;
 }
 
   // Writes one setting that Tasmota may react to with a reboot (Topic,
@@ -604,14 +756,60 @@ Future<bool> _sendTasmotaConfig() async {
   // Wait for the device to come online, then auto-claim
   // ──────────────────────────────────────────────────────────
 
-  void _waitForDeviceOnline(String deviceId) {
-    debugPrint('[PROVISION] waiting for device online: deviceId=$deviceId');
-    _pollingTopic = deviceId;
+  void _waitForDeviceOnline() {
+    debugPrint('[PROVISION] waiting for device online: deviceId=$_issuedDeviceId');
+    _trace.enter(ProvisionPhase.mqtt, 'WAIT_MQTT_DEVICE');
     _waitStart = DateTime.now();
-    _pollSnapshot(deviceId);
+    _claimed = false;
+    // Authoritative fallback: scoped, authenticated polling (source of truth).
+    _pollSessionStatus();
+    // Optional fast path: Socket.IO wake-up for this session's device only.
+    unawaited(_startDeviceWatch());
   }
 
-  Future<void> _pollSnapshot(String deviceId) async {
+  // Socket.IO fast path. Notification only - never the source of truth. The
+  // server emits device_seen to the provision:<deviceId> room when this exact
+  // device announces on MQTT and only the session owner may join the room.
+  Future<void> _startDeviceWatch() async {
+    final sessionId = _sessionId;
+    if (sessionId == null) return;
+    _closeProvisionSocket();
+    final token = await AuthService().getToken();
+    if (!mounted || token == null) {
+      debugPrint('[PROVISION] no token, skipping socket fast path');
+      return;
+    }
+    final socket = io.io(kBaseUrl, <String, dynamic>{
+      'transports': ['websocket'],
+      'secure': true,
+      'autoConnect': false,
+      'reconnection': true,
+      'reconnectionDelay': 1500,
+      'auth': <String, dynamic>{'token': token},
+    });
+    _provisionSocket = socket;
+
+    socket.onConnect((_) {
+      debugPrint('[PROVISION] socket connected, watching session $sessionId');
+      socket.emit('provision_watch', <String, dynamic>{
+        'sessionId': sessionId,
+      });
+    });
+    socket.on('device_seen', (data) {
+      if (!mounted) return;
+      debugPrint('[PROVISION] device_seen fast-path received: $data');
+      _onDeviceDetected();
+    });
+    socket.on('connect_error', (_) {
+      debugPrint('[PROVISION] socket connect error - falling back to polling');
+    });
+    socket.on('disconnect', (_) {
+      debugPrint('[PROVISION] socket disconnected - falling back to polling');
+    });
+    socket.connect();
+  }
+
+  Future<void> _pollSessionStatus() async {
     _waitTimer?.cancel();
     if (_step != _Step.waiting) return;
     // Bound the wait: the device must appear within the window or it is not
@@ -620,7 +818,8 @@ Future<bool> _sendTasmotaConfig() async {
     final started = _waitStart;
     if (started != null &&
         DateTime.now().difference(started) > _waitDeadline) {
-      debugPrint('[PROVISION] wait deadline of ${_waitDeadline.inMinutes}m elapsed, giving up');
+      debugPrint(
+          '[PROVISION] wait deadline of ${_waitDeadline.inMinutes}m elapsed, giving up');
       if (!mounted) return;
       setState(() {
         _error =
@@ -629,54 +828,90 @@ Future<bool> _sendTasmotaConfig() async {
       });
       return;
     }
-    bool found = false;
+    final sessionId = _sessionId;
+    if (sessionId == null) return;
+    bool seen = false;
     try {
-      final snapshot = await _api.fetchSnapshot();
-      final recent = snapshot['recentDevices'] as List<dynamic>? ?? [];
-      final rawIds = recent.map((d) {
-        if (d is Map) return d['deviceId'];
-        return d;
-      }).whereType<String>().toList();
-      found = rawIds.contains(deviceId);
+      final status = await _api.getProvisioningSession(sessionId);
+      seen = status['deviceSeen'] == true;
       debugPrint(
-          '[PROVISION] poll: recentDevices=${recent.length} '
-          'looking for deviceId=$deviceId found=$found all=$rawIds');
-      if (!found) {
-        debugPrint(
-            '[PROVISION] DEVICE ID MISMATCH expected=$deviceId '
-            'received=$rawIds');
+          '[PROVISION] session poll: deviceId=$_issuedDeviceId deviceSeen=$seen');
+      if (!seen) {
+        debugPrint('[PROVISION] DEVICE ID MISMATCH expected=$_issuedDeviceId '
+            'received=<no recent MQTT packet on that topic>');
       }
     } catch (e) {
-      debugPrint('[PROVISION] snapshot poll failed: $e');
-      found = false;
+      debugPrint('[PROVISION] session poll failed: $e');
+      seen = false;
     }
     if (!mounted || _step != _Step.waiting) return;
-    if (found) {
-      debugPrint('[PROVISION] device detected in recentDevices');
-      await _runClaim(deviceId);
+    if (seen) {
+      await _onDeviceDetected();
       return;
     }
-    _waitTimer = Timer(const Duration(seconds: 3), () => _pollSnapshot(deviceId));
+    _waitTimer = Timer(const Duration(seconds: 3), () => _pollSessionStatus());
   }
 
-  Future<void> _runClaim(String deviceId) async {
+  Future<void> _onDeviceDetected() async {
+    if (!mounted || _step != _Step.waiting) return;
+    if (_claimed) return;
+    _claimed = true;
+    _waitTimer?.cancel();
+    _closeProvisionSocket();
+    _trace.enter(ProvisionPhase.backend, 'DEVICE_DETECTED');
+    debugPrint('[PROVISION] device detected via ${_watchAcked ? 'socket' : 'poll'}');
+    if (mounted) {
+      setState(() {
+        _state = ProvisionState.deviceDetected;
+      });
+    }
+    await _runClaim();
+  }
+
+  Future<void> _runClaim() async {
+    final sessionId = _sessionId;
+    final claimToken = _claimToken;
+    if (sessionId == null || claimToken == null) {
+      _setError('Provisioning session lost. Please try again.');
+      return;
+    }
+    final name = _deviceNameCtl.text.trim();
+    if (!mounted) return;
+    setState(() {
+      _state = ProvisionState.claiming;
+    });
     try {
-      await _api.claimDevice(
-        deviceId,
-        _deviceNameCtl.text.trim(),
+      _trace.enter(ProvisionPhase.claim, 'CLAIMING');
+      await _api.claimDeviceWithSession(
+        sessionId: sessionId,
+        claimToken: claimToken,
+        name: name,
         channels: _deviceType.channelCount,
+        hardwareId: _hardwareId,
       );
+      _trace.enter(ProvisionPhase.claim, 'CLAIMED');
+      debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
+      _claimed = false;
       final msg = e.toString().replaceFirst('Exception: ', '');
-      final claimed = msg.toLowerCase().contains('already claimed');
-      _setError(
-        claimed
-            ? 'This device is already linked to another account.'
-            : 'Could not claim the device. Please try again.',
-      );
+      final lower = msg.toLowerCase();
+      if (lower.contains('already claimed') ||
+          lower.contains('session already used')) {
+        _setError('This device is already linked to another account.');
+      } else if (lower.contains('session expired') ||
+          lower.contains('invalid claim token')) {
+        _setError('This provisioning attempt has expired. Please try again.');
+      } else {
+        // Recoverable (device not on MQTT yet, transient network/5xx):
+        // keep waiting so a slow MQTT connect still completes - never leave
+        // the device silently orphaned.
+        _setError('Could not claim the device yet. Waiting and retrying…');
+        _waitTimer = Timer(
+            const Duration(seconds: 3), () => _pollSessionStatus());
+      }
     }
   }
 
@@ -851,7 +1086,6 @@ Future<bool> _sendTasmotaConfig() async {
           controller: _deviceNameCtl,
           hint: 'Device Name',
           icon: Icons.label_outline,
-          onChanged: (_) => _syncTopic(),
         ),
         const SizedBox(height: AppSpacing.md),
         DeviceTypePicker(
@@ -879,7 +1113,9 @@ Future<bool> _sendTasmotaConfig() async {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      _topicCtl.text.isEmpty ? 'generated from device name' : _topicCtl.text,
+                      _issuedDeviceId.isEmpty
+                          ? 'generated when provisioning starts'
+                          : _issuedDeviceId,
                       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                     ),
                   ],
@@ -887,7 +1123,7 @@ Future<bool> _sendTasmotaConfig() async {
               ),
               const SizedBox(width: AppSpacing.sm),
               Text(
-                'Generated automatically',
+                'Assigned by STEES',
                 style: GoogleFonts.inter(fontSize: 10, color: colors.mist.withValues(alpha: 0.6)),
               ),
             ],
@@ -997,13 +1233,13 @@ Future<bool> _sendTasmotaConfig() async {
         ),
         const SizedBox(height: AppSpacing.xl),
         Text(
-          'Waiting for device...',
+          provisionUserLabel(_state),
           textAlign: TextAlign.center,
           style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
         ),
         const SizedBox(height: AppSpacing.sm),
         Text(
-          'The device will join your Wi-Fi, reconnect to MQTT, and be claimed automatically.',
+          'The device will join your Wi-Fi and connect to the cloud automatically.',
           textAlign: TextAlign.center,
           style: GoogleFonts.inter(fontSize: 13, height: 1.5, color: colors.mist.withValues(alpha: 0.7)),
         ),
@@ -1222,14 +1458,12 @@ class _Field extends StatelessWidget {
   final String hint;
   final IconData icon;
   final bool obscure;
-  final ValueChanged<String>? onChanged;
 
   const _Field({
     required this.controller,
     required this.hint,
     required this.icon,
     this.obscure = false,
-    this.onChanged,
   });
 
   @override
@@ -1238,7 +1472,6 @@ class _Field extends StatelessWidget {
     return TextField(
       controller: controller,
       obscureText: obscure,
-      onChanged: onChanged,
       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       decoration: InputDecoration(
         hintText: hint,

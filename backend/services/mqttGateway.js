@@ -204,10 +204,15 @@ class MqttGateway {
         name: d.name,
         channels: d.channels,
       })),
-      recentDevices: Array.from(this.recentDevices.entries())
-        .filter(([, ts]) => Date.now() - ts < RECENT_WINDOW_MS)
-        .map(([deviceId]) => ({ deviceId })),
     };
+  }
+
+  // True if deviceId has announced itself on the broker within the recent
+  // window. This is the possession gate for session-based claiming and is
+  // always checked against the caller-known deviceId, never broadcast.
+  hasRecent(deviceId) {
+    const ts = this.recentDevices.get(deviceId);
+    return !!ts && Date.now() - ts < RECENT_WINDOW_MS;
   }
 
   _resolvePending(deviceId, channel, observed) {
@@ -248,7 +253,17 @@ class MqttGateway {
 
     const deviceId = id;
     this._logSeen('device', deviceId);
+    // Fast-path wake-up: when a device becomes visible on the broker for the
+    // first time (or re-appears after leaving the window) emit a scoped event.
+    // The room is keyed by the secret per-session deviceId; only the session
+    // owner is allowed to join it (validated on connect), so this never leaks
+    // unclaimed devices across users. It is a wake-up only - the app polling
+    // the session status endpoint remains the source of truth / fallback.
+    const firstSeenInWindow = !this.hasRecent(deviceId);
     this.recentDevices.set(deviceId, Date.now());
+    if (firstSeenInWindow && this.io) {
+      this.io.to(`provision:${deviceId}`).emit('device_seen', { deviceId });
+    }
     const device = this.deviceRegistry.get(deviceId);
     const ownerId = device ? device.ownerId : null;
     const channelCount = device ? device.channels : 4;
