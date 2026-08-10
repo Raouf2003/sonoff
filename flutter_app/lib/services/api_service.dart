@@ -4,6 +4,17 @@ import 'auth_service.dart';
 
 const String kBaseUrl = 'https://sonoff-3na2.onrender.com';
 
+/// HTTP error carrying the status code so callers can give phase-appropriate
+/// feedback instead of a generic "make sure you have internet access".
+class ApiException implements Exception {
+  const ApiException(this.message, {this.statusCode});
+  final String message;
+  final int? statusCode;
+
+  @override
+  String toString() => message;
+}
+
 class ApiService {
   final AuthService _auth = AuthService();
 
@@ -96,7 +107,10 @@ class ApiService {
     final res = await post('/api/provisioning/sessions', <String, dynamic>{});
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 201) {
-      throw Exception(body['error'] ?? 'Could not start provisioning session');
+      throw ApiException(
+        body['error'] ?? 'Could not start provisioning session',
+        statusCode: res.statusCode,
+      );
     }
     return body;
   }
@@ -106,7 +120,10 @@ class ApiService {
     final res = await get('/api/provisioning/sessions/$sessionId');
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Could not fetch provisioning status');
+      throw ApiException(
+        body['error'] ?? 'Could not fetch provisioning status',
+        statusCode: res.statusCode,
+      );
     }
     return body;
   }
@@ -119,7 +136,10 @@ class ApiService {
     });
     if (res.statusCode != 200) {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
-      throw Exception(body['error'] ?? 'Could not store hardware id');
+      throw ApiException(
+        body['error'] ?? 'Could not store hardware id',
+        statusCode: res.statusCode,
+      );
     }
   }
 
@@ -138,7 +158,10 @@ class ApiService {
     });
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (res.statusCode != 200) {
-      throw Exception(body['error'] ?? 'Claim failed');
+      throw ApiException(
+        body['error'] ?? 'Claim failed',
+        statusCode: res.statusCode,
+      );
     }
     return body;
   }

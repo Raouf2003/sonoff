@@ -82,6 +82,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   bool _watchAcked = false;
   bool _creating = false;
   bool _claimed = false;
+  int? _sessionCreateStatus;
 
   String get _phaseLabel {
     switch (_step) {
@@ -98,6 +99,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // PHASE 0 (ONLINE): create the backend provisioning session NOW, while the
+    // phone is still on normal Internet - before the user switches to the
+    // Tasmota SoftAP, which provides no WAN. This is the only guaranteed-online
+    // moment in the wizard. Everything after this must never need the backend.
+    unawaited(_ensureSessionSilent());
   }
 
   @override
@@ -181,23 +187,23 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _startSearch() async {
     debugPrint('[PROVISION] phase=$_phaseLabel start search');
-    // The backend-issued deviceId is required before we can write the Topic.
-    // It is created here (and during resume) while the phone is still online;
-    // the AP phase itself stays offline.
-    if (_sessionId == null) {
-      await _ensureSessionSilent();
-      if (_sessionId == null) {
-        if (mounted) {
-          setState(() {
-            _searching = false;
-            _error = 'STEES could not prepare this device. Make sure your '
-                'phone has internet access, then reconnect to the device '
-                'Wi-Fi and try again.';
-          });
-        }
-        return;
+    // PHASE 1 (OFFLINE-AP): the phone is already on the Tasmota AP now (the
+    // user picked it in Wi-Fi Settings and returned here). No backend call is
+    // allowed from this point. The session MUST have been created during
+    // PHASE 0 (initState/resume while online).
+    if (_sessionId == null || _issuedDeviceId.isEmpty) {
+      debugPrint('[PROVISION] OFFLINE_AP_PHASE_START');
+      debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
+      if (mounted) {
+        setState(() {
+          _searching = false;
+          _error = _sessionErrorFor(_sessionCreateStatus);
+        });
       }
+      return;
     }
+    debugPrint('[PROVISION] OFFLINE_AP_PHASE_START session=$_sessionId');
+    debugPrint('[PROVISION] AP_CONNECT_START');
     _startApDetection();
   }
 
@@ -362,6 +368,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] device AP reachable');
       if (!mounted || _step != _Step.connect) return;
       _trace.enter(ProvisionPhase.ap, 'AP_DETECTED');
+      debugPrint('[PROVISION] AP_CONNECTED');
       setState(() {
         _searching = false;
         _error = null;
@@ -418,14 +425,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _provisioning = true;
       _error = null;
     });
-    // The backend-issued deviceId must exist before we can write the Topic.
-    // It is normally created as soon as the wizard opens (while the phone is
-    // still online); if that failed, retry once here before talking to the AP.
+    // The backend-issued deviceId MUST already exist (created in PHASE 0 while
+    // online). No `_createSession()` call is made here: we are now in the
+    // OFFLINE-AP phase and the backend is unreachable by design.
     if (_sessionId == null || _issuedDeviceId.isEmpty) {
-      if (!await _createSession()) {
-        if (mounted) setState(() => _provisioning = false);
-        return;
+      debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
+      if (mounted) {
+        setState(() {
+          _provisioning = false;
+          _error = _sessionErrorFor(_sessionCreateStatus);
+        });
       }
+      return;
     }
 
     if (!await _ensureSetupApReachable()) {
@@ -444,19 +455,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     });
 
     // Anchor the claim to the physical hardware. Status 5 is a read-only query
-    // (no reboot) so it is safe to add on the setup AP.
+    // (no reboot) so it is safe to add on the setup AP. The MAC is carried in
+    // memory and sent with the claim - NEVER uploaded here (no backend during
+    // the AP phase); the backend joins it to the session on claim.
     final mac = await _readDeviceMac();
     if (mac != null && mac.isNotEmpty) {
       _hardwareId = mac;
-      final sid = _sessionId;
-      if (sid != null) {
-        try {
-          await _api.attachHardwareId(sid, mac);
-          debugPrint('[PROVISION] hardwareId attached to session: $mac');
-        } catch (e) {
-          debugPrint('[PROVISION] attach hardwareId failed (non-fatal): $e');
-        }
-      }
+      debugPrint('[PROVISION] device MAC read locally (sent on claim): $mac');
     }
 
     final ok = await _sendTasmotaConfig();
@@ -474,9 +479,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // back to normal routing and we wait for the device on the backend.
     _reachTimer?.cancel();
     _trace.enter(ProvisionPhase.reboot, 'RESTART_SENT');
+    debugPrint('[PROVISION] FINAL_RESTART');
     debugPrint('[PROVISION] phase=WAITING_FOR_DEVICE');
     await _releaseWifiBinding();
-    debugPrint('[PROVISION] wifi binding released');
+    debugPrint('[PROVISION] AP_RELEASED');
+    debugPrint('[PROVISION] HOME_NETWORK_RESTORED');
     if (!mounted) return;
     setState(() {
       _provisioning = false;
@@ -487,36 +494,59 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _waitForDeviceOnline();
   }
 
-  // Creates the backend provisioning session. Needs internet (regular Wi-Fi),
-  // so it must NOT be called while bound to the Tasmota AP.
-  Future<bool> _createSession() async {
-    try {
-      _trace.enter(ProvisionPhase.config, 'CREATE_SESSION');
-      final session = await _api.createProvisioningSession();
-      final sessionId = session['sessionId'] as String?;
-      final token = session['claimToken'] as String?;
-      final deviceId = session['deviceId'] as String? ?? '';
-      if (sessionId == null || token == null || deviceId.isEmpty) {
-        debugPrint('[PROVISION] session creation returned a partial payload');
-        return false;
-      }
-      _sessionId = sessionId;
-      _claimToken = token;
-      _issuedDeviceId = deviceId;
-      debugPrint('[PROVISION] session=$sessionId deviceId=$deviceId');
-      if (mounted) setState(() {});
-      return true;
-    } catch (e) {
-      debugPrint('[PROVISION] session creation failed: $e');
-      if (mounted) {
-        _setError(
-          'STEES could not prepare this device. Make sure you have internet '
-          'access, then try again.',
-        );
-      }
+  // Creates the backend provisioning session. PHASE 0 (ONLINE) ONLY - this must
+// run before the phone switches to the Tasmota AP (which has no WAN). Logs
+// only; user-facing feedback happens in `_startSearch` via _sessionCreateStatus.
+Future<bool> _createSession() async {
+  try {
+    _trace.enter(ProvisionPhase.config, 'SESSION_CREATE_START');
+    debugPrint('[PROVISION] SESSION_CREATE_START');
+    final session = await _api.createProvisioningSession();
+    final sessionId = session['sessionId'] as String?;
+    final token = session['claimToken'] as String?;
+    final deviceId = session['deviceId'] as String? ?? '';
+    if (sessionId == null || token == null || deviceId.isEmpty) {
+      debugPrint('[PROVISION] SESSION_CREATE_FAILED partial payload');
       return false;
     }
+    _sessionId = sessionId;
+    _claimToken = token;
+    _issuedDeviceId = deviceId;
+    _sessionCreateStatus = null;
+    debugPrint('[PROVISION] SESSION_CREATE_SUCCESS session=$sessionId '
+        'deviceId=$deviceId');
+    if (mounted) setState(() {});
+    return true;
+  } on ApiException catch (e) {
+    _sessionCreateStatus = e.statusCode;
+    debugPrint('[PROVISION] SESSION_CREATE_FAILED status=${e.statusCode} '
+        'msg=${e.message}');
+    return false;
+  } catch (e) {
+    _sessionCreateStatus = null;
+    debugPrint('[PROVISION] SESSION_CREATE_FAILED network: $e');
+    return false;
   }
+}
+
+// Maps a session-creation failure to a PHASE-APPROPRIATE user message.
+String _sessionErrorFor(int? status) {
+  switch (status) {
+    case 401:
+      return 'You appear to be signed out. Please sign in again and try again.';
+    case 403:
+      return 'Access was denied. Please sign in again and try again.';
+    case 404:
+    case 409:
+      return 'STEES rejected this provisioning request. Please try again.';
+    case 500:
+      return 'STEES is having trouble right now. Please try again in a moment.';
+    default:
+      return 'STEES could not prepare this device before you switched to the '
+          'device Wi-Fi. Reconnect to normal Internet and reopen this screen '
+          'to start over.';
+  }
+}
 
   // Best-effort session creation for the connect phase (created in the
   // background while the phone is still online so the AP phase stays offline).
@@ -757,6 +787,7 @@ Future<bool> _sendTasmotaConfig() async {
   // ──────────────────────────────────────────────────────────
 
   void _waitForDeviceOnline() {
+    debugPrint('[PROVISION] BACKEND_WAIT_START');
     debugPrint('[PROVISION] waiting for device online: deviceId=$_issuedDeviceId');
     _trace.enter(ProvisionPhase.mqtt, 'WAIT_MQTT_DEVICE');
     _waitStart = DateTime.now();
@@ -859,7 +890,7 @@ Future<bool> _sendTasmotaConfig() async {
     _waitTimer?.cancel();
     _closeProvisionSocket();
     _trace.enter(ProvisionPhase.backend, 'DEVICE_DETECTED');
-    debugPrint('[PROVISION] device detected via ${_watchAcked ? 'socket' : 'poll'}');
+    debugPrint('[PROVISION] DEVICE_SEEN via ${_watchAcked ? 'socket' : 'poll'}');
     if (mounted) {
       setState(() {
         _state = ProvisionState.deviceDetected;
@@ -890,6 +921,7 @@ Future<bool> _sendTasmotaConfig() async {
         hardwareId: _hardwareId,
       );
       _trace.enter(ProvisionPhase.claim, 'CLAIMED');
+      debugPrint('[PROVISION] CLAIM_SUCCESS deviceId=$_issuedDeviceId');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       if (!mounted) return;
       Navigator.of(context).pop(true);
