@@ -49,7 +49,10 @@ class ProvisioningService {
       sessionId: randomHex(12),
       ownerId,
       claimTokenHash: hashToken(token),
-      expectedDeviceId: null,
+      // NOTE: expectedDeviceId is intentionally NOT written here. It must stay
+      // absent (not null) so the sparse-unique index skips unanchored sessions;
+      // a null value would collide globally on the unique key (E11000 -> 500).
+      // It is set by attachIdentity() with the canonical MAC before any claim.
       expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
     });
     // Never echo the token hash to the caller; the plain token is the one and

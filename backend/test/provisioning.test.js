@@ -149,7 +149,14 @@ test('create() issues a session + one-time token, never a deviceId', async () =>
   const stored = sessionModel.created;
   assert.notStrictEqual(stored.claimTokenHash, res.claimToken);
   assert.strictEqual(stored.claimTokenHash, sha256(res.claimToken));
-  assert.strictEqual(stored.expectedDeviceId, null);
+  // The identity field must be ABSENT (not null) at creation: a null value
+  // would collide globally on the sparse-unique index (E11000 -> 500 on every
+  // later create). Only attachIdentity() may set it, to a canonical MAC.
+  assert.strictEqual(
+    'expectedDeviceId' in stored,
+    false,
+    'pending session must not store expectedDeviceId',
+  );
 });
 
 test('attachIdentity: invalid MAC => INVALID_MAC, nothing stored', async () => {

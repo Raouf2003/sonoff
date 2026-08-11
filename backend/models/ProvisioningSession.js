@@ -34,11 +34,17 @@ const provisioningSessionSchema = new mongoose.Schema({
   },
   // The canonical MAC-derived deviceId (== MQTT topic) for this provisioning
   // attempt. Unknown at session creation (the MAC is read later, offline);
-  // set by the identity-attach step before any claim. Sparse-unique so two
-  // sessions can never target the same physical identity once anchored.
+  // set by the identity-attach step before any claim.
+  //
+  // DELIBERATELY has NO default: a `null` default + `unique` + `sparse` would
+  // index explicitly-null values (sparse only skips MISSING fields), so the
+  // second-ever pending session would collide with the first on the unique
+  // null key and `create` would throw E11000 -> 500 on every later attempt.
+  // Leaving the field absent for unanchored sessions keeps the index sparse
+  // and only ever indexes anchored identities, so two sessions can never
+  // target the same physical identity once anchored.
   expectedDeviceId: {
     type: String,
-    default: null,
     unique: true,
     sparse: true,
     trim: true,
