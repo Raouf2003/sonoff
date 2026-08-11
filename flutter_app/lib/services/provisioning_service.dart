@@ -1,5 +1,36 @@
 import 'dart:convert';
 
+/// Canonical device identity: the physical Tasmota MAC IS the deviceId.
+///
+/// Normalizes any common MAC spelling to a single canonical form that is also
+/// the MQTT topic burned into the firmware (Tasmota topics allow
+/// [A-Za-z0-9_-]):
+///
+///   34:98:7A:C3:03:04  →  34987AC30304
+///   34-98-7A-C3-03-04  →  34987AC30304
+///   34987AC30304       →  34987AC30304
+///
+/// Normalization is deterministic (same MAC always yields the same deviceId),
+/// case-insensitive, and rejection is strict: after stripping `:`, `-` and
+/// whitespace the remainder must be exactly 12 hex digits, else null.
+final RegExp _canonicalMacRe = RegExp(r'^[0-9A-F]{12}$');
+
+String? normalizeMac(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  final cleaned = raw
+      .replaceAll(RegExp(r'\s+'), '')
+      .replaceAll(':', '')
+      .replaceAll('-', '')
+      .toUpperCase();
+  if (!_canonicalMacRe.hasMatch(cleaned)) return null;
+  return cleaned;
+}
+
+/// True when [value] is a strict canonical deviceId (12 uppercase hex digits).
+bool isCanonicalDeviceId(String value) {
+  return _canonicalMacRe.hasMatch(value);
+}
+
 /// Explicit provisioning state machine.
 ///
 /// The wizard drives through these states in a strictly sequential order. Only
@@ -110,37 +141,40 @@ enum WifiTestResult {
 }
 
 /// Classifies the JSON value Tasmota returns for a data-less `WifiTest` poll
-/// (`cm?cmnd=WifiTest`). The values are documented firmware states (localized):
+/// (`cm?cmnd=WifiTest`). The values are firmware states that vary slightly by
+/// version (older ESP8266 builds use exact sentences like "Connect failed with
+/// AP timeout"), so the matching is tolerant:
 ///
-///   "Successful"                       -> success
+///   "Successful"                          -> success
 ///   "Connect failed as no IP address received"     -> noIp
 ///   "Connect failed as AP cannot be reached"       -> ssidNotFound
-///   "Connect failed"                               -> wrongPassword
-///   anything else / empty / malformed              -> unknown
+///   "Connect failed" / "Connect failed with AP
+///     timeout" / any other "Connect failed..."
+///     / "Connection rejected due to invalid
+///     password"                             -> wrongPassword
+///   anything else / empty / malformed       -> unknown
 ///
 /// A still-running status ("Testing"/"Not Started") is not a final verdict, so
 /// it maps to [WifiTestResult.unknown] here; the caller keeps polling until the
 /// status settles or its own deadline expires.
+/// [WifiTestResult] verdicts never guess: only the documented firmware failure
+/// states are surfaced (or a generic "couldn't connect"), and the entered
+/// credentials are never echoed.
 WifiTestResult classifyWifiTest(String rawJson) {
   final body = rawJson.trim();
   if (body.isEmpty) return WifiTestResult.unknown;
   // The poll response may be wrapped or contain the key we care about.
   final value = extractWifiTestValue(body);
   if (value == null) return WifiTestResult.unknown;
-  final v = value.replaceAll('\n', ' ').trim();
+  final v = value.replaceAll('\n', ' ').trim().toLowerCase();
 
-  switch (v) {
-    case 'Successful':
-      return WifiTestResult.success;
-    case 'Connect failed as no IP address received':
-      return WifiTestResult.noIp;
-    case 'Connect failed as AP cannot be reached':
-      return WifiTestResult.ssidNotFound;
-    case 'Connect failed':
-      return WifiTestResult.wrongPassword;
-    default:
-      return WifiTestResult.unknown;
+  if (v == 'successful') return WifiTestResult.success;
+  if (v.contains('no ip address')) return WifiTestResult.noIp;
+  if (v.contains('ap cannot be reached')) return WifiTestResult.ssidNotFound;
+  if (v.startsWith('connect failed') || v.contains('invalid password')) {
+    return WifiTestResult.wrongPassword;
   }
+  return WifiTestResult.unknown;
 }
 
 /// Extracts the `WifiTest` verdict string from a `/cm?cmnd=WifiTest` (or

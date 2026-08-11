@@ -44,6 +44,23 @@ void main() {
           WifiTestResult.wrongPassword);
     });
 
+    test('wrong password - AP timeout verdict (older ESP8266 builds)', () {
+      // Real firmware string from a live device: the ESP8266 tail reports
+      // "Connect failed with AP timeout" when the association/auth handshake
+      // never completes (typically wrong password / rejected cipher). Tasmota's
+      // own Wi-Fi Manager treats it the same way ("check your credentials").
+      expect(classifyWifiTest('{"WiFiTest":"Connect failed with AP timeout"}'),
+          WifiTestResult.wrongPassword);
+    });
+
+    test('wrong password - connection rejected (old 5.x builds)', () {
+      // Sonoff-Tasmota 5.x spelled the auth rejection explicitly.
+      expect(
+          classifyWifiTest(
+              '{"WifiTest":"Connection rejected due to invalid password"}'),
+          WifiTestResult.wrongPassword);
+    });
+
     test('SSID not found (WL_NO_SSID_AVAIL)', () {
       expect(
           classifyWifiTest(

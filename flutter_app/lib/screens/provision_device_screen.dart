@@ -19,6 +19,22 @@ import '../widgets/device_type_picker.dart';
 
 enum _Step { connect, provision, waiting }
 
+/// Graded terminal-failure kind for the WAIT step's recovery UI.
+enum _TerminalKind {
+  /// Default: wait-deadline / generic backend rejection. Keeps the full
+  /// recovery set (Reconfigure Wi-Fi / Wait a bit longer / Close).
+  generic,
+
+  /// The MAC could not be read/invalidated on the device. Nothing to retry.
+  identityUnreadable,
+
+  /// The MAC is already a device in THIS account. Close-only.
+  alreadyAdded,
+
+  /// The MAC is already a device in ANOTHER account. Close-only.
+  alreadyRegistered,
+}
+
 /// Result of the full Tasmota configuration sweep. [wifiTestFailed] is a
 /// distinct outcome so a failed Wi-Fi pre-flight test stays on Configure with a
 /// Wi-Fi-specific message (never a generic power-cycle/factory-reset error).
@@ -100,9 +116,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   Timer? _waitTimer;
   DateTime? _waitStart;
 
-  // Backend-issued provisioning session. The deviceId (== MQTT topic) is
-  // issued by the backend and serves as the possession secret; the one-time
-  // claim token is returned at session creation and must be replayed to claim.
+  // Backend-issued provisioning session. The deviceId is NOT issued at session
+  // creation (the MAC is only readable on the offline AP). It is derived
+  // locally from the canonical MAC and anchored to the session online via
+  // `POST /sessions/:id/hardware`; the one-time claim token returned here must
+  // be replayed to claim.
   String? _sessionId;
   String? _claimToken;
   String _issuedDeviceId = '';
@@ -112,6 +130,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   bool _creating = false;
   bool _claimed = false;
   int? _sessionCreateStatus;
+  // True once the backend has anchored the canonical MAC to the session (the
+  // first online call after the device restart). The wait loop retries the
+  // anchor on transient failures until it succeeds or the wizard is closed.
+  bool _anchored = false;
+  // Graded terminal-failure kind for the WAIT screen. Duplicates and
+  // identity-unreadable get a Close-only recovery; everything else keeps the
+  // existing recovery buttons.
+  _TerminalKind _terminalKind = _TerminalKind.generic;
   // Whether the terminal failure was a wait-deadline (device never seen) - the
   // only case where "Wait a bit longer" makes sense. Claim conflicts and other
   // terminal errors get a Close-only recovery instead of a pointless re-arm.
@@ -239,7 +265,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // user picked it in Wi-Fi Settings and returned here). No backend call is
     // allowed from this point. The session MUST have been created during
     // PHASE 0 (initState/resume while online).
-    if (_sessionId == null || _issuedDeviceId.isEmpty) {
+    if (_sessionId == null) {
       debugPrint('[PROVISION] OFFLINE_AP_PHASE_START');
       debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
       if (mounted) {
@@ -416,6 +442,19 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _waitStageTimer?.cancel();
       debugPrint('[PROVISION] device AP reachable');
       if (!mounted || _step != _Step.connect) return;
+      // Derive the device identity as soon as the AP is reachable - offline
+      // and harmless (Status 5 is read-only, no reboot). It feeds the Configure
+      // screen header and is re-confirmed when Apply runs.
+      final mac = await _readDeviceMac();
+      if (!mounted || _step != _Step.connect) return;
+      final canonical = mac == null ? null : normalizeMac(mac);
+      if (canonical != null) {
+        _hardwareId = canonical;
+        _issuedDeviceId = canonical;
+        debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
+      } else {
+        debugPrint('[PROVISION] MAC not readable yet (retried on Apply)');
+      }
       _trace.enter(ProvisionPhase.ap, 'AP_DETECTED');
       debugPrint('[PROVISION] AP_CONNECTED');
       if (_recoveryMode) {
@@ -457,11 +496,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     debugPrint('[PROVISION] grace period exhausted, showing final error');
   }
 
-  // The device identity is NO LONGER derived from the display name. It is
-  // issued by the backend when the provisioning session is created
-  // ([[_issuedDeviceId]]) and is immutable for the life of the device. Renaming
-  // the device later only edits the display name on the Device record - it
-  // never changes the MQTT topic or identity.
+  // The device identity IS the physical Tasmota MAC (canonical form, see
+  // [normalizeMac]) - it equals the MQTT topic burned into the firmware, is
+  // immutable for the life of the device, and is derived locally the moment the
+  // setup AP is reached. Renaming the device later only edits the display name
+  // on the Device record - it never changes the MQTT topic or identity. The
+  // backend anchors this MAC to the session online (see _anchorSessionIdentity)
+  // and the claim stores it verbatim as deviceId.
 
   // ──────────────────────────────────────────────────────────
   // Step 3 - provision via Tasmota HTTP + restart
@@ -482,10 +523,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _provisioning = true;
       _error = null;
     });
-    // The backend-issued deviceId MUST already exist (created in PHASE 0 while
+    // The provisioning session MUST already exist (created in PHASE 0 while
     // online). No `_createSession()` call is made here: we are now in the
-    // OFFLINE-AP phase and the backend is unreachable by design.
-    if (_sessionId == null || _issuedDeviceId.isEmpty) {
+    // OFFLINE-AP phase and the backend is unreachable by design. The device
+    // identity itself is derived from the MAC read just below, locally.
+    if (_sessionId == null) {
       debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
       if (mounted) {
         setState(() {
@@ -511,15 +553,38 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _state = ProvisionState.configuringBroker;
     });
 
-    // Anchor the claim to the physical hardware. Status 5 is a read-only query
-    // (no reboot) so it is safe to add on the setup AP. The MAC is carried in
-    // memory and sent with the claim - NEVER uploaded here (no backend during
-    // the AP phase); the backend joins it to the session on claim.
+    // THE device identity = the physical MAC. Status 5 is a read-only query
+    // (no reboot) so it is safe on the setup AP. The MAC is derived to its
+    // canonical deviceId LOCALLY and never uploaded while offline; the backend
+    // learns it only in the first online step after the restart (online), NOT
+    // during this offline-AP phase. If the MAC cannot be read there is no
+    // identity to provision - fail cleanly instead of guessing.
     final mac = await _readDeviceMac();
-    if (mac != null && mac.isNotEmpty) {
-      _hardwareId = mac;
-      debugPrint('[PROVISION] device MAC read locally (sent on claim): $mac');
+    var canonical = mac == null || mac.trim().isEmpty
+        ? null
+        : normalizeMac(mac);
+    // The identity was already read when the AP was first detected - reuse it
+    // if this fresh read failed transiently.
+    if (canonical == null &&
+        _issuedDeviceId.isNotEmpty &&
+        isCanonicalDeviceId(_issuedDeviceId)) {
+      canonical = _issuedDeviceId;
+      debugPrint('[PROVISION] reused identity read at AP detection');
     }
+    if (canonical == null) {
+      if (!mounted) return;
+      setState(() {
+        _provisioning = false;
+        _state = ProvisionState.failed;
+        _terminalKind = _TerminalKind.identityUnreadable;
+        _error = "The device's identity couldn't be read. Power-cycle the "
+            'device and try again.';
+      });
+      return;
+    }
+    _hardwareId = canonical;
+    _issuedDeviceId = canonical;
+    debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
 
     final outcome = await _sendTasmotaConfig().timeout(
       _configStepDeadline,
@@ -572,39 +637,46 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _state = ProvisionState.waitingForMqtt;
       _error = null;
     });
+    // First ONLINE action after the restart: anchor the device identity
+    // (canonical MAC, read offline) to the session. Nothing can claim without
+    // it. On duplicate identity the backend answers immediately and the wizard
+    // stops here instead of waiting for MQTT.
+    await _anchorSessionIdentity();
+    if (!mounted) return;
+    if (_state == ProvisionState.failed) return;
     _waitForDeviceOnline();
   }
 
   // Creates the backend provisioning session. PHASE 0 (ONLINE) ONLY - this must
-// run before the phone switches to the Tasmota AP (which has no WAN). Logs
-// only; user-facing feedback happens in `_startSearch` via _sessionCreateStatus.
-Future<bool> _createSession() async {
-  try {
-    _trace.enter(ProvisionPhase.config, 'SESSION_CREATE_START');
-    debugPrint('[PROVISION] SESSION_CREATE_START');
-    final session = await _api.createProvisioningSession();
-    final sessionId = session['sessionId'] as String?;
-    final token = session['claimToken'] as String?;
-    final deviceId = session['deviceId'] as String? ?? '';
-    if (sessionId == null || token == null || deviceId.isEmpty) {
-      debugPrint('[PROVISION] SESSION_CREATE_FAILED partial payload');
+  // run before the phone switches to the Tasmota AP (which has no WAN). Logs
+  // only; user-facing feedback happens in `_startSearch` via _sessionCreateStatus.
+  // The device identity is NOT issued here: the MAC is only readable on the
+  // SoftAP, so the wizard anchors it to the session later (online, after the
+  // restart) via _anchorSessionIdentity.
+  Future<bool> _createSession() async {
+    try {
+      _trace.enter(ProvisionPhase.config, 'SESSION_CREATE_START');
+      debugPrint('[PROVISION] SESSION_CREATE_START');
+      final session = await _api.createProvisioningSession();
+      final sessionId = session['sessionId'] as String?;
+      final token = session['claimToken'] as String?;
+      if (sessionId == null || token == null) {
+        debugPrint('[PROVISION] SESSION_CREATE_FAILED partial payload');
+        return false;
+      }
+      _sessionId = sessionId;
+      _claimToken = token;
+      _sessionCreateStatus = null;
+      debugPrint('[PROVISION] SESSION_CREATE_SUCCESS session=$sessionId');
+      if (mounted) setState(() {});
+      return true;
+    } on ApiException catch (e) {
+      _sessionCreateStatus = e.statusCode;
+      debugPrint('[PROVISION] SESSION_CREATE_FAILED status=${e.statusCode} '
+          'msg=${e.message}');
       return false;
-    }
-    _sessionId = sessionId;
-    _claimToken = token;
-    _issuedDeviceId = deviceId;
-    _sessionCreateStatus = null;
-    debugPrint('[PROVISION] SESSION_CREATE_SUCCESS session=$sessionId '
-        'deviceId=$deviceId');
-    if (mounted) setState(() {});
-    return true;
-  } on ApiException catch (e) {
-    _sessionCreateStatus = e.statusCode;
-    debugPrint('[PROVISION] SESSION_CREATE_FAILED status=${e.statusCode} '
-        'msg=${e.message}');
-    return false;
-  } catch (e) {
-    _sessionCreateStatus = null;
+    } catch (e) {
+      _sessionCreateStatus = null;
     debugPrint('[PROVISION] SESSION_CREATE_FAILED network: $e');
     return false;
   }
@@ -1092,6 +1164,13 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
     final sessionId = _sessionId;
     if (sessionId == null) return;
+    // If the anchor call after the restart failed transiently (phone Wi-Fi
+    // still switching back, backend hiccup), retry before polling - the backend
+    // cannot report the device seen on an identity-less session.
+    if (!_anchored) {
+      await _anchorSessionIdentity();
+      if (!mounted || _state == ProvisionState.failed) return;
+    }
     bool seen = false;
     try {
       final status = await _api.getProvisioningSession(sessionId);
@@ -1112,6 +1191,48 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       return;
     }
     _waitTimer = Timer(const Duration(seconds: 3), () => _pollSessionStatus());
+  }
+
+  // Anchors the device identity (canonical MAC, read offline) to the session
+  // on the backend. This is the FIRST online call after the device restart and
+  // MUST succeed before any claim can proceed - the backend refuses to claim a
+  // session that has no anchored identity. On a terminal state failure (the
+  // MAC is already owned) the wizard stops here: no point waiting for MQTT,
+  // the device can never be added. On transient backend/network errors it
+  // leaves the wait loop alone; the next poll retries the anchor.
+  Future<void> _anchorSessionIdentity() async {
+    final sessionId = _sessionId;
+    final mac = _hardwareId;
+    if (sessionId == null || mac == null) return;
+    try {
+      _trace.debugTrace(ProvisionPhase.backend, label: 'IDENTITY_ANCHOR');
+      debugPrint('[PROVISION] IDENTITY_ANCHOR_START session=$sessionId');
+      await _api.attachHardwareId(sessionId, mac);
+      _anchored = true;
+      debugPrint('[PROVISION] IDENTITY_ANCHORED deviceId=$_issuedDeviceId');
+    } on ApiException catch (e) {
+      debugPrint('[PROVISION] IDENTITY_ANCHOR_FAILED code=${e.code} '
+          'status=${e.statusCode} msg=${e.message}');
+      if (e.code == 'DEVICE_ALREADY_EXISTS' ||
+          e.code == 'DEVICE_ALREADY_REGISTERED' ||
+          e.code == 'INVALID_MAC') {
+        if (!mounted) return;
+        _terminalKind =
+            e.code == 'DEVICE_ALREADY_REGISTERED'
+                ? _TerminalKind.alreadyRegistered
+                : e.code == 'INVALID_MAC'
+                    ? _TerminalKind.generic
+                    : _TerminalKind.alreadyAdded;
+        setState(() {
+          _state = ProvisionState.failed;
+          _error = _claimFailureMessage(e);
+        });
+      }
+    } catch (e) {
+      debugPrint('[PROVISION] IDENTITY_ANCHOR_FAILED network: $e');
+    } finally {
+      if (mounted) setState(() {});
+    }
   }
 
   // Terminal stop of the wait loop. The device never appeared before the
@@ -1162,7 +1283,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       _setError('Provisioning session lost. Please try again.');
       return;
     }
-    final name = _deviceNameCtl.text.trim();
+    final rawName = _deviceNameCtl.text.trim();
+    final name = rawName.isEmpty ? 'STEES Smart Device' : rawName;
     if (!mounted) return;
     setState(() {
       _state = ProvisionState.claiming;
@@ -1229,13 +1351,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         case 'BAD_HARDWARE':
         case 'BAD_CHANNELS':
         case 'BAD_NAME':
-        case 'BAD_DEVICE_ID':
-        case 'ALREADY_CLAIMED':
         case 'SESSION_USED':
         case 'SESSION_NOT_PENDING':
         case 'SESSION_EXPIRED':
         case 'SESSION_NOT_FOUND':
         case 'INVALID_TOKEN':
+        case 'DEVICE_ALREADY_EXISTS':
+        case 'DEVICE_ALREADY_REGISTERED':
+        case 'INVALID_MAC':
           return true;
         case 'DEVICE_NOT_SEEN':
         case 'SESSION_BUSY':
@@ -1253,9 +1376,6 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // User-facing, non-technical wording for a TERMINAL claim failure.
   String _claimFailureMessage(ApiException e) {
     switch (e.code) {
-      case 'ALREADY_CLAIMED':
-        return 'This device is already linked to an account. If you own it, '
-            'unlink it from that account first, then provision it again.';
       case 'SESSION_EXPIRED':
         return 'This provisioning attempt has expired. Close and start over.';
       case 'INVALID_TOKEN':
@@ -1264,9 +1384,17 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       case 'SESSION_NOT_PENDING':
       case 'SESSION_NOT_FOUND':
         return 'This provisioning attempt has already been used. Close and start over.';
+      case 'DEVICE_ALREADY_EXISTS':
+        return 'This device is already in your account. If you want to add it '
+            'again, remove the existing device from your account first.';
+      case 'DEVICE_ALREADY_REGISTERED':
+        return 'This device is already registered and cannot be added to this '
+            'account.';
+      case 'INVALID_MAC':
+        return "The device didn't report its identity correctly. Close this "
+            'window and try again.';
       case 'BAD_NAME':
       case 'BAD_CHANNELS':
-      case 'BAD_DEVICE_ID':
       case 'BAD_HARDWARE':
         return 'This device could not be registered with STEES. Close and try again.';
       default:
@@ -1533,9 +1661,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   }
 
   Widget _buildConfig(SteesColors colors) {
+    // Only the firmware's definitive "authentication rejected" verdict is
+    // surfaced on the password field itself (inline red border + hint). Every
+    // other failure keeps the general Wi-Fi banner below the form.
+    final bool isWrongPassword = _state == ProvisionState.wifiTestFailed &&
+        _wifiTestResult == WifiTestResult.wrongPassword;
     final subLabel = _provisioning
         ? provisionUserLabel(_state)
-        : (_state == ProvisionState.wifiTestFailed
+        : (_state == ProvisionState.wifiTestFailed && !isWrongPassword
             ? provisionUserLabel(ProvisionState.wifiTestFailed)
             : null);
     return Column(
@@ -1565,6 +1698,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           icon: Icons.lock_outline,
           obscure: true,
           focusNode: _wifiPassFocus,
+          errorText:
+              isWrongPassword ? 'Wrong password. Check it and try again.' : null,
         ),
         const SizedBox(height: AppSpacing.xl),
         _section(colors, 'DEVICE'),
@@ -1600,7 +1735,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     const SizedBox(height: 2),
                     Text(
                       _issuedDeviceId.isEmpty
-                          ? 'generated when provisioning starts'
+                          ? 'read from the device when it connects'
                           : _issuedDeviceId,
                       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                     ),
@@ -1609,14 +1744,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
               ),
               const SizedBox(width: AppSpacing.sm),
               Text(
-                'Assigned by STEES',
+                'Physical MAC',
                 style: GoogleFonts.inter(fontSize: 10, color: colors.mist.withValues(alpha: 0.6)),
               ),
             ],
           ),
         ),
         const SizedBox(height: AppSpacing.xxl),
-        if (_state == ProvisionState.wifiTestFailed) ...[
+        if (_state == ProvisionState.wifiTestFailed && !isWrongPassword) ...[
           Container(
             padding: const EdgeInsets.all(AppSpacing.lg),
             decoration: BoxDecoration(
@@ -1685,7 +1820,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
               ),
             ],
           ),
-        ] else if (_error != null) ...[
+        ] else if (_error != null && !isWrongPassword) ...[
           Text(
             _error!,
             textAlign: TextAlign.center,
@@ -1827,7 +1962,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         const SizedBox(height: AppSpacing.xl),
         Text(
           failed
-              ? 'Device is not connected yet'
+              ? _terminalTitle
               : provisionUserLabel(_state),
           textAlign: TextAlign.center,
           style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
@@ -1852,42 +1987,60 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         ],
         if (failed) ...[
           const SizedBox(height: AppSpacing.lg),
-          SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: FilledButton.icon(
-              onPressed: _startRecovery,
-              icon: const Icon(Icons.wifi_tethering, size: 18),
-              label: const Text('Reconfigure Wi-Fi'),
-              style: _filledStyle(colors),
-            ),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          if (_allowWaitRetry) ...[
+          if (_terminalKind == _TerminalKind.alreadyAdded ||
+              _terminalKind == _TerminalKind.alreadyRegistered ||
+              _terminalKind == _TerminalKind.identityUnreadable) ...[
+            // Closed-loop failure: nothing to reconfigure and no point waiting.
+            // A duplicate identity cannot become addable, and an unreadable
+            // identity has no recovery path - Close is the only action.
+            if (_terminalKind == _TerminalKind.alreadyAdded) ...[
+              Text(
+                "You can remove the existing device from your account to add "
+                'it again.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                    fontSize: 12, color: colors.mist.withValues(alpha: 0.6), height: 1.4),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+            ],
+          ] else ...[
             SizedBox(
               width: double.infinity,
               height: 50,
-              child: OutlinedButton(
-                onPressed: _retryWait,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: colors.foam,
-                  side: BorderSide(color: colors.stream.withValues(alpha: 0.4)),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.xl),
-                  ),
-                ),
-                child: Text('Wait a bit longer',
-                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
+              child: FilledButton.icon(
+                onPressed: _startRecovery,
+                icon: const Icon(Icons.wifi_tethering, size: 18),
+                label: const Text('Reconfigure Wi-Fi'),
+                style: _filledStyle(colors),
               ),
             ),
             const SizedBox(height: AppSpacing.sm),
-            Text(
-              'You can also power-cycle the device so it reconnects, then '
-              'continue waiting here.',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
-            ),
-            const SizedBox(height: AppSpacing.sm),
+            if (_allowWaitRetry) ...[
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: OutlinedButton(
+                  onPressed: _retryWait,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colors.foam,
+                    side: BorderSide(color: colors.stream.withValues(alpha: 0.4)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppRadius.xl),
+                    ),
+                  ),
+                  child: Text('Wait a bit longer',
+                      style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                'You can also power-cycle the device so it reconnects, then '
+                'continue waiting here.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+            ],
           ],
           SizedBox(
             width: double.infinity,
@@ -1969,6 +2122,22 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _closeProvisionSocket();
     traceLog('EXIT', 'CANCELLED total=${_trace.elapsedMs}ms');
     if (mounted) Navigator.of(context).pop(false);
+  }
+
+  // WAIT-step title for a terminal failure. Duplicate identities and an
+  // unreadable identity get their own close-only wording; everything else keeps
+  // the original, deliberately non-specific title.
+  String get _terminalTitle {
+    switch (_terminalKind) {
+      case _TerminalKind.alreadyAdded:
+        return 'Device Already Added';
+      case _TerminalKind.alreadyRegistered:
+        return 'Device Already Registered';
+      case _TerminalKind.identityUnreadable:
+        return 'Device identity not readable';
+      case _TerminalKind.generic:
+        return 'Device is not connected yet';
+    }
   }
 
   Widget _section(SteesColors colors, String title) {
@@ -2275,12 +2444,13 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
   }
 }
 
-class _Field extends StatelessWidget {
+class _Field extends StatefulWidget {
   final TextEditingController controller;
   final String hint;
   final IconData icon;
   final bool obscure;
   final FocusNode? focusNode;
+  final String? errorText;
 
   const _Field({
     required this.controller,
@@ -2288,22 +2458,50 @@ class _Field extends StatelessWidget {
     required this.icon,
     this.obscure = false,
     this.focusNode,
+    this.errorText,
   });
+
+  @override
+  State<_Field> createState() => _FieldState();
+}
+
+class _FieldState extends State<_Field> {
+  late bool _obscure;
+
+  @override
+  void initState() {
+    super.initState();
+    _obscure = widget.obscure;
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     return TextField(
-      controller: controller,
-      focusNode: focusNode,
-      obscureText: obscure,
+      controller: widget.controller,
+      focusNode: widget.focusNode,
+      obscureText: _obscure,
       style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
       decoration: InputDecoration(
-        hintText: hint,
-        prefixIcon: Icon(icon, size: 18, color: colors.mist),
+        hintText: widget.hint,
+        prefixIcon: Icon(widget.icon, size: 18, color: colors.mist),
+        suffixIcon: widget.obscure
+            ? IconButton(
+                icon: Icon(
+                  _obscure ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                  size: 18,
+                  color: colors.mist,
+                ),
+                onPressed: () => setState(() => _obscure = !_obscure),
+                tooltip: _obscure ? 'Show password' : 'Hide password',
+              )
+            : null,
         filled: true,
         fillColor: colors.well,
         contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        errorText: widget.errorText,
+        errorMaxLines: 2,
+        errorStyle: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.3),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.lg),
           borderSide: BorderSide.none,
@@ -2311,6 +2509,14 @@ class _Field extends StatelessWidget {
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.lg),
           borderSide: BorderSide(color: colors.stream, width: 1.5),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          borderSide: BorderSide(color: colors.danger, width: 1.5),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          borderSide: BorderSide(color: colors.danger, width: 1.5),
         ),
       ),
     );

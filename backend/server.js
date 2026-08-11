@@ -111,6 +111,12 @@ io.on('connection', (socket) => {
         if (typeof ack === 'function') ack({ ok: false, error: 'session not found' });
         return;
       }
+      if (!session.expectedDeviceId) {
+        // Identity not anchored yet (or attach failed): polling is the source
+        // of truth, this fast path just stays idle until it is set.
+        if (typeof ack === 'function') ack({ ok: false, error: 'identity not anchored' });
+        return;
+      }
       socket.join(`provision:${session.expectedDeviceId}`);
       console.log(
         `[provision] ${socket.id} watching session ${sessionId} (${session.expectedDeviceId})`,

@@ -41,18 +41,21 @@ const CLAIM_ERROR_STATUS = {
   SESSION_NOT_PENDING: 409,
   SESSION_EXPIRED: 410,
   INVALID_TOKEN: 403,
-  BAD_DEVICE_ID: 400,
+  INVALID_MAC: 400,
+  DEVICE_ALREADY_EXISTS: 409,
+  DEVICE_ALREADY_REGISTERED: 409,
   BAD_CHANNELS: 400,
   BAD_NAME: 400,
   DEVICE_NOT_SEEN: 409,
-  ALREADY_CLAIMED: 409,
   SESSION_BUSY: 429,
 };
 
-// Create a provisioning session: issues a secret deviceId (== the MQTT topic
-// the wizard will burn into the physical device) and a one-time claim token.
-// The token is returned exactly once here. Rate-limited: session creation is
-// cheap but a retry bug in the app (or an attacker) must not flood every trial.
+// Create a provisioning session. The device identity (canonical MAC) is NOT
+// known at this point - it is only readable on the SoftAP later - so the
+// backend returns just a sessionId + one-time claim token. The wizard anchors
+// the MAC-derived identity to the session right after the device restarts, via
+// POST /sessions/:id/hardware. Rate-limited: session creation is cheap but a
+// retry bug in the app (or an attacker) must not flood every trial.
 const createLimiter = rateLimit({ windowMs: 60 * 1000, max: 10 });
 router.post('/sessions', createLimiter, async (req, res) => {
   try {
@@ -64,26 +67,29 @@ router.post('/sessions', createLimiter, async (req, res) => {
   }
 });
 
-// Session status used by the wizard to poll for device visibility. Optional
-// hardwareId may be attached (from the SoftAP read) so the claim can verify it.
+// Anchors the canonical MAC identity to the session. Called by the wizard as
+// its FIRST ONLINE step after the device restarts (the MAC itself was read on
+// the offline SoftAP and is only sent now, never during the AP phase). The
+// backend normalizes + strictly validates it (INVALID_MAC) and checks for an
+// existing Device on that identity, returning a machine-readable duplicate
+// answer (DEVICE_ALREADY_EXISTS = this user's own device, DEVICE_ALREADY_
+// REGISTERED = owned elsewhere, without revealing who). Sets expectedDeviceId
+// = canonical MAC so the wait/poll, possession socket room and claim all key
+// on the real physical identity.
 router.post('/sessions/:sessionId/hardware', async (req, res) => {
   try {
-    const session = await provisioningService.getForOwner(
+    await provisioningService.attachIdentity(
       req.params.sessionId,
       req.userId,
+      String(req.body.hardwareId || ''),
     );
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-    const hardwareId = String(req.body.hardwareId || '').trim();
-    if (!hardwareId) {
-      return res.status(400).json({ error: 'hardwareId is required' });
-    }
-    session.hardwareId = hardwareId;
-    await session.save();
     res.json({ ok: true });
   } catch (err) {
-    console.error('Attach hardwareId error:', err);
+    const status = CLAIM_ERROR_STATUS[err.code];
+    if (status) {
+      return res.status(status).json({ error: err.message, code: err.code });
+    }
+    console.error('Attach device identity error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

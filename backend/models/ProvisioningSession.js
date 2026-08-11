@@ -3,10 +3,14 @@ const mongoose = require('mongoose');
 // A provisioning session is the ONLY way to claim a device. It binds:
 //   - the authenticated user (ownerId),
 //   - a one-time claim token (stored hashed) that must be presented again,
-//   - the exact deviceId the wizard will burn into the physical device (which
-//     doubles as the possession secret: only the owner of the session and the
-//     physical device ever see it, so "the device announced under this topic
-//     on MQTT" proves physical possession without any Tasmota-specific write).
+//   - the exact device identity the wizard will burn into the physical device.
+//
+// The identity is the normalized Tasmota MAC (canonical form, e.g.
+// "34987AC30304"), which is also the MQTT topic the device announces under.
+// The MAC is only readable while the phone is on the Tasmota SoftAP (offline),
+// while the session must be created online beforehand - so expectedDeviceId is
+// null at creation and filled by the wizard's first ONLINE step after the
+// device restarts (POST /sessions/:id/hardware), *before* any claim.
 //
 // Sessions are short-lived and disposable. They are never the device record.
 const provisioningSessionSchema = new mongoose.Schema({
@@ -28,17 +32,20 @@ const provisioningSessionSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  // The deviceId (== MQTT topic) issued for this provisioning attempt. Unique
-  // so two sessions can never target the same physical identity.
+  // The canonical MAC-derived deviceId (== MQTT topic) for this provisioning
+  // attempt. Unknown at session creation (the MAC is read later, offline);
+  // set by the identity-attach step before any claim. Sparse-unique so two
+  // sessions can never target the same physical identity once anchored.
   expectedDeviceId: {
     type: String,
-    required: true,
+    default: null,
     unique: true,
+    sparse: true,
     trim: true,
   },
-  // Immutable hardware identifier (Tasmota MAC) read during the SoftAP step.
-  // Stored here so a claim can be checked against the reported MAC and later
-  // used to de-duplicate re-provisioning. Optional/backfilled.
+  // Canonical MAC of the physical device, as read during the SoftAP step and
+  // anchored online. Informational and identical to expectedDeviceId for
+  // current devices; kept as a separate field for legacy compatibility.
   hardwareId: {
     type: String,
     default: null,

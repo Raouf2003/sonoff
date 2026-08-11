@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const deviceSchema = new mongoose.Schema({
+  // The physical identity. For every device claimed since the MAC-based model,
+  // this is the normalized Tasmota MAC (e.g. "34987AC30304") and doubles as the
+  // MQTT topic the firmware publishes under. Legacy devices (claimed before the
+  // MAC-based model) carry a `stees_<random>` deviceId unchanged so their live
+  // MQTT topics never desync. deviceId is NEVER rewritten after creation and is
+  // unique, so two Devices can never represent the same physical MAC.
   deviceId: {
     type: String,
     required: true,
@@ -34,9 +40,11 @@ const deviceSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-  // Immutable hardware identifier (Tasmota MAC) captured during provisioning.
-  // Informational + de-duplication; never the lookup key. Null for legacy
-  // devices claimed before this field existed.
+  // LEGACY/COMPATIBILITY ONLY. deviceId is the single identity; hardwareId is
+  // kept so devices that predate the MAC-based model (stees_* deviceIds) can
+  // still be recognized by their physical MAC for duplicate detection. For
+  // devices claimed under the MAC-based model hardwareId == deviceId.
+  // It must never be treated as a second identity.
   hardwareId: {
     type: String,
     default: null,

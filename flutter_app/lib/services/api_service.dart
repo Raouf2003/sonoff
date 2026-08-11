@@ -13,8 +13,8 @@ const Duration kApiTimeout = Duration(seconds: 15);
 /// HTTP error carrying the status code so callers can give phase-appropriate
 /// feedback instead of a generic "make sure you have internet access". When the
 /// backend also returns a machine-readable `code`, it is preserved so callers
-/// can distinguish e.g. ALREADY_CLAIMED (terminal) from DEVICE_NOT_SEEN
-/// (recoverable) without parsing display text.
+/// can distinguish e.g. DEVICE_ALREADY_REGISTERED (terminal) from
+/// DEVICE_NOT_SEEN (recoverable) without parsing display text.
 class ApiException implements Exception {
   const ApiException(this.message, {this.statusCode, this.code});
   final String message;
@@ -180,10 +180,11 @@ class ApiService {
     return _checkList(res, 'Failed to fetch devices');
   }
 
-  // Provisioning session: the backend issues a secret deviceId (== the MQTT
-  // topic) and a one-time claim token. The deviceId is what the wizard burns
-  // into the physical device; possession is proven by that exact device
-  // announcing on MQTT. The claim token is returned here exactly once.
+  // Provisioning session: the backend issues a one-time claim token. The device
+  // identity (== the MQTT topic) is NOT issued here - the physical MAC is only
+  // readable on the offline SoftAP, so the wizard derives the canonical deviceId
+  // locally and anchors it to this session later via [attachHardwareId]. The
+  // claim token is returned here exactly once.
   Future<Map<String, dynamic>> createProvisioningSession() async {
     final res = await post('/api/provisioning/sessions', <String, dynamic>{});
     return _checkObject(res, const [201], 'Could not start provisioning session');
@@ -195,13 +196,18 @@ class ApiService {
     return _checkObject(res, const [200], 'Could not fetch provisioning status');
   }
 
-  // Best-effort: attach the Tasmota MAC read from the device during the
-  // SoftAP step so the claim is anchored to the physical hardware too.
-  Future<void> attachHardwareId(String sessionId, String hardwareId) async {
+  // Anchors the device identity to the session. This is the FIRST online call
+  // after the device restart: the canonical MAC read during the SoftAP step IS
+  // the identity. The backend validates/normalizes it, rejects duplicates
+  // (DEVICE_ALREADY_EXISTS / DEVICE_ALREADY_REGISTERED) and returns the session
+  // with the confirmed deviceId. Represents the established MAC equals the
+  // device ID model.
+  Future<Map<String, dynamic>> attachHardwareId(
+      String sessionId, String hardwareId) async {
     final res = await post('/api/provisioning/sessions/$sessionId/hardware', {
       'hardwareId': hardwareId,
     });
-    _checkObject(res, const [200], 'Could not store hardware id');
+    return _checkObject(res, const [200], 'Could not store hardware id');
   }
 
   Future<Map<String, dynamic>> claimDeviceWithSession({
