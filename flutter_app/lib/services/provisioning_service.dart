@@ -31,6 +31,64 @@ bool isCanonicalDeviceId(String value) {
   return _canonicalMacRe.hasMatch(value);
 }
 
+/// Session-preparation gate guarding the offline-AP transition.
+///
+/// PHASE 0 hinges on one rule: the phone must NEVER leave for the Tasmota
+/// SoftAP until the backend provisioning session is verified usable, and the
+/// session must NEVER be recreated afterwards (lifecycle resume, AP detection,
+/// reconnect must all leave a ready session untouched). This pure state machine
+/// encodes those invariants; the wizard renders exactly its state and honors
+/// [canOpenWifiSettings] as the single gate for the Wi-Fi-Settings action.
+enum SessionPrepState { idle, preparing, ready, failed }
+
+class SessionGate {
+  SessionPrepState _state = SessionPrepState.idle;
+
+  SessionPrepState get state => _state;
+  bool get isReady => _state == SessionPrepState.ready;
+  bool get isPreparing => _state == SessionPrepState.preparing;
+  bool get isFailed => _state == SessionPrepState.failed;
+
+  /// True only when the backend session is verified usable. This is the hard
+  /// gate: while false the "Open Wi-Fi Settings" action must be inert.
+  bool canOpenWifiSettings() => _state == SessionPrepState.ready;
+
+  /// Session creation may start only from idle (never prepared) or failed
+  /// (a user-initiated Retry). preparing/ready are terminal for this wizard -
+  /// duplicate lifecycle callbacks can never spawn a second session.
+  bool canBeginPrepare() =>
+      _state == SessionPrepState.idle || _state == SessionPrepState.failed;
+
+  /// Marks the start of a single create attempt. Returns false when one is
+  /// already in flight or the session is already ready - the caller must NOT
+  /// proceed (no duplicate session creation).
+  bool beginPrepare() {
+    if (_state == SessionPrepState.preparing ||
+        _state == SessionPrepState.ready) {
+      return false;
+    }
+    _state = SessionPrepState.preparing;
+    return true;
+  }
+
+  void markReady() {
+    _state = SessionPrepState.ready;
+  }
+
+  void markFailed() {
+    _state = SessionPrepState.failed;
+  }
+
+  /// Lifecycle resume (e.g. returning from Wi-Fi Settings or the Home screen).
+  /// Recreating a ready session on resume is FORBIDDEN. Returns the session
+  /// verdict so the caller knows whether to resume AP detection:
+  ///  - ready: the user can proceed to AP detection right now, no session work.
+  ///  - preparing: a create is already in flight; wait, never re-create.
+  ///  - failed: surface the failure card; only a user-triggered Retry helps.
+  ///  - idle: never-before-prepared wizard; the caller may begin preparation.
+  SessionPrepState onResume() => _state;
+}
+
 /// Explicit provisioning state machine.
 ///
 /// The wizard drives through these states in a strictly sequential order. Only

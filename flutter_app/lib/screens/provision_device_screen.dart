@@ -91,6 +91,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   final _api = ApiService();
 
+  // PHASE 0 session-preparation gate. Single source of truth for whether the
+  // backend session is verified usable before the phone is allowed to leave for
+  // the Tasmota SoftAP. Rendered directly by the Connect screen.
+  final SessionGate _sessionGate = SessionGate();
+
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
   final _mqttBrokerCtl = TextEditingController(text: 'broker.emqx.io');
@@ -120,14 +125,15 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // creation (the MAC is only readable on the offline AP). It is derived
   // locally from the canonical MAC and anchored to the session online via
   // `POST /sessions/:id/hardware`; the one-time claim token returned here must
-  // be replayed to claim.
+  // be replayed to claim. Created exactly once in PHASE 0 while online; never
+  // recreated (see [SessionGate]).
   String? _sessionId;
   String? _claimToken;
+  Object? _sessionExpiresAt;
   String _issuedDeviceId = '';
   String? _hardwareId;
   io.Socket? _provisionSocket;
   bool _watchAcked = false;
-  bool _creating = false;
   bool _claimed = false;
   int? _sessionCreateStatus;
   // True once the backend has anchored the canonical MAC to the session (the
@@ -184,7 +190,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // ONLY during the initial "connect phone to Tasmota AP" phase. After the
     // Tasmota Restart command succeeds, the AP is EXPECTED to disappear, so we
     // must never re-probe 192.168.4.1 or show an AP connection error again.
-    if (state != AppLifecycleState.resumed) {
+    final bool resumed = state == AppLifecycleState.resumed;
+    debugPrint('[PROVISION][LIFECYCLE] '
+        '${resumed ? 'RESUME' : 'PAUSE'} phase=$_phaseLabel');
+    if (!resumed) {
       // Leaving the app (e.g. jumping into Wi-Fi Settings) halts the probing
       // timer. Detection is restarted from a clean slate on resume.
       if (_step == _Step.connect) {
@@ -197,11 +206,27 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     if (!mounted) return;
     switch (_step) {
       case _Step.connect:
-        debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
-        // Re-prepare the backend session in the background while the phone
-        // still has internet (best-effort; `_startSearch` gates on it later).
-        unawaited(_ensureSessionSilent());
-        _startApDetection();
+        // A lifecycle resume MUST NOT recreate the session. Consult the gate:
+        //  - ready: resume AP detection (the normal Wi-Fi-Settings return path);
+        //  - preparing: a create is already in flight - wait, never re-create;
+        //  - failed: surface the error card; only a user Retry can help;
+        //  - idle: never prepared yet - begin preparation now if still online.
+        if (_sessionGate.isReady) {
+          debugPrint(
+              '[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
+          _startApDetection();
+        } else if (_sessionGate.state == SessionPrepState.idle) {
+          // The only benign (re)create trigger: a wizard that never began (e.g.
+          // resumed before initState's creation ran). Still online-only: if the
+          // phone is already on the Tasmota AP this fails harmlessly into the
+          // failed card and AP detection does NOT start.
+          unawaited(_ensureSessionSilent());
+        } else {
+          debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - '
+              'session not ready (state=${_sessionGate.state.name}), '
+              'AP detection deferred');
+          if (mounted) setState(() {});
+        }
       case _Step.provision:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
       case _Step.waiting:
@@ -244,7 +269,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   static const MethodChannel _wifiSettingsChannel =
       MethodChannel('stees/wifi_settings');
 
+  // HARD GATE: the action that sends the user to Android/iOS Wi-Fi Settings must
+  // run ONLY while the provisioning session is verified usable (PHASE 0 done).
+  // While preparing the Connect UI disables it and shows a progress state; after
+  // a failure the button is replaced by the error card. This in-method check is
+  // defense-in-depth for any non-UI caller: if the session is not ready the
+  // phone must NOT leave for the offline SoftAP.
   Future<void> _openWifiSettings() async {
+    if (!_sessionGate.canOpenWifiSettings()) {
+      debugPrint('[PROVISION][SESSION] WIFI_SETTINGS_BLOCKED '
+          'state=${_sessionGate.state.name}');
+      return;
+    }
     try {
       if (Theme.of(context).platform == TargetPlatform.iOS) {
         await launchUrl(
@@ -264,19 +300,21 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // PHASE 1 (OFFLINE-AP): the phone is already on the Tasmota AP now (the
     // user picked it in Wi-Fi Settings and returned here). No backend call is
     // allowed from this point. The session MUST have been created during
-    // PHASE 0 (initState/resume while online).
+    // PHASE 0 and verified by [SessionGate]; with the Wi-Fi-Settings gate this
+    // branch is defensive only.
     if (_sessionId == null) {
       debugPrint('[PROVISION] OFFLINE_AP_PHASE_START');
       debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
       if (mounted) {
         setState(() {
           _searching = false;
-          _error = _sessionErrorFor(_sessionCreateStatus);
+          _error = _noSessionRecoverableMessage;
         });
       }
       return;
     }
     debugPrint('[PROVISION] OFFLINE_AP_PHASE_START session=$_sessionId');
+    debugPrint('[PROVISION][AP] AP_DETECTED SESSION_STATE=${_sessionGate.state.name}');
     debugPrint('[PROVISION] AP_CONNECT_START');
     _startApDetection();
   }
@@ -456,6 +494,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         debugPrint('[PROVISION] MAC not readable yet (retried on Apply)');
       }
       _trace.enter(ProvisionPhase.ap, 'AP_DETECTED');
+      debugPrint(
+          '[PROVISION][AP] AP_DETECTED SESSION_STATE=${_sessionGate.state.name}');
       debugPrint('[PROVISION] AP_CONNECTED');
       if (_recoveryMode) {
         traceLog('RECOVERY', 'AP_FOUND total=${_trace.elapsedMs}ms');
@@ -527,12 +567,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // online). No `_createSession()` call is made here: we are now in the
     // OFFLINE-AP phase and the backend is unreachable by design. The device
     // identity itself is derived from the MAC read just below, locally.
+    // Defensive reachability only - the Wi-Fi-Settings gate makes this state
+    // unreachable in the normal flow.
     if (_sessionId == null) {
       debugPrint('[PROVISION] CLOUD_CALL_BLOCKED_DURING_AP session missing');
       if (mounted) {
         setState(() {
           _provisioning = false;
-          _error = _sessionErrorFor(_sessionCreateStatus);
+          _error = _noSessionRecoverableMessage;
         });
       }
       return;
@@ -648,70 +690,84 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   }
 
   // Creates the backend provisioning session. PHASE 0 (ONLINE) ONLY - this must
-  // run before the phone switches to the Tasmota AP (which has no WAN). Logs
-  // only; user-facing feedback happens in `_startSearch` via _sessionCreateStatus.
-  // The device identity is NOT issued here: the MAC is only readable on the
-  // SoftAP, so the wizard anchors it to the session later (online, after the
-  // restart) via _anchorSessionIdentity.
+  // run before the phone switches to the Tasmota AP (which has no WAN). The
+  // session is created exactly once: gate guards every re-entry (lifecycle
+  // resume, AP detection, retries) so a ready session is never recreated. The
+  // device identity is NOT issued here: the MAC is only readable on the SoftAP,
+  // so the wizard anchors it to the session later (online, after the restart)
+  // via _anchorSessionIdentity.
   Future<bool> _createSession() async {
+    if (_sessionGate.isReady) {
+      debugPrint('[PROVISION][SESSION] PREPARE_ALREADY_READY');
+      return true;
+    }
+    if (!_sessionGate.beginPrepare()) {
+      // A create is already in flight (preparing) - never start a second one.
+      // This is the duplicate-session guard for lifecycle/AP callbacks.
+      debugPrint('[PROVISION][SESSION] PREPARE_SKIPPED phase=$_phaseLabel');
+      return false;
+    }
+    _trace.enter(ProvisionPhase.config, 'SESSION_CREATE_START');
+    debugPrint('[PROVISION][SESSION] PREPARE_START phase=$_phaseLabel');
+    if (mounted) {
+      setState(() {
+        _error = null;
+      });
+    }
     try {
-      _trace.enter(ProvisionPhase.config, 'SESSION_CREATE_START');
-      debugPrint('[PROVISION] SESSION_CREATE_START');
       final session = await _api.createProvisioningSession();
       final sessionId = session['sessionId'] as String?;
       final token = session['claimToken'] as String?;
       if (sessionId == null || token == null) {
-        debugPrint('[PROVISION] SESSION_CREATE_FAILED partial payload');
+        _sessionCreateStatus = null;
+        _sessionGate.markFailed();
+        debugPrint('[PROVISION][SESSION] PREPARE_FAILED code=partial_payload');
+        if (mounted) setState(() {});
         return false;
       }
       _sessionId = sessionId;
       _claimToken = token;
+      _sessionExpiresAt = session['expiresAt'];
       _sessionCreateStatus = null;
-      debugPrint('[PROVISION] SESSION_CREATE_SUCCESS session=$sessionId');
+      _sessionGate.markReady();
+      debugPrint('[PROVISION][SESSION] PREPARE_SUCCESS session=$sessionId '
+        'expiresAt=$_sessionExpiresAt');
       if (mounted) setState(() {});
       return true;
     } on ApiException catch (e) {
       _sessionCreateStatus = e.statusCode;
-      debugPrint('[PROVISION] SESSION_CREATE_FAILED status=${e.statusCode} '
-          'msg=${e.message}');
+      _sessionGate.markFailed();
+      debugPrint('[PROVISION][SESSION] PREPARE_FAILED '
+          'code=${e.code ?? 'http'} status=${e.statusCode}');
+      if (mounted) setState(() {});
       return false;
     } catch (e) {
       _sessionCreateStatus = null;
-    debugPrint('[PROVISION] SESSION_CREATE_FAILED network: $e');
-    return false;
+      _sessionGate.markFailed();
+      debugPrint('[PROVISION][SESSION] PREPARE_FAILED code=network');
+      if (mounted) setState(() {});
+      return false;
+    }
   }
-}
-
-// Maps a session-creation failure to a PHASE-APPROPRIATE user message.
-String _sessionErrorFor(int? status) {
-  switch (status) {
-    case 401:
-      return 'You appear to be signed out. Please sign in again and try again.';
-    case 403:
-      return 'Access was denied. Please sign in again and try again.';
-    case 404:
-    case 409:
-      return 'STEES rejected this provisioning request. Please try again.';
-    case 500:
-      return 'STEES is having trouble right now. Please try again in a moment.';
-    default:
-      return 'STEES could not prepare this device before you switched to the '
-          'device Wi-Fi. Reconnect to normal Internet and reopen this screen '
-          'to start over.';
-  }
-}
 
   // Best-effort session creation for the connect phase (created in the
   // background while the phone is still online so the AP phase stays offline).
+  // Idempotent: ready/preparing sessions are never touched.
   Future<void> _ensureSessionSilent() async {
-    if (_sessionId != null) return;
-    if (_creating) return;
-    _creating = true;
-    try {
+    if (_sessionGate.canBeginPrepare()) {
       await _createSession();
-    } finally {
-      _creating = false;
+    } else {
+      debugPrint('[PROVISION][SESSION] PREPARE_SKIPPED '
+          'phase=$_phaseLabel state=${_sessionGate.state.name}');
     }
+  }
+
+  // Defensive fallback wording when the wizard somehow reaches a step that
+  // genuinely requires a session but none is anchored. NEVER triggers a backend
+  // request (the phone may already be on the offline SoftAP).
+  String get _noSessionRecoverableMessage {
+    return "There was a problem preparing this device. Close this screen, "
+        'reconnect to normal Internet, and open Provision Device again.';
   }
 
   // Reads the immutable Tasmota MAC via the read-only `Status 5` query.
@@ -1520,32 +1576,58 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: AppSpacing.xl),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: FilledButton.icon(
-                  onPressed: _openWifiSettings,
-                  icon: const Icon(Icons.settings_outlined, size: 18),
-                  label: const Text('Open Wi-Fi Settings'),
-                  style: _filledStyle(colors),
+              // PHASE 0 gate: the Wi-Fi-Settings action is ONLY enabled once the
+              // backend session is verified usable. While preparing we show a
+              // progress state (no buttons); after a failure an error card with
+              // Retry / Close - the user is never sent to the offline AP before
+              // setup is truly ready. In recovery mode the session already
+              // exists, so the original buttons are restored.
+              if (!recovering && _sessionGate.isPreparing) ...[
+                _buildPreparingCard(colors),
+              ] else if (!recovering && _sessionGate.isFailed) ...[
+                _buildPrepareFailedCard(colors),
+              ] else ...[
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton.icon(
+                    onPressed: _sessionGate.canOpenWifiSettings()
+                        ? _openWifiSettings
+                        : null,
+                    icon: const Icon(Icons.settings_outlined, size: 18),
+                    label: const Text('Open Wi-Fi Settings'),
+                    style: _filledStyle(colors),
+                  ),
                 ),
-              ),
-              const SizedBox(height: AppSpacing.md),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: FilledButton(
-                  onPressed: _searching ? null : _startSearch,
-                  style: _filledStyle(colors),
-                  child: _searching
-                      ? SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
-                        )
-                      : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                const SizedBox(height: AppSpacing.md),
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton(
+                    onPressed: _searching ? null : _startSearch,
+                    style: _filledStyle(colors),
+                    child: _searching
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
+                          )
+                        : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                  ),
                 ),
-              ),
+                if (!recovering && _sessionGate.isReady && !_searching) ...[
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
+                    'Setup ready. Connect your phone to the device Wi-Fi '
+                    '(tasmota-XXXX) and return here.',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                        fontSize: 11,
+                        color: colors.stream.withValues(alpha: 0.7),
+                        height: 1.4),
+                  ),
+                ],
+              ],
               if (_searching) ...[
                 const SizedBox(height: AppSpacing.md),
                 Row(
@@ -1564,7 +1646,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                   ],
                 ),
               ],
-              if (!_searching && _error != null) ...[
+              if (!_searching && _error != null && !_sessionGate.isFailed) ...[
                 const SizedBox(height: AppSpacing.md),
                 Text(
                   _error!,
@@ -1632,6 +1714,153 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         ),
       ],
     );
+  }
+
+  // PHASE 0 progress card: shown while the backend session is being created
+  // (still ONLINE). No action buttons - the user must not leave for the offline
+  // SoftAP until setup is verified ready.
+  Widget _buildPreparingCard(SteesColors colors) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Text(
+              'Preparing device setup…',
+              style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+            ),
+          ],
+        ),
+        const SizedBox(height: AppSpacing.md),
+        Text(
+          'This prepares this device for provisioning. Keep your phone on '
+          'normal Internet while this finishes - the buttons below will '
+          'enable once setup is ready.',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.inter(
+              fontSize: 11, color: colors.mist.withValues(alpha: 0.6), height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  // PHASE 0 failure card: session preparation failed while ONLINE. The user
+  // stays here (never switched to the AP) and can Retry or Close. Wording is
+  // honest: no session was lost, none was created from the offline AP.
+  Widget _buildPrepareFailedCard(SteesColors colors) {
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      decoration: BoxDecoration(
+        color: colors.danger.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(color: colors.danger.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        children: [
+          Icon(Icons.cloud_off_outlined, size: 28, color: colors.danger),
+          const SizedBox(height: AppSpacing.md),
+          Text(
+            "Couldn't prepare device setup",
+            textAlign: TextAlign.center,
+            style: GoogleFonts.sora(
+                fontSize: 15, fontWeight: FontWeight.w600, color: colors.danger),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            _prepareFailureMessage,
+            textAlign: TextAlign.center,
+            style: GoogleFonts.inter(
+                fontSize: 12, color: colors.mist.withValues(alpha: 0.85), height: 1.4),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              _error!,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.4),
+            ),
+          ],
+          const SizedBox(height: AppSpacing.lg),
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 46,
+                  child: FilledButton(
+                    onPressed: _retrySessionPrepare,
+                    style: _filledStyle(colors),
+                    child: Text('Retry',
+                        style: GoogleFonts.sora(
+                            fontSize: 14, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: SizedBox(
+                  height: 46,
+                  child: OutlinedButton(
+                    onPressed: _leaveWizard,
+                    style: _outlinedStyle(colors),
+                    child: Text('Close',
+                        style: GoogleFonts.sora(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Phase-appropriate wording for the failed session-preparation card.
+  String get _prepareFailureMessage {
+    if (_sessionCreateStatus == 401 || _sessionCreateStatus == 403) {
+      return 'You appear to be signed out. Sign in again, then retry.';
+    }
+    return 'STEES needs an internet connection to prepare this device before '
+        'you connect to its setup Wi-Fi.';
+  }
+
+  // Best-effort signal of whether the phone currently has validated Internet.
+  // iOS has no binding channel, so it is assumed online. Used ONLY to block a
+  // session create (or retry) that could not possibly succeed from the offline
+  // SoftAP - never to gate anything else.
+  Future<bool> _hasNormalInternet() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS) return true;
+    return _logNetworkInfo('session prepare');
+  }
+
+  // Retry the PHASE 0 session preparation from the failed card. If the phone
+  // is now on the offline SoftAP a create cannot work - tell the user instead
+  // of making the doomed request.
+  Future<void> _retrySessionPrepare() async {
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _error = null;
+    });
+    if (!await _hasNormalInternet()) {
+      debugPrint('[PROVISION][SESSION] PREPARE_RETRY_BLOCKED no-internet');
+      if (mounted) {
+        setState(() {
+          _sessionGate.markFailed();
+          _error = 'Reconnect to normal Internet, then retry.';
+        });
+      }
+      return;
+    }
+    debugPrint('[PROVISION][SESSION] PREPARE_RETRY_START');
+    await _ensureSessionSilent();
   }
 
   // Dialog with concrete recovery steps, shown from the recovery flow. Stays
