@@ -44,7 +44,32 @@ enum _ConfigOutcome { ok, wifiTestFailed, configFailed }
 /// settings into the raw Tasmota web page, using STEES-styled screens and the
 /// MAC-based device registration endpoint.
 class ProvisionDeviceScreen extends StatefulWidget {
-  const ProvisionDeviceScreen({super.key});
+  const ProvisionDeviceScreen({super.key})
+      : testApi = null,
+        testDeviceId = null,
+        testFailureCode = null;
+
+  /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
+  /// failure state and injects an [ApiService] so widget tests can exercise the
+  /// "Remove Device" flow without driving the real hardware AP/MQTT steps.
+  /// [testFailureCode] is a provision error code (e.g. DEVICE_ALREADY_EXISTS);
+  /// [testDeviceId] is the canonical MAC used for the DELETE call.
+  // ignore: prefer_const_constructors_in_immutables
+  ProvisionDeviceScreen.forTest({
+    super.key,
+    this.testApi,
+    this.testDeviceId,
+    this.testFailureCode,
+  });
+
+  @visibleForTesting
+  final ApiService? testApi;
+
+  @visibleForTesting
+  final String? testDeviceId;
+
+  @visibleForTesting
+  final String? testFailureCode;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -89,7 +114,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   bool _wifiBound = false;
 
-  final _api = ApiService();
+  late final ApiService _api;
 
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
@@ -123,6 +148,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   io.Socket? _provisionSocket;
   bool _watchAcked = false;
   bool _claimed = false;
+  // True while the authenticated DELETE (Remove Device) is in flight. Guards
+  // against duplicate taps / duplicate DELETE requests and drives the loading
+  // state on the Remove Device button.
+  bool _removingDevice = false;
   // Graded terminal-failure kind for the WAIT screen. Duplicates and
   // identity-unreadable get a Close-only recovery; everything else keeps the
   // existing recovery buttons.
@@ -161,6 +190,28 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _api = widget.testApi ?? ApiService();
+    // Test-only seeding: jump straight into a graded terminal failure (e.g. a
+    // duplicate) so the "Remove Device" flow can be exercised in widget tests
+    // without the offline AP / MQTT hardware steps.
+    final code = widget.testFailureCode;
+    if (code != null) {
+      final deviceId = widget.testDeviceId ?? '';
+      _issuedDeviceId = deviceId;
+      _step = _Step.waiting;
+      _state = ProvisionState.failed;
+      _claimed = false;
+      _allowWaitRetry = false;
+      final kind = _terminalKindFor(
+        ApiException(code, statusCode: 409, code: code),
+      );
+      _terminalKind = kind;
+      _error = code == 'DEVICE_ALREADY_EXISTS'
+          ? 'This device is already in your account. If you want to add it '
+              'again, remove the existing device from your account first.'
+          : 'This device is already registered and cannot be added to this '
+              'account.';
+    }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
     // the Tasmota AP (192.168.4.1); the backend is only contacted AFTER the
@@ -1165,6 +1216,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         // (they would re-fail forever). The wizard shows a recovery screen
         // instead of looping.
         _allowWaitRetry = false;
+        _terminalKind = _terminalKindFor(e);
         traceLog('CLAIM', 'TERMINAL total=${_trace.elapsedMs}ms');
         setState(() {
           _state = ProvisionState.failed;
@@ -1218,6 +1270,21 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         status == 409 || status == 410;
   }
 
+  // Maps a terminal provision failure to its graded recovery kind. Only a
+  // duplicate owned by the CURRENT user gets the "Remove Device" recovery; a
+  // duplicate owned by someone else is a strict close-only state with no
+  // deletion controls.
+  _TerminalKind _terminalKindFor(ApiException e) {
+    switch (e.code) {
+      case 'DEVICE_ALREADY_EXISTS':
+        return _TerminalKind.alreadyAdded;
+      case 'DEVICE_ALREADY_REGISTERED':
+        return _TerminalKind.alreadyRegistered;
+      default:
+        return _TerminalKind.generic;
+    }
+  }
+
   // User-facing, non-technical wording for a TERMINAL provision failure.
   String _provisionFailureMessage(ApiException e) {
     switch (e.code) {
@@ -1255,6 +1322,126 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       default:
         return 'STEES was busy. Waiting and retrying…';
     }
+  }
+
+  // Confirm then delete the existing registration for the current MAC from the
+  // authenticated account, so the same physical device can be provisioned again
+  // without leaving the wizard. Only reached from the DEVICE_ALREADY_EXISTS
+  // terminal state (owned by the CURRENT user) - never for another user's
+  // device. Reuses the existing authenticated DELETE endpoint; the backend keeps
+  // the deletion strictly scoped to req.userId and cascades sensors/rules/
+  // schedules, but never touches the physical Tasmota hardware.
+  Future<void> _confirmRemoveDevice() async {
+    final colors = context.steesColors;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.surface,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.xl)),
+        title: Text('Remove device?',
+            style: GoogleFonts.sora(
+                fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text(
+          'This will remove this device from your account. You can add it '
+          'again later.',
+          style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel',
+                style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Remove Device',
+                style: GoogleFonts.inter(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: colors.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _deleteCurrentDevice();
+  }
+
+  // Executes the authenticated DELETE, guarding against duplicate taps, then
+  // resets only the state needed to retry provisioning. The physical device is
+  // still configured and online on MQTT, so a successful removal is followed by
+  // an immediate re-registration attempt - no restart, no navigating away.
+  Future<void> _deleteCurrentDevice() async {
+    if (_removingDevice) return;
+    final deviceId = _issuedDeviceId;
+    if (deviceId.isEmpty) return;
+    setState(() => _removingDevice = true);
+    DeleteOutcome outcome;
+    try {
+      await _api.deleteDevice(deviceId);
+      outcome = classifyDeleteOutcome(succeeded: true);
+    } on ApiException catch (e) {
+      outcome = classifyDeleteOutcome(statusCode: e.statusCode);
+      if (e.statusCode == 401) {
+        // The shared ApiService.onUnauthorized handler already handles sign-out.
+        // Keep the duplicate state; do not pretend deletion succeeded.
+        if (mounted) {
+          _setError('You appear to be signed out. Sign in again and retry.');
+          setState(() => _removingDevice = false);
+        }
+        return;
+      }
+    } catch (_) {
+      outcome = classifyDeleteOutcome();
+    }
+    if (outcome == DeleteOutcome.cleared) {
+      if (!mounted) return;
+      // Removed (200) or already gone (404): clear the duplicate state and let
+      // the same physical device be provisioned again in the same wizard.
+      _resetDuplicateState();
+      _trace.debugTrace(ProvisionPhase.claim, label: 'DEVICE_REMOVED');
+      debugPrint('[PROVISION] DEVICE_REMOVED deviceId=$deviceId - retrying');
+      _setSuccess('Device removed successfully.');
+      await _registerDevice();
+    } else {
+      // Network / timeout / server / unexpected failure: keep the duplicate
+      // state and offer a retryable error. Never claim deletion succeeded.
+      if (mounted) {
+        _setError('Could not remove the device. Check your connection and try '
+            'again.');
+      }
+    }
+    if (mounted) setState(() => _removingDevice = false);
+  }
+
+  // Clears exactly the terminal duplicate state so the wizard can retry.
+  void _resetDuplicateState() {
+    _terminalKind = _TerminalKind.generic;
+    _claimed = false;
+    _allowWaitRetry = false;
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _state = ProvisionState.waitingForMqtt;
+      });
+    }
+  }
+
+  void _setSuccess(String msg) {
+    if (!mounted) return;
+    final colors = context.steesColors;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontSize: 13)),
+        backgroundColor: colors.stream,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
+        margin: const EdgeInsets.all(AppSpacing.lg),
+      ),
+    );
   }
 
   // ──────────────────────────────────────────────────────────
@@ -1840,6 +2027,31 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     fontSize: 12, color: colors.mist.withValues(alpha: 0.6), height: 1.4),
               ),
               const SizedBox(height: AppSpacing.lg),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: FilledButton.icon(
+                  onPressed: _removingDevice ? null : _confirmRemoveDevice,
+                  icon: _removingDevice
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2.5, color: colors.well),
+                        )
+                      : const Icon(Icons.delete_outline, size: 18),
+                  label: Text('Remove Device',
+                      style: GoogleFonts.sora(
+                          fontSize: 15, fontWeight: FontWeight.w700)),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.danger,
+                    foregroundColor: colors.well,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.xl)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.sm),
             ],
           ] else ...[
             SizedBox(
