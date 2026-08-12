@@ -11,15 +11,15 @@ const controlRoutes = require('./routes/control');
 const sensorRoutes = require('./routes/sensors');
 const ruleRoutes = require('./routes/rules');
 const scheduleRoutes = require('./routes/schedules');
-const provisioningRoutes = require('./routes/provisioning');
 const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
+const { normalizeMac } = require('./services/macIdentity');
+const Device = require('./models/Device');
 
 const deviceRegistry = require('./services/deviceRegistry');
 const runtimeState = require('./services/runtimeState');
 const mqttGateway = require('./services/mqttGateway');
 const ruleEngine = require('./services/ruleEngine');
 const scheduleEngine = require('./services/scheduleEngine');
-const provisioningService = require('./services/provisioningService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -96,31 +96,36 @@ io.on('connection', (socket) => {
   const room = userRoom(socket.data.userId);
   socket.join(room);
   console.log(`Client connected: ${socket.id} -> room ${room}`);
-  // Join the private fast-path room for one provisioning session. Ownership is
-  // verified against the DB before the socket may listen, so only the session
-  // owner receives device_seen events for that exact (secret) deviceId.
+  // Private fast-path room for one provisioning attempt, keyed by the device's
+  // canonical MAC (which the client itself read from the physical device).
+  // Access is verified against the DB before the socket may listen: a device
+  // that belongs to ANOTHER account is never watched, so the device_seen wake
+  // up can never leak another user's device presence. Polling the /seen
+  // endpoint remains the source of truth; this is a wake-up only.
   socket.on('provision_watch', async (payload, ack) => {
-    const sessionId = payload && payload.sessionId;
-    if (!sessionId || typeof sessionId !== 'string') {
-      if (typeof ack === 'function') ack({ ok: false, error: 'missing sessionId' });
+    const deviceId = payload && payload.deviceId;
+    if (!deviceId || typeof deviceId !== 'string') {
+      if (typeof ack === 'function') ack({ ok: false, error: 'missing deviceId' });
+      return;
+    }
+    const mac = normalizeMac(deviceId);
+    if (!mac) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'invalid deviceId' });
       return;
     }
     try {
-      const session = await provisioningService.getForOwner(sessionId, socket.data.userId);
-      if (!session) {
-        if (typeof ack === 'function') ack({ ok: false, error: 'session not found' });
+      const existing = await Device.findOne({ deviceId: mac });
+      if (
+        existing &&
+        existing.ownerId &&
+        existing.ownerId.toString() !== String(socket.data.userId)
+      ) {
+        // Owned by another account - never expose its presence.
+        if (typeof ack === 'function') ack({ ok: false, error: 'not authorized' });
         return;
       }
-      if (!session.expectedDeviceId) {
-        // Identity not anchored yet (or attach failed): polling is the source
-        // of truth, this fast path just stays idle until it is set.
-        if (typeof ack === 'function') ack({ ok: false, error: 'identity not anchored' });
-        return;
-      }
-      socket.join(`provision:${session.expectedDeviceId}`);
-      console.log(
-        `[provision] ${socket.id} watching session ${sessionId} (${session.expectedDeviceId})`,
-      );
+      socket.join(`provision:${mac}`);
+      console.log(`[provision] ${socket.id} watching device ${mac}`);
       if (typeof ack === 'function') ack({ ok: true });
     } catch (err) {
       console.error(`provision_watch error: ${err.message}`);
@@ -150,23 +155,11 @@ app.get('/api/mqtt/snapshot', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
-app.use('/api/provisioning', authMiddleware, provisioningRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api/sensors', authMiddleware, sensorRoutes);
 app.use('/api/rules', authMiddleware, ruleRoutes);
 app.use('/api/schedules', authMiddleware, scheduleRoutes);
 app.use('/api', authMiddleware, controlRoutes);
-
-// Periodically drop expired, never-claimed provisioning sessions so the
-// collection cannot grow unboundedly on abandoned wizards.
-setInterval(() => {
-  provisioningService
-    .expireStale()
-    .then((n) => {
-      if (n > 0) console.log(`Provisioning cleanup: purged ${n} expired session(s)`);
-    })
-    .catch((err) => console.error('Provisioning cleanup error:', err.message));
-}, 60 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);

@@ -1,0 +1,231 @@
+const { test } = require('node:test');
+const assert = require('node:assert');
+const jwt = require('jsonwebtoken');
+const { DeviceProvisioningService } = require('../services/deviceProvisioningService');
+const { normalizeMac } = require('../services/macIdentity');
+const { authMiddleware, JWT_SECRET } = require('../middleware/auth');
+
+const MAC = '34:98:7A:C3:03:04';
+const CID = normalizeMac(MAC); // 34987AC30304
+
+// In-memory Device model replacement. Supports the exact queries the service
+// issues: findOne({deviceId}) / findOne({hardwareId}); findOneAndUpdate
+// ({_id, ownerId:null}); create() honouring a unique deviceId index.
+class FakeDeviceModel {
+  constructor(rows = [], opts = {}) {
+    this.rows = rows.map((r) => ({ ...r }));
+    this.opts = opts; // { raceCreateDup } to force the unique-index loser path
+    this.createCalls = 0;
+  }
+
+  async findOne(query) {
+    if (this.opts.raceCreateDup) return null;
+    if (query.deviceId) {
+      return this.rows.find((r) => r.deviceId === query.deviceId) || null;
+    }
+    if (query.hardwareId) {
+      return this.rows.find((r) => r.hardwareId === query.hardwareId) || null;
+    }
+    return null;
+  }
+
+  async findOneAndUpdate(query, update) {
+    const row = this.rows.find((r) => r._id === query._id && r.ownerId === null);
+    if (!row) return null;
+    Object.assign(row, update.$set);
+    return row;
+  }
+
+  async create(data) {
+    this.createCalls += 1;
+    if (this.rows.some((r) => r.deviceId === data.deviceId)) {
+      const err = new Error('E11000 duplicate key');
+      err.code = 11000;
+      throw err;
+    }
+    const row = { ...data, _id: `dev-${this.rows.length}` };
+    this.rows.push(row);
+    return row;
+  }
+}
+
+function service({ deviceRows = [], recent = false, deviceOpts } = {}) {
+  const deviceModel = new FakeDeviceModel(deviceRows, deviceOpts || {});
+  const mqtt = { hasRecent: () => recent };
+  const updated = [];
+  const registry = {
+    update: (d) => updated.push(d.deviceId),
+    remove: () => {},
+  };
+  const svc = new DeviceProvisioningService({
+    deviceModel,
+    mqtt,
+    registry,
+  });
+  return { svc, deviceModel, updated };
+}
+
+function provision(svc, overrides = {}) {
+  return svc.provision({
+    ownerId: 'owner1',
+    deviceId: MAC,
+    name: 'Garden Pump',
+    channels: 4,
+    ...overrides,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+
+test('valid MAC + recently seen => device created with canonical MAC identity', async () => {
+  const { svc, deviceModel, updated } = service({ recent: true });
+  const device = await provision(svc);
+  assert.strictEqual(device.deviceId, CID);
+  assert.strictEqual(device.hardwareId, CID);
+  assert.strictEqual(device.ownerId, 'owner1');
+  assert.strictEqual(deviceModel.rows.length, 1);
+  assert.deepStrictEqual(updated, [CID]);
+});
+
+test('new device uses the MAC as deviceId (no backend-issued id, no session)', async () => {
+  const { svc, deviceModel } = service({ recent: true });
+  const device = await provision(svc, { deviceId: '34-98-7a-c3-03-04' });
+  assert.strictEqual(device.deviceId, CID);
+  assert.strictEqual(deviceModel.rows[0].deviceId, CID);
+});
+
+test('invalid MAC => INVALID_MAC, nothing created', async () => {
+  const { svc, deviceModel } = service({ recent: true });
+  for (const bad of ['', 'not-a-mac', '34987AC3030', '34987AC30304X', null, 'stees_0123456789abcdef']) {
+    await assert.rejects(
+      () => provision(svc, { deviceId: bad }),
+      (err) => err.code === 'INVALID_MAC',
+    );
+  }
+  assert.strictEqual(deviceModel.rows.length, 0);
+});
+
+test('invalid channels => BAD_CHANNELS, nothing created', async () => {
+  const { svc, deviceModel } = service({ recent: true });
+  for (const bad of [0, -1, 17, 1.5, 'x']) {
+    await assert.rejects(
+      () => provision(svc, { channels: bad }),
+      (err) => err.code === 'BAD_CHANNELS',
+    );
+  }
+  assert.strictEqual(deviceModel.rows.length, 0);
+});
+
+test('invalid name => BAD_NAME, nothing created', async () => {
+  const { svc, deviceModel } = service({ recent: true });
+  for (const bad of ['', '   ', null]) {
+    await assert.rejects(
+      () => provision(svc, { name: bad }),
+      (err) => err.code === 'BAD_NAME',
+    );
+  }
+  assert.strictEqual(deviceModel.rows.length, 0);
+});
+
+test('device not recently seen => DEVICE_NOT_SEEN, nothing created', async () => {
+  const { svc, deviceModel } = service({ recent: false });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_NOT_SEEN',
+  );
+  assert.strictEqual(deviceModel.rows.length, 0, 'no device may be created');
+});
+
+test('same-user duplicate => DEVICE_ALREADY_EXISTS (no duplicate created)', async () => {
+  const { svc, deviceModel } = service({
+    recent: true,
+    deviceRows: [{ _id: 'd1', deviceId: CID, ownerId: 'owner1', hardwareId: CID }],
+  });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_ALREADY_EXISTS',
+  );
+  assert.strictEqual(deviceModel.rows.length, 1, 'no duplicate Device document');
+});
+
+test('other-user duplicate => generic DEVICE_ALREADY_REGISTERED', async () => {
+  const { svc } = service({
+    recent: true,
+    deviceRows: [{ _id: 'd1', deviceId: CID, ownerId: 'owner2', hardwareId: CID }],
+  });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_ALREADY_REGISTERED',
+  );
+});
+
+test('legacy stees_ device owned by another user with this MAC is deduped generically', async () => {
+  const { svc } = service({
+    recent: true,
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: 'owner2', hardwareId: CID },
+    ],
+  });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_ALREADY_REGISTERED',
+  );
+});
+
+test('legacy stees_ device owned by the SAME user => DEVICE_ALREADY_EXISTS', async () => {
+  const { svc } = service({
+    recent: true,
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: 'owner1', hardwareId: CID },
+    ],
+  });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_ALREADY_EXISTS',
+  );
+});
+
+test('legacy unowned record is reclaimed (renamed to canonical MAC, no duplicate)', async () => {
+  const { svc, deviceModel } = service({
+    recent: true,
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: null, hardwareId: CID },
+    ],
+  });
+  const device = await provision(svc);
+  assert.strictEqual(device.deviceId, CID);
+  assert.strictEqual(deviceModel.rows.length, 1, 'one doc for the MAC, never two');
+});
+
+test('concurrent registrations for same MAC => exactly one device, loser DEVICE_ALREADY_REGISTERED', async () => {
+  // findOne returns nothing (simulated race); create() hits the unique index.
+  const { svc, deviceModel } = service({
+    recent: true,
+    deviceOpts: { raceCreateDup: true },
+    deviceRows: [{ _id: 'd1', deviceId: CID, ownerId: 'owner2', hardwareId: CID }],
+  });
+  await assert.rejects(
+    () => provision(svc),
+    (err) => err.code === 'DEVICE_ALREADY_REGISTERED',
+  );
+  assert.strictEqual(deviceModel.rows.length, 1, 'exactly one Device for that MAC');
+});
+
+test('authMiddleware: missing/bad/expired token => 401, valid token sets userId', async () => {
+  const missing = { headers: {} };
+  const res401 = { statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  authMiddleware(missing, res401, () => {});
+  assert.strictEqual(res401.statusCode, 401);
+
+  const bad = { headers: { authorization: 'Bearer not-a-jwt' } };
+  const resBad = { statusCode: 0, status(c) { this.statusCode = c; return this; }, json() { return this; } };
+  authMiddleware(bad, resBad, () => {});
+  assert.strictEqual(resBad.statusCode, 401);
+
+  const token = jwt.sign({ userId: 'owner1' }, JWT_SECRET, { expiresIn: '1h' });
+  const ok = { headers: { authorization: `Bearer ${token}` } };
+  let called = false;
+  authMiddleware(ok, { status() { return this; }, json() { return this; } }, () => { called = true; });
+  assert.strictEqual(ok.userId, 'owner1');
+  assert.strictEqual(called, true);
+});

@@ -180,50 +180,30 @@ class ApiService {
     return _checkList(res, 'Failed to fetch devices');
   }
 
-  // Provisioning session: the backend issues a one-time claim token. The device
-  // identity (== the MQTT topic) is NOT issued here - the physical MAC is only
-  // readable on the offline SoftAP, so the wizard derives the canonical deviceId
-  // locally and anchors it to this session later via [attachHardwareId]. The
-  // claim token is returned here exactly once.
-  Future<Map<String, dynamic>> createProvisioningSession() async {
-    final res = await post('/api/provisioning/sessions', <String, dynamic>{});
-    return _checkObject(res, const [201], 'Could not start provisioning session');
-  }
-
-  // Scoped status of one provisioning session (never exposes the claim token).
-  Future<Map<String, dynamic>> getProvisioningSession(String sessionId) async {
-    final res = await get('/api/provisioning/sessions/$sessionId');
-    return _checkObject(res, const [200], 'Could not fetch provisioning status');
-  }
-
-  // Anchors the device identity to the session. This is the FIRST online call
-  // after the device restart: the canonical MAC read during the SoftAP step IS
-  // the identity. The backend validates/normalizes it, rejects duplicates
-  // (DEVICE_ALREADY_EXISTS / DEVICE_ALREADY_REGISTERED) and returns the session
-  // with the confirmed deviceId. Represents the established MAC equals the
-  // device ID model.
-  Future<Map<String, dynamic>> attachHardwareId(
-      String sessionId, String hardwareId) async {
-    final res = await post('/api/provisioning/sessions/$sessionId/hardware', {
-      'hardwareId': hardwareId,
-    });
-    return _checkObject(res, const [200], 'Could not store hardware id');
-  }
-
-  Future<Map<String, dynamic>> claimDeviceWithSession({
-    required String sessionId,
-    required String claimToken,
+  // Provisioning: registers a physical device directly from its canonical MAC
+  // (== deviceId == MQTT topic). There is no session or claim token - the MAC
+  // was read from the device during the offline AP phase, and the backend only
+  // accepts it once the device has actually been observed on MQTT (possession
+  // gate) and the MAC is not already registered. Duplicates are rejected with
+  // a machine-readable code (DEVICE_ALREADY_EXISTS / DEVICE_ALREADY_REGISTERED).
+  Future<Map<String, dynamic>> provisionDevice({
+    required String deviceId,
     required String name,
     required int channels,
-    String? hardwareId,
   }) async {
-    final res = await post('/api/provisioning/sessions/$sessionId/claim', {
-      'claimToken': claimToken,
+    final res = await post('/api/devices/provision', {
+      'deviceId': deviceId,
       'name': name,
       'channels': channels,
-      'hardwareId': ?hardwareId,
     });
-    return _checkObject(res, const [200], 'Claim failed');
+    return _checkObject(res, const [201], 'Could not register the device');
+  }
+
+  // Whether a device has been observed on the MQTT broker recently. Used by the
+  // wizard's WAIT phase to know when the physical device has joined the network.
+  Future<Map<String, dynamic>> getDeviceSeen(String deviceId) async {
+    final res = await get('/api/devices/seen', query: {'deviceId': deviceId});
+    return _checkObject(res, const [200], 'Could not check device status');
   }
 
   Future<Map<String, dynamic>> getStatus(String deviceId) async {

@@ -242,8 +242,8 @@ class MqttGateway {
   }
 
   // True if deviceId has announced itself on the broker within the recent
-  // window. This is the possession gate for session-based claiming and is
-  // always checked against the caller-known deviceId, never broadcast.
+  // window. This is the possession gate for device provisioning and is always
+  // checked against the caller-known deviceId, never broadcast.
   hasRecent(deviceId) {
     const ts = this.recentDevices.get(deviceId);
     return !!ts && Date.now() - ts < RECENT_WINDOW_MS;
@@ -289,10 +289,11 @@ class MqttGateway {
     this._logSeen('device', deviceId);
     // Fast-path wake-up: when a device becomes visible on the broker for the
     // first time (or re-appears after leaving the window) emit a scoped event.
-    // The room is keyed by the secret per-session deviceId; only the session
-    // owner is allowed to join it (validated on connect), so this never leaks
-    // unclaimed devices across users. It is a wake-up only - the app polling
-    // the session status endpoint remains the source of truth / fallback.
+    // The room is keyed by the canonical MAC the client is provisioning; only
+    // authenticated clients who verified they may watch that MAC are allowed to
+    // join it (validated on connect), so this never leaks unowned or foreign
+    // devices across users. It is a wake-up only - the app polling the /seen
+    // endpoint remains the source of truth / fallback.
     const firstSeenInWindow = !this.hasRecent(deviceId);
     this.recentDevices.set(deviceId, Date.now());
     if (firstSeenInWindow && this.io) {

@@ -7,8 +7,20 @@ const deviceRegistry = require('../services/deviceRegistry');
 const runtimeState = require('../services/runtimeState');
 const ruleEngine = require('../services/ruleEngine');
 const scheduleEngine = require('../services/scheduleEngine');
+const deviceProvisioningService = require('../services/deviceProvisioningService');
+const mqttGateway = require('../services/mqttGateway');
+const { normalizeMac } = require('../services/macIdentity');
 
 const router = express.Router();
+
+const PROVISION_ERROR_STATUS = {
+  INVALID_MAC: 400,
+  BAD_CHANNELS: 400,
+  BAD_NAME: 400,
+  DEVICE_ALREADY_EXISTS: 409,
+  DEVICE_ALREADY_REGISTERED: 409,
+  DEVICE_NOT_SEEN: 409,
+};
 
 router.get('/', async (req, res) => {
   try {
@@ -20,11 +32,49 @@ router.get('/', async (req, res) => {
   }
 });
 
-// NOTE: there is intentionally NO possession-free /claim here anymore. Claiming
-// now requires a provisioning session + one-time token + device-seen proof via
-// POST /api/provisioning/sessions/:sessionId/claim. This closes the previous
-// vulnerability where any authenticated user could claim any deviceId observed
-// on the public MQTT snapshot.
+// Provision a physical device directly from its canonical MAC. There is no
+// provisioning session or claim token: the MAC IS the deviceId and the MQTT
+// topic the firmware was configured with. The device must have actually been
+// observed on MQTT recently (possession gate) and must not already belong to
+// any account. The unique Device.deviceId index is the final serialization
+// point, so concurrent registrations of one MAC resolve to one Device.
+router.post('/provision', async (req, res) => {
+  try {
+    const { deviceId, name, channels } = req.body || {};
+    const device = await deviceProvisioningService.provision({
+      ownerId: req.userId,
+      deviceId,
+      name,
+      channels,
+    });
+    res.status(201).json(device.toJSON());
+  } catch (err) {
+    const status = PROVISION_ERROR_STATUS[err.code];
+    if (status) {
+      return res.status(status).json({ error: err.message, code: err.code });
+    }
+    console.error('Provision device error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Whether a device has been observed on the MQTT broker within the recent
+// window. Used by the wizard's WAIT phase to know when the physical device has
+// joined the configured network and is eligible for registration. Only answers
+// about the deviceId the authenticated caller provides - it never enumerates
+// devices and never reveals anything about other users.
+router.get('/seen', async (req, res) => {
+  try {
+    const mac = normalizeMac(String(req.query.deviceId || ''));
+    if (!mac) {
+      return res.status(400).json({ error: 'Invalid deviceId', code: 'INVALID_MAC' });
+    }
+    res.json({ seen: mqttGateway.hasRecent(mac) });
+  } catch (err) {
+    console.error('Device seen check error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 router.post('/unclaim', async (req, res) => {
   try {
