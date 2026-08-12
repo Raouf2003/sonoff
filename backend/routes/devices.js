@@ -76,6 +76,36 @@ router.get('/seen', async (req, res) => {
   }
 });
 
+// Best-effort read-only pre-flight duplicate check for the provisioning wizard.
+// Given a canonical MAC, reports whether it is already registered to the current
+// user ('mine'), to another account ('others', ownership never disclosed), or
+// not registered at all ('not_found'). This is ONLY a UX optimization - it is
+// NON-authoritative. The authoritative duplicate/ownership/possession check
+// remains POST /api/devices/provision, which the wizard always runs after the
+// device restarts and establishes MQTT presence.
+router.get('/check', async (req, res) => {
+  try {
+    const mac = normalizeMac(String(req.query.deviceId || ''));
+    if (!mac) {
+      return res.status(400).json({ error: 'Invalid deviceId', code: 'INVALID_MAC' });
+    }
+    // Legacy stees_* records keep deviceId=stees_*, so match on hardwareId too.
+    const device =
+      (await Device.findOne({ deviceId: mac })) ||
+      (await Device.findOne({ hardwareId: mac }));
+    if (!device || device.ownerId == null) {
+      return res.json({ status: 'not_found' });
+    }
+    if (device.ownerId.toString() === req.userId) {
+      return res.json({ status: 'mine' });
+    }
+    return res.json({ status: 'others' });
+  } catch (err) {
+    console.error('Device preflight check error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/unclaim', async (req, res) => {
   try {
     const { deviceId } = req.body;

@@ -19,6 +19,14 @@
 			</dict>
 		</dict>
 	</dict>
+	<key>NSAllowsLocalNetworking</key>
+	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_tasmota._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>STEES finds your irrigation controllers on your local network so relays keep working when the cloud is unreachable.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

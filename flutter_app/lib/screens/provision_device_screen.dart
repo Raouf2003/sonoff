@@ -109,6 +109,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   static const Duration _wifiTestPollInterval = Duration(seconds: 1);
   static const Duration _wifiTestTotalDeadline = Duration(seconds: 20);
 
+  // Short, best-effort bound for the pre-flight backend duplicate check. The
+  // phone may have no internet while on the Tasmota AP, so this must fail fast
+  // and silently - it must never block provisioning.
+  static const Duration _preflightTimeout = Duration(seconds: 4);
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -156,6 +161,15 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // identity-unreadable get a Close-only recovery; everything else keeps the
   // existing recovery buttons.
   _TerminalKind _terminalKind = _TerminalKind.generic;
+  // Explicit terminal-state guard. Once a closed-loop terminal failure
+  // (duplicate identity, other-account registration, unreadable identity) is
+  // shown, this becomes true and FREEZES the state machine: all polling timers,
+  // the stage-advance timer, lifecycle-resume re-polling and Socket.IO wake-ups
+  // are ignored until the user explicitly acts (Remove Device / Close). A plain
+  // widget rebuild can never clear it. It is only reset when the user's chosen
+  // action (e.g. a successful Remove Device) re-opens provisioning, or when the
+  // wizard exits.
+  bool _terminal = false;
   // Whether the terminal failure was a wait-deadline (device never seen) - the
   // only case where "Wait a bit longer" makes sense. Provision conflicts and
   // other terminal errors get a Close-only recovery instead of a pointless
@@ -206,11 +220,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         ApiException(code, statusCode: 409, code: code),
       );
       _terminalKind = kind;
+      // Seed the terminal freeze so the seeded duplicate state is stable (as it
+      // would be after a real terminal result).
+      _terminal = true;
       _error = code == 'DEVICE_ALREADY_EXISTS'
           ? 'This device is already in your account. If you want to add it '
               'again, remove the existing device from your account first.'
-          : 'This device is already registered and cannot be added to this '
-              'account.';
+          : 'This device is already registered to another account and cannot '
+              'be added to this one.';
     }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
@@ -250,6 +267,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
       case _Step.waiting:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped: provisioning already completed');
+        if (_isTerminal) {
+          // A closed-loop terminal state (duplicate etc.) must survive lifecycle
+          // resume: never restart polling or re-trigger provisioning.
+          debugPrint('[PROVISION] lifecycle resumed in terminal state - polling skipped');
+          return;
+        }
         _waitTimer?.cancel();
         _pollDeviceSeen();
     }
@@ -487,6 +510,25 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       if (canonical != null) {
         _issuedDeviceId = canonical;
         debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
+        // BEST-EFFORT pre-flight duplicate check. The MAC is already known, so
+        // query the backend BEFORE leaving for Configure: if it is already
+        // registered to this account (or another) we freeze into the right
+        // terminal state immediately instead of making the user continue. This
+        // is ONLY a UX optimization - the phone may have no internet on the
+        // Tasmota AP, so a short timeout / unreachable backend is silently
+        // ignored and the normal flow continues. The authoritative duplicate /
+        // ownership enforcement stays in POST /api/devices/provision.
+        final duplicateKind = await _preflightDuplicateCheck(canonical);
+        if (!mounted || _step != _Step.connect) return;
+        if (duplicateKind != null) {
+          final msg = duplicateKind == _TerminalKind.alreadyAdded
+              ? 'This device is already in your account. If you want to add it '
+                  'again, remove the existing device from your account first.'
+              : 'This device is already registered to another account and '
+                  'cannot be added to this one.';
+          _enterTerminalState(duplicateKind, msg);
+          return;
+        }
       } else {
         debugPrint('[PROVISION] MAC not readable yet (retried on Apply)');
       }
@@ -1045,7 +1087,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _state = ProvisionState.waitingForWifi;
     _waitStageTimer?.cancel();
     _waitStageTimer = Timer(_stageAdvance, () {
-      if (!mounted || _step != _Step.waiting) return;
+      if (!mounted || _step != _Step.waiting || _isTerminal) return;
       setState(() {
         _state = ProvisionState.waitingForMqtt;
       });
@@ -1062,10 +1104,10 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // watch that MAC (server-side) may join, so it never leaks foreign devices.
   Future<void> _startDeviceWatch() async {
     final deviceId = _issuedDeviceId;
-    if (deviceId.isEmpty) return;
+    if (deviceId.isEmpty || _isTerminal) return;
     _closeProvisionSocket();
     final token = await AuthService().getToken();
-    if (!mounted || token == null) {
+    if (!mounted || token == null || _isTerminal) {
       debugPrint('[PROVISION] no token, skipping socket fast path');
       return;
     }
@@ -1091,7 +1133,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       });
     });
     socket.on('device_seen', (data) {
-      if (!mounted) return;
+      if (!mounted || _isTerminal) return;
       debugPrint('[PROVISION] device_seen fast-path received: $data');
       _onDeviceDetected();
     });
@@ -1106,7 +1148,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
 
   Future<void> _pollDeviceSeen() async {
     _waitTimer?.cancel();
-    if (_step != _Step.waiting) return;
+    if (_step != _Step.waiting || _isTerminal) return;
     // Bound the wait: the device must appear within the window or it is not
     // coming (wrong home Wi-Fi, wrong password, broker unreachable). Surface a
     // precise failure instead of polling forever.
@@ -1133,11 +1175,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       debugPrint('[PROVISION] device seen poll failed: $e');
       seen = false;
     }
-    if (!mounted || _step != _Step.waiting) return;
+    if (!mounted || _step != _Step.waiting || _isTerminal) return;
     if (seen) {
       await _onDeviceDetected();
       return;
     }
+    // Re-arm only if the terminal freeze did not happen while the poll was in
+    // flight (e.g. a lifecycle resume racing with a duplicate result).
+    if (_isTerminal) return;
     _waitTimer = Timer(const Duration(seconds: 3), () => _pollDeviceSeen());
   }
 
@@ -1166,8 +1211,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   }
 
   Future<void> _onDeviceDetected() async {
-    if (!mounted || _step != _Step.waiting) return;
+    if (!mounted || _step != _Step.waiting || _isTerminal) return;
     if (_claimed) return;
+    // A terminal freeze must never be overwritten by an in-flight device-seen
+    // callback that was racing with a duplicate result.
+    if (_isTerminal) return;
     _claimed = true;
     _waitTimer?.cancel();
     _closeProvisionSocket();
@@ -1187,6 +1235,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       _setError('Device identity was lost. Please try again.');
       return;
     }
+    // Never start an automatic provisioning attempt (or move back to a loading
+    // state) while a closed-loop terminal state is active.
+    if (_isTerminal) return;
     final rawName = _deviceNameCtl.text.trim();
     final name = rawName.isEmpty ? 'STEES Smart Device' : rawName;
     if (!mounted) return;
@@ -1213,20 +1264,17 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           'code=${e.code} msg=${e.message}');
       if (_isTerminalProvisionError(e)) {
         // Graded, phase-appropriate recovery. Terminal errors are NOT retried
-        // (they would re-fail forever). The wizard shows a recovery screen
-        // instead of looping.
-        _allowWaitRetry = false;
-        _terminalKind = _terminalKindFor(e);
+        // (they would re-fail forever): the wizard freezes on a terminal screen
+        // and every polling/socket/lifecycle callback is torn down so the
+        // duplicate state can never flicker back to a loading state.
         traceLog('CLAIM', 'TERMINAL total=${_trace.elapsedMs}ms');
-        setState(() {
-          _state = ProvisionState.failed;
-          _error = _provisionFailureMessage(e);
-        });
+        _enterTerminalState(_terminalKindFor(e), _provisionFailureMessage(e));
         return;
       }
       // Recoverable (device not on MQTT yet, transient 5xx/429/network):
       // keep waiting so a slow MQTT connect still completes - never leave
       // the device silently orphaned.
+      if (_isTerminal) return;
       _setError(_provisionRecoveryMessage(e));
       setState(() {
         _state = ProvisionState.waitingForMqtt;
@@ -1237,11 +1285,38 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       _claimed = false;
       debugPrint('[PROVISION] REGISTER_FAILED network: $e');
       // Network / timeout: recoverable. Fall back to polling for the device.
+      if (_isTerminal) return;
       _setError('Could not reach STEES. Waiting and retrying…');
       setState(() {
         _state = ProvisionState.waitingForMqtt;
       });
       _waitTimer = Timer(const Duration(seconds: 3), () => _pollDeviceSeen());
+    }
+  }
+
+  // Best-effort pre-flight duplicate check, run once the physical MAC is known
+  // (offline AP phase) BEFORE leaving for Configure. Returns a terminal kind to
+  // freeze on, or null to continue provisioning normally. Purely a UX
+  // optimization - NOT authoritative (see PART 4): the backend still enforces
+  // the real duplicate/ownership check in POST /api/devices/provision. A short
+  // timeout and silent failure mean an unreachable backend (no internet on the
+  // Tasmota AP) never blocks or errors the flow.
+  Future<_TerminalKind?> _preflightDuplicateCheck(String mac) async {
+    DeviceDuplicateStatus? status;
+    try {
+      status = await _api.preflightDeviceCheck(mac).timeout(_preflightTimeout);
+    } catch (_) {
+      // Unreachable backend, timeout or any failure: silently continue with the
+      // normal provisioning flow. Never show a scary network error here.
+      status = null;
+    }
+    switch (decidePreflight(status)) {
+      case PreflightDecision.stopMine:
+        return _TerminalKind.alreadyAdded;
+      case PreflightDecision.stopOthers:
+        return _TerminalKind.alreadyRegistered;
+      case PreflightDecision.continueProvisioning:
+        return null;
     }
   }
 
@@ -1285,6 +1360,58 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
+  // True while the wizard is frozen in a closed-loop terminal failure. Every
+  // asynchronous mutator (polling timers, stage-advance timer, lifecycle resume,
+  // Socket.IO wake-ups, delayed futures, retry callbacks) MUST early-return when
+  // this is true so the duplicate / registered UI can never flicker back to a
+  // loading or "waitingForMqtt" state.
+  bool get _isTerminal => _terminal;
+
+  // Freezes the state machine into a closed-loop terminal failure. Cancels and
+  // disposes every outstanding asynchronous resource (device-seen polling, the
+  // stage-label timer, the AP probe timer and the Socket.IO watch) so no later
+  // callback can overwrite the terminal state. The wizard only leaves this
+  // state when the user explicitly acts (Remove Device / Close), or when a
+  // successful removal explicitly re-opens provisioning.
+  void _enterTerminalState(_TerminalKind kind, String message) {
+    _allowWaitRetry = false;
+    _recoveryMode = false;
+    _reachTimer?.cancel();
+    _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
+    _closeProvisionSocket();
+    _terminal = true;
+    _claimed = false;
+    _terminalKind = kind;
+    // The graded duplicate/registered terminal card is rendered on the WAIT
+    // step, so a preflight duplicate found during the offline Connect phase also
+    // lands there (and never advances to Configure).
+    _step = _Step.waiting;
+    if (mounted) {
+      setState(() {
+        _state = ProvisionState.failed;
+        _error = message;
+      });
+    }
+    debugPrint('[PROVISION] TERMINAL_STATE kind=${kind.name}');
+  }
+
+  // Re-opens provisioning after a successful duplicate removal. Clears the
+  // terminal freeze and resets ONLY the state needed to retry - the physical
+  // deviceId is preserved and the physical hardware is untouched.
+  void _leaveTerminalForRetry() {
+    _terminal = false;
+    _terminalKind = _TerminalKind.generic;
+    _claimed = false;
+    _allowWaitRetry = false;
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _state = ProvisionState.waitingForMqtt;
+      });
+    }
+  }
+
   // User-facing, non-technical wording for a TERMINAL provision failure.
   String _provisionFailureMessage(ApiException e) {
     switch (e.code) {
@@ -1292,8 +1419,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         return 'This device is already in your account. If you want to add it '
             'again, remove the existing device from your account first.';
       case 'DEVICE_ALREADY_REGISTERED':
-        return 'This device is already registered and cannot be added to this '
-            'account.';
+        return 'This device is already registered to another account and cannot '
+            'be added to this one.';
       case 'INVALID_MAC':
         return "The device didn't report its identity correctly. Close this "
             'window and try again.';
@@ -1397,13 +1524,16 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
     if (outcome == DeleteOutcome.cleared) {
       if (!mounted) return;
-      // Removed (200) or already gone (404): clear the duplicate state and let
-      // the same physical device be provisioned again in the same wizard.
-      _resetDuplicateState();
+      // Removed (200) or already gone (404): clear the duplicate freeze and
+      // re-enter the wait loop for the same physical device (still untouched on
+      // the broker). It registers again only when its MQTT presence is observed
+      // again; otherwise the wizard shows the normal wait/retry state.
       _trace.debugTrace(ProvisionPhase.claim, label: 'DEVICE_REMOVED');
-      debugPrint('[PROVISION] DEVICE_REMOVED deviceId=$deviceId - retrying');
+      debugPrint('[PROVISION] DEVICE_REMOVED deviceId=$deviceId - re-waiting');
       _setSuccess('Device removed successfully.');
-      await _registerDevice();
+      _leaveTerminalForRetry();
+      if (!mounted) return;
+      _waitForDeviceOnline();
     } else {
       // Network / timeout / server / unexpected failure: keep the duplicate
       // state and offer a retryable error. Never claim deletion succeeded.
@@ -1413,19 +1543,6 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       }
     }
     if (mounted) setState(() => _removingDevice = false);
-  }
-
-  // Clears exactly the terminal duplicate state so the wizard can retry.
-  void _resetDuplicateState() {
-    _terminalKind = _TerminalKind.generic;
-    _claimed = false;
-    _allowWaitRetry = false;
-    if (mounted) {
-      setState(() {
-        _error = null;
-        _state = ProvisionState.waitingForMqtt;
-      });
-    }
   }
 
   void _setSuccess(String msg) {

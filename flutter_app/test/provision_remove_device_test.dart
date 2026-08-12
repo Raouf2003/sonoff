@@ -8,13 +8,22 @@ import 'package:smart_home_app/services/provisioning_service.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
 
 /// A controllable [ApiService] for exercising the provisioning wizard's
-/// "Remove Device" flow without touching the real backend. Overrides only the
-/// calls the duplicate-removal path uses.
+/// duplicate / "Remove Device" / pre-flight flows without the real backend.
 class _FakeApi extends ApiService {
   int deleteCalls = 0;
   Object? deleteError;
   Completer<void>? deleteGate;
+
   bool provisionSucceeds = false;
+  int provisionCalls = 0;
+
+  // Post-delete re-wait: whether the device is observed on MQTT right away.
+  bool deviceSeen = true;
+  int deviceSeenCalls = 0;
+
+  DeviceDuplicateStatus preflightStatus = DeviceDuplicateStatus.notFound;
+  Object? preflightError;
+  int preflightCalls = 0;
 
   @override
   Future<void> deleteDevice(String deviceId) async {
@@ -31,6 +40,7 @@ class _FakeApi extends ApiService {
     required String name,
     required int channels,
   }) async {
+    provisionCalls++;
     if (!provisionSucceeds) {
       throw const ApiException(
         'This device is already in your account.',
@@ -39,6 +49,20 @@ class _FakeApi extends ApiService {
       );
     }
     return <String, dynamic>{'ok': true};
+  }
+
+  @override
+  Future<Map<String, dynamic>> getDeviceSeen(String deviceId) async {
+    deviceSeenCalls++;
+    return {'seen': deviceSeen};
+  }
+
+  @override
+  Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
+    preflightCalls++;
+    final err = preflightError;
+    if (err != null) throw err;
+    return preflightStatus;
   }
 }
 
@@ -86,10 +110,11 @@ Future<void> tapDialogRemoveDevice(WidgetTester tester) async {
 
 void main() {
   group('Remove Device visibility (terminal duplicates)', () {
-    testWidgets('DEVICE_ALREADY_EXISTS shows the Remove Device button',
+    testWidgets('DEVICE_ALREADY_EXISTS enters terminal state with button',
         (tester) async {
       await _pumpWizard(tester, _FakeApi(), code: 'DEVICE_ALREADY_EXISTS');
 
+      expect(find.textContaining('already in your account'), findsOneWidget);
       expect(find.text('Remove Device'), findsOneWidget);
     });
 
@@ -99,6 +124,71 @@ void main() {
 
       expect(find.text('Remove Device'), findsNothing);
       expect(find.text('Remove device?'), findsNothing);
+      expect(find.textContaining('another account'), findsWidgets);
+    });
+
+    testWidgets('duplicate terminal state survives repeated rebuilds',
+        (tester) async {
+      final api = _FakeApi();
+      await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
+
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+      // Never flickers back to a loading / "Connecting device to MQTT" state.
+      expect(find.textContaining('Connecting device to MQTT'), findsNothing);
+      expect(find.textContaining('already in your account'), findsOneWidget);
+      expect(find.text('Remove Device'), findsOneWidget);
+    });
+  });
+
+  group('terminal freeze blocks async mutators', () {
+    testWidgets('no polling and no provisioning while duplicate is terminal',
+        (tester) async {
+      final api = _FakeApi();
+      await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
+
+      // Advance well past the stage-advance (25s) and poll (3s) intervals. If
+      // any polling/retry timer or delayed future were active it would either
+      // call the backend or flicker the state.
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+
+      expect(api.deviceSeenCalls, 0,
+          reason: 'polling must stop once the duplicate state is terminal');
+      expect(api.provisionCalls, 0,
+          reason: 'no automatic provisioning retry in a terminal state');
+      expect(find.text('Remove Device'), findsOneWidget);
+    });
+
+    testWidgets('lifecycle resume cannot restart polling in terminal state',
+        (tester) async {
+      final api = _FakeApi();
+      await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
+      expect(api.deviceSeenCalls, 0);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+
+      expect(api.deviceSeenCalls, 0,
+          reason: 'resume must not re-poll once the state is terminal');
+      expect(find.text('Remove Device'), findsOneWidget);
+    });
+
+    testWidgets('polling / retry timers cannot clear the terminal state',
+        (tester) async {
+      final api = _FakeApi()
+        ..deviceSeen = true
+        ..provisionSucceeds = false;
+      await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
+
+      // Simulate the passage of all wait-stage and poll durations twice over.
+      await tester.pump(const Duration(seconds: 60));
+
+      // The duplicate UI must remain, never a spinner / waiting state.
+      expect(find.text('Remove Device'), findsOneWidget);
+      expect(find.textContaining('Connecting device to MQTT'), findsNothing);
+      expect(api.provisionCalls, 0);
     });
   });
 
@@ -131,6 +221,8 @@ void main() {
 
       expect(api.deleteCalls, 0);
       expect(find.text('Remove device?'), findsNothing);
+      // State preserved.
+      expect(find.text('Remove Device'), findsOneWidget);
     });
 
     testWidgets('confirmation calls DELETE exactly once', (tester) async {
@@ -141,8 +233,6 @@ void main() {
       await tester.pumpAndSettle();
       await tapDialogRemoveDevice(tester);
 
-      // The provision re-request fails with the duplicate again, so the wizard
-      // returns to the failed state - but exactly one DELETE must have fired.
       expect(api.deleteCalls, 1);
     });
 
@@ -181,8 +271,7 @@ void main() {
       await tapDialogRemoveDevice(tester);
 
       expect(api.deleteCalls, 1);
-      // Re-registration succeeded, so the wizard closed (popped) - the duplicate
-      // state is gone.
+      // Deletion + re-registration succeeded, so the wizard closes (popped).
       expect(find.text('Remove Device'), findsNothing);
     });
 
@@ -201,7 +290,6 @@ void main() {
       await tapDialogRemoveDevice(tester);
 
       expect(api.deleteCalls, 1);
-      // Treated as already removed: retry proceeds and the wizard closes.
       expect(find.text('Remove Device'), findsNothing);
     });
 
@@ -219,7 +307,7 @@ void main() {
       await tapDialogRemoveDevice(tester);
 
       expect(api.deleteCalls, 1);
-      // State is preserved: the Remove Device button is still present.
+      // State preserved: the Remove Device button is still present.
       expect(find.text('Remove Device'), findsOneWidget);
       expect(
         find.textContaining('Could not remove the device'),
@@ -245,6 +333,25 @@ void main() {
       expect(classifyDeleteOutcome(statusCode: 401), DeleteOutcome.kept);
       expect(classifyDeleteOutcome(statusCode: 500), DeleteOutcome.kept);
       expect(classifyDeleteOutcome(), DeleteOutcome.kept);
+    });
+
+    test('decidePreflight: same-account stops and offers removal', () {
+      expect(decidePreflight(DeviceDuplicateStatus.mine),
+          PreflightDecision.stopMine);
+    });
+
+    test('decidePreflight: other-account stops without removal', () {
+      expect(decidePreflight(DeviceDuplicateStatus.others),
+          PreflightDecision.stopOthers);
+    });
+
+    test('decidePreflight: not found continues provisioning', () {
+      expect(decidePreflight(DeviceDuplicateStatus.notFound),
+          PreflightDecision.continueProvisioning);
+    });
+
+    test('decidePreflight: unreachable/timeout never blocks provisioning', () {
+      expect(decidePreflight(null), PreflightDecision.continueProvisioning);
     });
   });
 }

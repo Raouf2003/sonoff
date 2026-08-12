@@ -25,6 +25,47 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// Result of the provisioning pre-flight duplicate check: whether a given
+/// canonical MAC is already registered to the current user, to another user, or
+/// not registered at all. Read-only and non-authoritative - the real duplicate /
+/// ownership enforcement stays in POST /api/devices/provision.
+enum DeviceDuplicateStatus {
+  /// The MAC is already a device in the current user's account.
+  mine,
+
+  /// The MAC is already registered to another account (ownership never disclosed).
+  others,
+
+  /// The MAC is not registered to any account yet.
+  notFound,
+}
+
+/// Decision the provisioning wizard takes from a pre-flight duplicate-check
+/// result. A `null` status (unreachable backend / timeout) is treated exactly
+/// like notFound - continue provisioning, never block.
+enum PreflightDecision {
+  /// Already in the current user's account: stop and offer Remove Device.
+  stopMine,
+
+  /// Registered to another account: stop, no Remove Device.
+  stopOthers,
+
+  /// Not registered (or the backend was unreachable): continue normally.
+  continueProvisioning,
+}
+
+PreflightDecision decidePreflight(DeviceDuplicateStatus? status) {
+  switch (status) {
+    case DeviceDuplicateStatus.mine:
+      return PreflightDecision.stopMine;
+    case DeviceDuplicateStatus.others:
+      return PreflightDecision.stopOthers;
+    case DeviceDuplicateStatus.notFound:
+    case null:
+      return PreflightDecision.continueProvisioning;
+  }
+}
+
 class ApiService {
   final AuthService _auth = AuthService();
 
@@ -204,6 +245,24 @@ class ApiService {
   Future<Map<String, dynamic>> getDeviceSeen(String deviceId) async {
     final res = await get('/api/devices/seen', query: {'deviceId': deviceId});
     return _checkObject(res, const [200], 'Could not check device status');
+  }
+
+  // Best-effort pre-flight duplicate check used by the provisioning wizard
+  // BEFORE leaving the offline Tasmota AP (where internet may be unavailable).
+  // Returns whether the canonical MAC is already registered to this user, to
+  // another user, or not at all. Callers treat any failure as notFound and
+  // continue - this is only a UX optimization and is never authoritative.
+  Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
+    final res = await get('/api/devices/check', query: {'deviceId': deviceId});
+    final body = _checkObject(res, const [200], 'Could not check device');
+    switch (body['status']) {
+      case 'mine':
+        return DeviceDuplicateStatus.mine;
+      case 'others':
+        return DeviceDuplicateStatus.others;
+      default:
+        return DeviceDuplicateStatus.notFound;
+    }
   }
 
   Future<Map<String, dynamic>> getStatus(String deviceId) async {

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- Local Mode talks plain HTTP directly to Tasmota devices on the
+         private LAN, and the device's IP is only known at runtime (DHCP). The
+         cleartext exemption therefore has to cover the base config rather than
+         a fixed domain list; the production backend stays HTTPS-only. -->
+    <base-config cleartextTrafficPermitted="true"/>
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">192.168.4.1</domain>
     </domain-config>

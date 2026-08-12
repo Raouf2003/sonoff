@@ -6,13 +6,34 @@ import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/device_repository_service.dart';
+import '../services/device_transport.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
 
 class DevicesPage extends StatefulWidget {
   final ValueChanged<int> onNavigateToTab;
-  const DevicesPage({super.key, required this.onNavigateToTab});
+  const DevicesPage({super.key, required this.onNavigateToTab})
+      : testApi = null,
+        testRepository = null,
+        testSocketFactory = null;
+
+  /// Test seam: injects a fake cloud API / repository / socket connector so
+  /// widget tests exercise the relay gate without network access.
+  @visibleForTesting
+  const DevicesPage.test({
+    super.key,
+    required this.onNavigateToTab,
+    this.testApi,
+    this.testRepository,
+    this.testSocketFactory,
+  });
+
+  final ApiService? testApi;
+  final DeviceRepositoryService? testRepository;
+  final io.Socket Function(String url, Map<String, dynamic> options)?
+      testSocketFactory;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -20,7 +41,10 @@ class DevicesPage extends StatefulWidget {
 
 class _DevicesPageState extends State<DevicesPage>
     with TickerProviderStateMixin {
-  final _api = ApiService();
+  late final ApiService _api = widget.testApi ?? ApiService();
+  late final DeviceRepositoryService _repository =
+      widget.testRepository ?? DeviceRepositoryService();
+  DeviceTransportSource? _lastTransportSource;
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
   bool _loadError = false;
@@ -43,6 +67,15 @@ class _DevicesPageState extends State<DevicesPage>
   void _setConnected(bool connected) {
     if (!mounted || _connected == connected) return;
     setState(() => _connected = connected);
+  }
+
+  // The socket reflects CLOUD reachability only. When the last successful
+  // operation ran on the LAN, a cloud outage must not flip the card offline —
+  // the device is reachable and controllable locally. Polling re-establishes
+  // truth in every other case.
+  void _socketDown() {
+    if (_lastTransportSource == DeviceTransportSource.local) return;
+    _setConnected(false);
   }
 
   // Stops every ripple so an OFF channel is never left animating.
@@ -178,7 +211,8 @@ class _DevicesPageState extends State<DevicesPage>
 
   Future<void> _connectSocketAsync() async {
     final token = await AuthService().getToken();
-    _socket = io.io('$kProtocol://$kServerIp', <String, dynamic>{
+    final socketFactory = widget.testSocketFactory ?? io.io;
+    _socket = socketFactory('$kProtocol://$kServerIp', <String, dynamic>{
       'transports': ['websocket'],
       'secure': true,
       'autoConnect': false,
@@ -189,8 +223,8 @@ class _DevicesPageState extends State<DevicesPage>
       // Socket is up. Device liveness is driven by device_status/polling, so
       // there is nothing to flip here — no-op on purpose.
     });
-    _socket?.onDisconnect((_) => _setConnected(false));
-    _socket?.onConnectError((_) => _setConnected(false));
+    _socket?.onDisconnect((_) => _socketDown());
+    _socket?.onConnectError((_) => _socketDown());
 
     // Live events are fire-and-forget wake-ups, never the sole source of
     // truth. Casts are guarded so a malformed payload can't crash the handler.
@@ -202,6 +236,8 @@ class _DevicesPageState extends State<DevicesPage>
         final deviceId = map['deviceId'] as String?;
         if (deviceId != null && deviceId != _selectedDeviceId) return;
         final online = map['online'] == true;
+        // A socket event is always cloud truth.
+        _lastTransportSource = DeviceTransportSource.cloud;
         _setConnected(online);
       } catch (_) {
         // Ignore malformed event; polling re-establishes truth.
@@ -231,9 +267,10 @@ class _DevicesPageState extends State<DevicesPage>
   Future<void> _fetchStatus({bool silent = false}) async {
     if (_selectedDeviceId == null) return;
     try {
-      final data = await _api.getStatus(_selectedDeviceId!);
+      final data = await _repository.getStatus(_selectedDeviceId!);
       _pollFailures = 0;
       _setConnected(data['online'] == true);
+      _lastTransportSource = _repository.lastSource;
       setState(() {
         for (int i = 0; i < _deviceChannels; i++) {
           final on = data['POWER${i + 1}'] == 'ON';
@@ -262,7 +299,9 @@ class _DevicesPageState extends State<DevicesPage>
 
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
-    if (!_connected) return;
+    // No `_connected` gate here: the repository owns reachability. This lets a
+    // tap reach the transport layer so the cloud→local fallback can run when
+    // the backend/socket is down; the card visuals still reflect `_connected`.
     final key = '${_selectedDeviceId}_$channel';
     if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
@@ -271,11 +310,14 @@ class _DevicesPageState extends State<DevicesPage>
     _setChannelState(index, targetState);
     setState(() => _channelLoading[index] = true);
     try {
-      await _api.control(
+      await _repository.control(
         _selectedDeviceId!,
         channel,
         targetState ? 'ON' : 'OFF',
       );
+      _lastTransportSource = _repository.lastSource;
+      // A relay command that succeeded means the device IS reachable.
+      _setConnected(true);
     } catch (e) {
       final msg = e.toString().replaceFirst('Exception: ', '');
       if (msg.toLowerCase().contains('not connected') ||
@@ -559,7 +601,7 @@ class _DevicesPageState extends State<DevicesPage>
               ],
             ),
           ),
-          _StatusPill(connected: _connected),
+          _StatusPill(connected: _connected, source: _lastTransportSource),
         ],
       ),
     );
@@ -698,11 +740,15 @@ class _HeroIcon extends StatelessWidget {
 
 class _StatusPill extends StatelessWidget {
   final bool connected;
-  const _StatusPill({required this.connected});
+  final DeviceTransportSource? source;
+  const _StatusPill({required this.connected, this.source});
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    // 'LAN' is the subtle Local Mode indicator: same styling as 'Online' so the
+    // relay UI itself never changes; only the label differentiates transport.
+    final isLocal = connected && source == DeviceTransportSource.local;
     final color = connected ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -734,7 +780,11 @@ class _StatusPill extends StatelessWidget {
           ),
           const SizedBox(width: 5),
           Text(
-            connected ? 'Online' : 'Offline',
+            isLocal
+                ? 'LAN'
+                : connected
+                    ? 'Online'
+                    : 'Offline',
             style: GoogleFonts.sora(
               fontSize: 10,
               fontWeight: FontWeight.w600,
@@ -839,7 +889,10 @@ class _WaterCardBodyState extends State<_WaterCardBody>
     final c = widget.config;
     final isOn = widget.isOn;
     final colors = context.steesColors;
-    final disabled = widget.offline || widget.loading;
+    // Only loading disables taps: offline cards stay tappable so the cloud→local
+    // fallback can run when the socket/backend is down. Offline still renders
+    // grey via widget.offline below.
+    final disabled = widget.loading;
 
     return GestureDetector(
       onTapDown: disabled ? null : (_) => _press.forward(),
@@ -1013,7 +1066,9 @@ class _DropletToggle extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     return GestureDetector(
-      onTap: (loading || disabled) ? null : onTap,
+      // `disabled` here is purely visual (grey when offline). Taps always
+      // reach the repository so the local fallback can run while offline.
+      onTap: loading ? null : onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
