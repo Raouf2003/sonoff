@@ -2,8 +2,9 @@ import 'dart:async';
 import 'package:bonsoir/bonsoir.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// SharedPreferences key prefix for the verified-IP cache.
-const String _kLocalIpPrefix = 'stees.local.ip.';
+/// SharedPreferences key prefix for the verified-IP cache. Public so the
+/// [LocalDeviceCache] can also clear a removed device's IP locator.
+const String kLocalVerifiedIpPrefix = 'stees.local.ip.';
 
 /// Abstraction consumed by [DeviceRepositoryService] so the discovery ladder
 /// (cache + mDNS) can be faked in unit tests without platform channels.
@@ -44,7 +45,7 @@ class LocalDeviceDiscovery implements DeviceLocator {
 
   final Future<SharedPreferences> Function() _prefs;
 
-  String _key(String deviceId) => '$_kLocalIpPrefix$deviceId';
+  String _key(String deviceId) => '$kLocalVerifiedIpPrefix$deviceId';
 
   @override
   Future<String?> cachedAddress(String deviceId) async {

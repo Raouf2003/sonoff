@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'api_service.dart';
 import 'cloud_device_transport.dart';
 import 'device_transport.dart';
+import 'local_device_cache.dart';
 import 'local_device_discovery.dart';
 import 'local_device_transport.dart';
 
@@ -31,13 +32,16 @@ class DeviceRepositoryService {
     CloudDeviceTransport? cloud,
     DeviceLocator? locator,
     TasmotaCmFetcher? fetch,
+    LocalDeviceCache? cache,
   })  : _cloud = cloud ?? CloudDeviceTransport(),
         _locator = locator ?? LocalDeviceDiscovery(),
+        _cache = cache ?? LocalDeviceCache(),
         // ignore: prefer_initializing_formals
         _fetch = fetch;
 
   final CloudDeviceTransport _cloud;
   final DeviceLocator _locator;
+  final LocalDeviceCache _cache;
   final TasmotaCmFetcher? _fetch;
 
   DeviceTransportSource? _lastSource;
@@ -45,6 +49,42 @@ class DeviceRepositoryService {
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
   DeviceTransportSource? get lastSource => _lastSource;
+
+  /// The registered device list, cloud-first with a local cache fallback.
+  ///
+  /// Cloud success refreshes the cache. An availability failure on the cloud
+  /// (no network / timeout / 5xx / device-offline 409) falls back to the
+  /// cached mirror so the devices page can still render and reach devices on
+  /// the LAN — a cloud outage is never treated as data loss. When there is NO
+  /// cloud AND NO cache, the original error is surfaced unchanged so the page
+  /// keeps its familiar "could not load" state. Logical rejections (400/401/
+  /// 403/404/coded 409) are never masked by the cache.
+  Future<List<Map<String, dynamic>>> getDevices() async {
+    try {
+      final devices = await _cloud.getDevices();
+      try {
+        await _cache.replaceAll(devices);
+      } on Object catch (e) {
+        _log('cache refresh failed after cloud list fetch (${_describe(e)})');
+      }
+      _lastSource = DeviceTransportSource.cloud;
+      _log('device list from cloud (${devices.length}) — cache refreshed');
+      return devices;
+    } on Object catch (e) {
+      if (!isAvailabilityFailure(e)) rethrow;
+      _log(
+        'cloud unavailable for device list (${_describe(e)}) — '
+        'serving local cache',
+      );
+      final cached = await _cache.cachedDevices();
+      if (cached.isEmpty) {
+        _log('cache empty — surfacing original cloud error');
+        rethrow;
+      }
+      _lastSource = DeviceTransportSource.local;
+      return cached;
+    }
+  }
 
   Future<Map<String, dynamic>> getStatus(String deviceId) async {
     Map<String, dynamic> result;

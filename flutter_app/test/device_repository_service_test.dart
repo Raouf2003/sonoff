@@ -1,10 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:smart_home_app/services/api_service.dart';
 import 'package:smart_home_app/services/cloud_device_transport.dart';
 import 'package:smart_home_app/services/device_repository_service.dart';
 import 'package:smart_home_app/services/device_transport.dart';
+import 'package:smart_home_app/services/local_device_cache.dart';
 import 'package:smart_home_app/services/local_device_discovery.dart';
 
 const _deviceId = '34987AC30304';
@@ -16,9 +18,20 @@ const _statusBody = '{"POWER1":"ON","POWER2":"OFF"}';
 class _FakeCloudApi extends ApiService {
   Object? controlError;
   Object? statusError;
+  Object? devicesError;
   bool statusOnline = true;
   int controlCalls = 0;
   int statusCalls = 0;
+  int devicesCalls = 0;
+  List<Map<String, dynamic>> devices = [];
+
+  @override
+  Future<List<dynamic>> getDevices() async {
+    devicesCalls++;
+    final err = devicesError;
+    if (err != null) throw err;
+    return devices;
+  }
 
   @override
   Future<Map<String, dynamic>> control(
@@ -117,15 +130,136 @@ DeviceRepositoryService _repo(
   _FakeCloudApi cloud, {
   _FakeLocator? locator,
   _CmFake? cm,
+  LocalDeviceCache? cache,
 }) {
   return DeviceRepositoryService(
     cloud: CloudDeviceTransport(api: cloud),
     locator: locator ?? _FakeLocator(),
     fetch: cm?.call,
+    cache: cache ?? LocalDeviceCache(),
   );
 }
 
 void main() {
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
+  group('device list: cloud-primary with local cache fallback', () {
+    test('cloud success returns devices and refreshes the cache', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = const [
+          {
+            'deviceId': 'AAAAAAAAAAAA',
+            'name': 'Gate',
+            'type': 'sonoff-4ch',
+            'channels': 4,
+          },
+          {
+            'deviceId': _deviceId,
+            'name': 'Controller',
+            'channels': 2,
+          },
+        ];
+      final repo = _repo(cloud);
+
+      final result = await repo.getDevices();
+
+      expect(cloud.devicesCalls, 1);
+      expect(result.length, 2);
+      expect(repo.lastSource, DeviceTransportSource.cloud);
+
+      // Now the cloud is down: the cache written on success must be readable.
+      cloud.devicesError =
+          const ApiException('down', code: 'NETWORK_ERROR');
+      final cached = await repo.getDevices();
+      expect(cached.length, 2);
+      expect(repo.lastSource, DeviceTransportSource.local);
+      expect(
+        cached.map((d) => d['deviceId']).toList(),
+        containsAll(['AAAAAAAAAAAA', _deviceId]),
+      );
+    });
+
+    test('cloud availability failure falls back to cached devices', () async {
+      final cache = LocalDeviceCache();
+      await cache.replaceAll(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException(
+          'Could not reach the server.',
+          code: 'NETWORK_ERROR',
+        );
+      final repo = _repo(cloud, cache: cache);
+
+      final result = await repo.getDevices();
+
+      expect(cloud.devicesCalls, 1);
+      expect(result.single['deviceId'], _deviceId);
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('cloud down + empty cache surfaces the original error', () async {
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException(
+          'Could not reach the server.',
+          code: 'NETWORK_ERROR',
+        );
+      final repo = _repo(cloud);
+
+      await expectLater(
+        repo.getDevices(),
+        throwsA(
+          isA<ApiException>().having((e) => e.code, 'code', 'NETWORK_ERROR'),
+        ),
+      );
+    });
+
+    test('logical cloud error is surfaced, cache never consulted', () async {
+      final cache = LocalDeviceCache();
+      await cache.replaceAll(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('Unauthorized', statusCode: 401);
+      final repo = _repo(cloud, cache: cache);
+
+      await expectLater(
+        repo.getDevices(),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 's', 401)),
+      );
+    });
+
+    test('cloud returns to being preferred after an outage', () async {
+      final cache = LocalDeviceCache();
+      await cache.replaceAll(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, cache: cache);
+
+      final first = await repo.getDevices();
+      expect(first.single['deviceId'], _deviceId,
+          reason: 'outage served from cache');
+      expect(repo.lastSource, DeviceTransportSource.local);
+
+      // Internet returns: the same repository prefers the (fresh) cloud list.
+      cloud.devicesError = null;
+      cloud.devices = const [
+        {'deviceId': _deviceId, 'name': 'Renamed', 'channels': 4},
+      ];
+      final second = await repo.getDevices();
+      expect(second.single['name'], 'Renamed');
+      expect(repo.lastSource, DeviceTransportSource.cloud);
+
+      // The refreshed cloud list overwrote the stale cached name.
+      final cached = await cache.cachedDevices();
+      expect(cached.single['name'], 'Renamed');
+    });
+  });
+
   group('cloud is preferred and wins', () {
     test('control: cloud success never touches discovery', () async {
       final cloud = _FakeCloudApi();

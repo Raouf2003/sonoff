@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/services/api_service.dart';
 import 'package:smart_home_app/services/provisioning_service.dart';
@@ -109,6 +110,13 @@ Future<void> tapDialogRemoveDevice(WidgetTester tester) async {
 }
 
 void main() {
+  setUp(() {
+    // The wizard best-effort-writes the Local Mode device cache on provision /
+    // removal; give SharedPreferences a mocked store so that never touches a
+    // real platform channel.
+    SharedPreferences.setMockInitialValues({});
+  });
+
   group('Remove Device visibility (terminal duplicates)', () {
     testWidgets('DEVICE_ALREADY_EXISTS enters terminal state with button',
         (tester) async {

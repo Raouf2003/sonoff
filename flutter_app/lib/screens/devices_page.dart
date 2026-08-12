@@ -4,7 +4,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
-import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/device_repository_service.dart';
 import '../services/device_transport.dart';
@@ -15,22 +14,19 @@ import 'add_device_screen.dart';
 class DevicesPage extends StatefulWidget {
   final ValueChanged<int> onNavigateToTab;
   const DevicesPage({super.key, required this.onNavigateToTab})
-      : testApi = null,
-        testRepository = null,
+      : testRepository = null,
         testSocketFactory = null;
 
-  /// Test seam: injects a fake cloud API / repository / socket connector so
-  /// widget tests exercise the relay gate without network access.
+  /// Test seam: injects a fake repository / socket connector so widget tests
+  /// exercise the relay gate and cloud→local list fallback without network.
   @visibleForTesting
   const DevicesPage.test({
     super.key,
     required this.onNavigateToTab,
-    this.testApi,
     this.testRepository,
     this.testSocketFactory,
   });
 
-  final ApiService? testApi;
   final DeviceRepositoryService? testRepository;
   final io.Socket Function(String url, Map<String, dynamic> options)?
       testSocketFactory;
@@ -41,7 +37,6 @@ class DevicesPage extends StatefulWidget {
 
 class _DevicesPageState extends State<DevicesPage>
     with TickerProviderStateMixin {
-  late final ApiService _api = widget.testApi ?? ApiService();
   late final DeviceRepositoryService _repository =
       widget.testRepository ?? DeviceRepositoryService();
   DeviceTransportSource? _lastTransportSource;
@@ -140,7 +135,10 @@ class _DevicesPageState extends State<DevicesPage>
 
   Future<void> _loadDevices() async {
     try {
-      final devices = await _api.getDevices();
+      // The repository serves the registered list cloud-first and falls back
+      // to the local cache on availability failures, so a cloud outage never
+      // blanks the page or breaks Local Mode discovery.
+      final devices = await _repository.getDevices();
       if (mounted) {
         setState(() {
           _devices = devices.cast<Map<String, dynamic>>();
@@ -591,7 +589,12 @@ class _DevicesPageState extends State<DevicesPage>
                 ),
                 const SizedBox(height: AppSpacing.xs),
                 Text(
-                  '$channelsCount zones · $_activeCount flowing',
+                  // When the device is unreachable the flowing count is not
+                  // live truth (it is only the last-known relay states), so the
+                  // summary stops implying current flow and shows zones alone.
+                  _connected
+                      ? '$channelsCount zones · $_activeCount flowing'
+                      : '$channelsCount zones',
                   style: GoogleFonts.inter(
                     fontSize: 12,
                     fontWeight: FontWeight.w500,

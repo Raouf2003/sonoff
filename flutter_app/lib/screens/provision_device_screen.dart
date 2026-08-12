@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/device_type.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/local_device_cache.dart';
 import '../services/provisioning_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
@@ -120,6 +121,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   bool _wifiBound = false;
 
   late final ApiService _api;
+
+  /// Local mirror of registered devices. Updated when the (authoritative) cloud
+  /// registration/removal succeeds so Local Mode still knows the device when
+  /// the cloud is temporarily unreachable. Best-effort only — a cache write
+  /// failure never fails provisioning.
+  final LocalDeviceCache _deviceCache = LocalDeviceCache();
 
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
@@ -1255,6 +1262,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       _recoveryMode = false;
       debugPrint('[PROVISION] REGISTER_SUCCESS deviceId=$deviceId');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
+      await _cacheUpsertDevice(deviceId, name);
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } on ApiException catch (e) {
@@ -1530,6 +1538,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       // again; otherwise the wizard shows the normal wait/retry state.
       _trace.debugTrace(ProvisionPhase.claim, label: 'DEVICE_REMOVED');
       debugPrint('[PROVISION] DEVICE_REMOVED deviceId=$deviceId - re-waiting');
+      await _cacheRemoveDevice(deviceId);
       _setSuccess('Device removed successfully.');
       _leaveTerminalForRetry();
       if (!mounted) return;
@@ -1543,6 +1552,34 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       }
     }
     if (mounted) setState(() => _removingDevice = false);
+  }
+
+  // Best-effort Local Mode cache writes. Cloud is always authoritative; the
+  // cache is only a mirror so the devices page can keep working offline. A
+  // failed OR hanging cache write must NEVER change the outcome of
+  // provisioning/removal — hence the tight timeout guard.
+  static const Duration _cacheWriteBudget = Duration(seconds: 3);
+
+  Future<void> _cacheUpsertDevice(String deviceId, String name) async {
+    try {
+      await _deviceCache
+          .upsert({
+            'deviceId': deviceId,
+            'name': name,
+            'channels': _deviceType.channelCount,
+          })
+          .timeout(_cacheWriteBudget);
+    } on Object catch (e) {
+      debugPrint('[LOCAL] cache upsert failed for $deviceId: $e');
+    }
+  }
+
+  Future<void> _cacheRemoveDevice(String deviceId) async {
+    try {
+      await _deviceCache.remove(deviceId).timeout(_cacheWriteBudget);
+    } on Object catch (e) {
+      debugPrint('[LOCAL] cache remove failed for $deviceId: $e');
+    }
   }
 
   void _setSuccess(String msg) {

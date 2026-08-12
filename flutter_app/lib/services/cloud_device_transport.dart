@@ -15,6 +15,14 @@ class CloudDeviceTransport implements DeviceTransport {
   @override
   DeviceTransportSource get source => DeviceTransportSource.cloud;
 
+  /// The registered device documents (display metadata, ownership-checked by
+  /// the backend). Guarded to map-like entries only, matching what the devices
+  /// page consumes.
+  Future<List<Map<String, dynamic>>> getDevices() async {
+    final raw = await _api.getDevices();
+    return raw.whereType<Map<String, dynamic>>().toList();
+  }
+
   @override
   Future<Map<String, dynamic>> getStatus(String deviceId) {
     return _api.getStatus(deviceId);
