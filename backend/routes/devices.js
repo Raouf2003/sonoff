@@ -89,17 +89,11 @@ router.get('/check', async (req, res) => {
     if (!mac) {
       return res.status(400).json({ error: 'Invalid deviceId', code: 'INVALID_MAC' });
     }
-    // Legacy stees_* records keep deviceId=stees_*, so match on hardwareId too.
-    const device =
-      (await Device.findOne({ deviceId: mac })) ||
-      (await Device.findOne({ hardwareId: mac }));
-    if (!device || device.ownerId == null) {
-      return res.json({ status: 'not_found' });
-    }
-    if (device.ownerId.toString() === req.userId) {
-      return res.json({ status: 'mine' });
-    }
-    return res.json({ status: 'others' });
+    const result = await deviceProvisioningService.preflightCheck({
+      ownerId: req.userId,
+      deviceId: mac,
+    });
+    res.json(result);
   } catch (err) {
     console.error('Device preflight check error:', err);
     res.status(500).json({ error: 'Internal server error' });

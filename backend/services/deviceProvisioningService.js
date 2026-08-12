@@ -126,6 +126,26 @@ class DeviceProvisioningService {
     return device;
   }
 
+  // Best-effort read-only pre-flight for the provisioning wizard. Returns
+  // whether a canonical MAC is unknown, already in the caller's account, or
+  // owned by someone else. NON-authoritative - POST /provision remains the
+  // authoritative gate, and ownership of another user's device is never
+  // disclosed (only 'others'). Any record without an owner (e.g. an unclaimed
+  // legacy stees_*) is reported 'not_found' so the wizard can proceed to
+  // re-claim it.
+  async preflightCheck({ ownerId, deviceId }) {
+    const mac = normalizeMac(deviceId);
+    if (!mac) {
+      const err = new Error('deviceId must be a canonical MAC address');
+      err.code = 'INVALID_MAC';
+      throw err;
+    }
+    const conflict = await this._findConflict(mac, ownerId);
+    if (conflict.code === 'DEVICE_ALREADY_EXISTS') return { status: 'mine' };
+    if (conflict.code) return { status: 'others' };
+    return { status: 'not_found' };
+  }
+
   // Resolves an existing Device for a canonical MAC without ever disclosing
   // ownership. Never trusts the MAC as possession - this is identity only.
   async _findConflict(mac, ownerId) {

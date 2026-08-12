@@ -85,7 +85,7 @@ void main() {
     });
 
     test('4xx backend errors are NEVER availability', () {
-      for (final code in const [400, 401, 403, 404, 409]) {
+      for (final code in const [400, 401, 403, 404]) {
         expect(
           isAvailabilityFailure(
             ApiException('rejected', statusCode: code),
@@ -94,6 +94,26 @@ void main() {
           reason: '$code must not trigger a fallback',
         );
       }
+      // A CODED 409 (duplicate/ownership, e.g. during provisioning) is a
+      // logical rejection and must never fall back either.
+      expect(
+        isAvailabilityFailure(
+          ApiException('dup', statusCode: 409, code: 'DEVICE_ALREADY_EXISTS'),
+        ),
+        isFalse,
+      );
+    });
+
+    test('409 without a machine code means DEVICE_OFFLINE: availability', () {
+      expect(
+        isAvailabilityFailure(
+          ApiException('Device is not connected or is powered off',
+              statusCode: 409),
+        ),
+        isTrue,
+        reason:
+            'the device is unreachable at the cloud, so the LAN must get a chance',
+      );
     });
 
     test('5xx backend errors are availability', () {

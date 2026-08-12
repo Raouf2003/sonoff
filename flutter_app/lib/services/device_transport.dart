@@ -43,10 +43,14 @@ class DeviceTransportException implements Exception {
 ///
 /// The cloud→local fallback is allowed ONLY for these cases:
 ///  * no network / connection failure / timeout / backend 5xx on the cloud path
+///  * a 409 WITHOUT a machine `code` — the backend's "device is not connected
+///    or is powered off": the device is unavailable AT the cloud, so the LAN
+///    must get a chance before the app declares it offline
 ///  * a local transport being unreachable
 ///
-/// Every logical rejection — 400/401/403/404 ownership & validation, command
-/// conflicts, MAC identity mismatches — is NOT availability and must surface.
+/// Every logical rejection — 400/401/403/404 ownership & validation, coded 409
+/// duplicates, command conflicts, MAC identity mismatches — is NOT availability
+/// and must surface.
 bool isAvailabilityFailure(Object error) {
   if (error is DeviceTransportException) {
     return error.kind == TransportFailureKind.availability;
@@ -54,10 +58,12 @@ bool isAvailabilityFailure(Object error) {
   if (error is ApiException) {
     // ApiService maps transport-level failures (timeout / no network) to
     // ApiExceptions WITHOUT a statusCode; anything with an HTTP status is a
-    // classified backend response. Only server failures (5xx) count as an
-    // availability problem for fallback purposes.
+    // classified backend response. Only server failures (5xx) and the
+    // device-offline 409 (see above) count as availability for fallback.
     if (error.statusCode == null) return true;
-    return error.statusCode! >= 500;
+    if (error.statusCode! >= 500) return true;
+    if (error.statusCode == 409 && error.code == null) return true;
+    return false;
   }
   return error is SocketException ||
       error is TimeoutException ||

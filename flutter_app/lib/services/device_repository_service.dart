@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show debugPrint;
+import 'api_service.dart';
 import 'cloud_device_transport.dart';
 import 'device_transport.dart';
 import 'local_device_discovery.dart';
@@ -45,13 +47,45 @@ class DeviceRepositoryService {
   DeviceTransportSource? get lastSource => _lastSource;
 
   Future<Map<String, dynamic>> getStatus(String deviceId) async {
+    Map<String, dynamic> result;
     try {
-      final result = await _cloud.getStatus(deviceId);
-      _lastSource = DeviceTransportSource.cloud;
-      return result;
+      result = await _cloud.getStatus(deviceId);
     } on Object catch (e) {
       if (!isAvailabilityFailure(e)) rethrow;
+      _log(
+        'cloud unavailable for $deviceId (${_describe(e)}), '
+        'starting local fallback',
+      );
       return _fallback(() => _localStatus(deviceId), originalError: e);
+    }
+    // The cloud answered. When it reports the device online we are done; when
+    // it reports the device OFFLINE at the cloud, the device may still be on
+    // the LAN (the same outage often hides it from MQTT). Probe local and
+    // prefer the live LAN status when it verifies — never paper over cloud
+    // truth with a guessed answer.
+    if (result['online'] != true) {
+      return _probeLocalStatus(deviceId, cloudResult: result);
+    }
+    _lastSource = DeviceTransportSource.cloud;
+    return result;
+  }
+
+  /// Cloud is healthy but says the device is offline. Try the LAN; keep the
+  /// cloud's (offline) answer untouched when the LAN cannot find the device.
+  Future<Map<String, dynamic>> _probeLocalStatus(
+    String deviceId, {
+    required Map<String, dynamic> cloudResult,
+  }) async {
+    _lastSource = DeviceTransportSource.cloud;
+    try {
+      final local = await _localStatus(deviceId).timeout(kLocalFallbackBudget);
+      _log('local status success for $deviceId — using LAN state');
+      _lastSource = DeviceTransportSource.local;
+      return local;
+    } on Object {
+      _log('local status failed for $deviceId — keeping cloud truth (offline)');
+      _lastSource = DeviceTransportSource.cloud;
+      return cloudResult;
     }
   }
 
@@ -66,6 +100,10 @@ class DeviceRepositoryService {
       return result;
     } on Object catch (e) {
       if (!isAvailabilityFailure(e)) rethrow;
+      _log(
+        'cloud unavailable for $deviceId (${_describe(e)}), '
+        'starting local fallback',
+      );
       return _fallback(
         () => _localControl(deviceId, channel, state),
         originalError: e,
@@ -118,24 +156,53 @@ class DeviceRepositoryService {
   /// deviceId`) before it is used or cached; a stale/repurposed cached IP is
   /// discarded and re-discovered.
   Future<LocalDeviceTransport?> _findLocal(String deviceId) async {
+    _log('starting discovery for $deviceId');
+
     final cached = await _locator.cachedAddress(deviceId);
     if (cached != null && cached.isNotEmpty) {
+      _log('trying cached IP: $cached');
       final transport = _buildLocal(cached, deviceId);
-      if (await transport.verifyIdentity()) return transport;
+      if (await transport.verifyIdentity()) {
+        _log('verified cached IP: $cached');
+        return transport;
+      }
       // Stale / unreachable / repurposed: never use it, forget it.
+      _log('cached IP failed — discarding stale entry');
       await _locator.discardAddress(deviceId);
     }
 
+    _log('starting mDNS discovery');
     final candidates = await _locator.mDnsCandidates(kLocalMDnsWindow);
     for (final ip in candidates) {
+      _log('mDNS candidate: $ip — verifying MAC');
       final transport = _buildLocal(ip, deviceId);
       if (await transport.verifyIdentity()) {
+        _log('verified local device: $ip');
         await _locator.storeVerifiedAddress(deviceId, ip);
         return transport;
       }
       // A foreign Tasmota (or a non-Tasmota responder) is ignored.
+      _log('mDNS candidate failed identity check — skipped');
     }
+
+    _log('local discovery failed');
     return null;
+  }
+
+  /// Short, non-sensitive description of a failure for the debug trace. Never
+  /// includes messages/bodies that could carry credentials.
+  String _describe(Object error) {
+    if (error is ApiException) {
+      return 'ApiException(status=${error.statusCode}, code=${error.code})';
+    }
+    if (error is DeviceTransportException) {
+      return 'DeviceTransportException(kind=${error.kind})';
+    }
+    return error.runtimeType.toString();
+  }
+
+  void _log(String message) {
+    debugPrint('[LOCAL] $message');
   }
 
   LocalDeviceTransport _buildLocal(String address, String deviceId) {

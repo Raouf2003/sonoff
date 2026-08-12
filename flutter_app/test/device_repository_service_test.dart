@@ -16,6 +16,7 @@ const _statusBody = '{"POWER1":"ON","POWER2":"OFF"}';
 class _FakeCloudApi extends ApiService {
   Object? controlError;
   Object? statusError;
+  bool statusOnline = true;
   int controlCalls = 0;
   int statusCalls = 0;
 
@@ -36,7 +37,7 @@ class _FakeCloudApi extends ApiService {
     statusCalls++;
     final err = statusError;
     if (err != null) throw err;
-    return {'online': true, ...jsonDecode(_statusBody)};
+    return {'online': statusOnline, ...jsonDecode(_statusBody)};
   }
 }
 
@@ -218,6 +219,91 @@ void main() {
       expect(cloud.statusCalls, 1);
       expect(result['POWER1'], 'ON');
       expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('control: cloud 409 DEVICE_OFFLINE → local fallback is attempted',
+        () async {
+      // The backend is healthy but the device is not on MQTT — exactly when the
+      // LAN must get a chance. The real 409 carries NO machine code.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException(
+          'Device is not connected or is powered off',
+          statusCode: 409,
+        );
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(cloud.controlCalls, 1);
+      expect(locator.cachedQueries, 1,
+          reason: 'local discovery must run for a device-offline 409');
+      expect(result['POWER1'], 'ON');
+      expect(repo.lastSource, DeviceTransportSource.local);
+      expect(locator.mDnsQueries, 0);
+    });
+
+    test('control: cloud 409 + local unreachable → ORIGINAL 409 is surfaced',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException(
+          'Device is not connected or is powered off',
+          statusCode: 409,
+        );
+      final repo = _repo(cloud, locator: _FakeLocator(cached: null));
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            409,
+          ),
+        ),
+      );
+      expect(repo.lastSource, isNull,
+          reason: 'both clouds failed — no transport wins');
+    });
+  });
+
+  group('cloud-200 device-offline status probes local', () {
+    test('cloud reports offline but LAN verifies → live LAN status wins',
+        () async {
+      final cloud = _FakeCloudApi()..statusOnline = false;
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'State':
+            '{"POWER1":"ON","POWER2":"ON","POWER3":"OFF","POWER4":"OFF"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.getStatus(_deviceId);
+
+      expect(cloud.statusCalls, 1);
+      expect(locator.cachedQueries, 1,
+          reason: 'a cloud-offline device must still probe the LAN');
+      expect(result['online'], isTrue);
+      expect(result['POWER2'], 'ON');
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('cloud offline + LAN unreachable → cloud offline truth kept, no throw',
+        () async {
+      final cloud = _FakeCloudApi()..statusOnline = false;
+      final repo = _repo(cloud, locator: _FakeLocator(cached: null));
+
+      final result = await repo.getStatus(_deviceId);
+
+      expect(cloud.statusCalls, 1);
+      expect(result['online'], isFalse);
+      expect(repo.lastSource, DeviceTransportSource.cloud,
+          reason: 'no LAN device — cloud truth stays authoritative');
     });
   });
 

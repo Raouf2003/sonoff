@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'device_transport.dart';
 import 'provisioning_service.dart';
 
@@ -121,12 +122,15 @@ class LocalDeviceTransport implements DeviceTransport {
   Future<void> _verifyIdentity() async {
     final body = await _cm('Status%205');
     final mac = normalizeMac(extractMacFromStatus5(body));
+    debugPrint('[LOCAL] candidate MAC: $mac, expected deviceId: $deviceId');
     if (mac == null || mac != deviceId) {
+      debugPrint('[LOCAL] identity MISMATCH at $address');
       throw const DeviceTransportException(
         'The local device identity could not be verified.',
         kind: TransportFailureKind.logical,
       );
     }
+    debugPrint('[LOCAL] identity MATCH at $address');
   }
 
   void _assertTarget(String requested) {

@@ -211,6 +211,58 @@ test('concurrent registrations for same MAC => exactly one device, loser DEVICE_
   assert.strictEqual(deviceModel.rows.length, 1, 'exactly one Device for that MAC');
 });
 
+test('preflight /check: not_found when MAC is unregistered', async () => {
+  const { svc } = service({ recent: false });
+  const result = await svc.preflightCheck({ ownerId: 'owner1', deviceId: MAC });
+  assert.deepStrictEqual(result, { status: 'not_found' });
+});
+
+test('preflight /check: mine when MAC already owns by the caller', async () => {
+  const { svc } = service({
+    deviceRows: [{ _id: 'd1', deviceId: CID, ownerId: 'owner1', hardwareId: CID }],
+  });
+  const result = await svc.preflightCheck({ ownerId: 'owner1', deviceId: MAC });
+  assert.deepStrictEqual(result, { status: 'mine' });
+});
+
+test('preflight /check: others when MAC owned by another account (ownership hidden)', async () => {
+  const { svc } = service({
+    deviceRows: [{ _id: 'd1', deviceId: CID, ownerId: 'owner2', hardwareId: CID }],
+  });
+  const result = await svc.preflightCheck({ ownerId: 'owner1', deviceId: MAC });
+  assert.deepStrictEqual(result, { status: 'others' });
+});
+
+test('preflight /check: legacy stees_ same-account => mine', async () => {
+  const { svc } = service({
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: 'owner1', hardwareId: CID },
+    ],
+  });
+  const result = await svc.preflightCheck({ ownerId: 'owner1', deviceId: MAC });
+  assert.deepStrictEqual(result, { status: 'mine' });
+});
+
+test('preflight /check: legacy unowned record => not_found (re-claimable)', async () => {
+  const { svc } = service({
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: null, hardwareId: CID },
+    ],
+  });
+  const result = await svc.preflightCheck({ ownerId: 'owner1', deviceId: MAC });
+  assert.deepStrictEqual(result, { status: 'not_found' });
+});
+
+test('preflight /check: invalid MAC => INVALID_MAC', async () => {
+  const { svc } = service();
+  for (const bad of ['', 'not-a-mac', 'stees_0123456789abcdef', null]) {
+    await assert.rejects(
+      () => svc.preflightCheck({ ownerId: 'owner1', deviceId: bad }),
+      (err) => err.code === 'INVALID_MAC',
+    );
+  }
+});
+
 test('authMiddleware: missing/bad/expired token => 401, valid token sets userId', async () => {
   const missing = { headers: {} };
   const res401 = { statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
