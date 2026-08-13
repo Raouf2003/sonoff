@@ -101,6 +101,19 @@ class _DevicesPageState extends State<DevicesPage>
   // offline → OFFLINE". This is device evidence, not socket/transport state.
   DateTime? _lastDeviceEvidenceAt;
 
+  // When an EXPLICIT LWT Offline (`device_status` offline) was last seen. It is
+  // authoritative device-offline evidence and may only be superseded by positive
+  // device evidence that is strictly NEWER. A cloud poll's plain "offline"
+  // verdict (weak/stale) can never undo it.
+  DateTime? _lastAuthoritativeOfflineAt;
+
+  // A cloud poll that reports the device offline is weak evidence: it may only
+  // flip the card when the device has NOT produced positive evidence within
+  // this window (and that evidence is newer than the last authoritative LWT
+  // Offline). Mirrors _kCloudFreshWindow so a device that reports at least this
+  // often is never flapped by a stale/contradicted backend verdict.
+  static const Duration _kDeviceEvidenceFreshWindow = Duration(minutes: 5);
+
   // When the phone last completed a successful LOCAL (verified LAN) operation.
   // Fresh local evidence must never be overwritten by a stale cloud verdict.
   DateTime? _lastLocalEvidenceAt;
@@ -210,8 +223,6 @@ class _DevicesPageState extends State<DevicesPage>
       }
     }
 
-    // A confirmed device state is positive liveness evidence.
-    _lastDeviceEvidenceAt = now;
     setState(() {
       ch.reported = report.state;
       ch.updatedAt = incomingTs;
@@ -247,6 +258,21 @@ class _DevicesPageState extends State<DevicesPage>
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'UI confirmed (socket)');
   }
 
+  /// Recent positive device evidence that is NEWER than the last authoritative
+  /// LWT Offline. When true, a cloud poll's plain "offline" verdict is stale or
+  /// contradicted and must not flip a freshly-confirmed-healthy device.
+  bool _hasRecentDeviceEvidence() {
+    final last = _lastDeviceEvidenceAt;
+    if (last == null) return false;
+    if (DateTime.now().difference(last) >= _kDeviceEvidenceFreshWindow) {
+      return false;
+    }
+    // A real LWT Offline that arrived AFTER the last positive evidence wins:
+    // only evidence strictly newer than that verdict may hold the card online.
+    final offline = _lastAuthoritativeOfflineAt;
+    return offline == null || last.isAfter(offline);
+  }
+
   void _applyResult(RelayStatusResult result) {
     final freshLocal = _lastLocalEvidenceAt != null &&
         DateTime.now().difference(_lastLocalEvidenceAt!) < kLocalReportHold;
@@ -261,9 +287,16 @@ class _DevicesPageState extends State<DevicesPage>
     } else if (freshLocal) {
       // A stale cloud "offline" verdict must never kill a live local session.
       _setConnectivity(_DeviceConnectivity.online);
+    } else if (_hasRecentDeviceEvidence()) {
+      // The device produced positive evidence recently (a committed
+      // device_update, a successful control ACK, or a recent online status)
+      // that is newer than any authoritative LWT Offline. The cloud poll's
+      // "offline" is a stale/contradicted verdict, so keep ONLINE — a genuine
+      // LWT Offline or the expiry of the freshness window will still flip it.
+      _setConnectivity(_DeviceConnectivity.online);
     } else if (_lastDeviceEvidenceAt != null) {
-      // The device was confirmed before and the cloud now reports
-      // authoritative offline (LWT): strong evidence, so OFFLINE.
+      // The device was confirmed before but has NO recent evidence and the
+      // cloud now reports authoritative offline: strong evidence, so OFFLINE.
       _setConnectivity(_DeviceConnectivity.offline);
     } else {
       // No confirmed device evidence yet: SYNCING, never a fabricated OFFLINE.
@@ -504,6 +537,7 @@ class _DevicesPageState extends State<DevicesPage>
           _setConnectivity(_DeviceConnectivity.online);
         } else {
           // Explicit MQTT LWT Offline — authoritative device-offline evidence.
+          _lastAuthoritativeOfflineAt = DateTime.now();
           _setConnectivity(_DeviceConnectivity.offline);
         }
       } catch (_) {
@@ -535,6 +569,18 @@ class _DevicesPageState extends State<DevicesPage>
           ChannelReport(state == 'UNKNOWN' ? null : state, updatedAt: updatedAt),
           DeviceTransportSource.cloud,
         );
+        // A committed device report is itself strong liveness evidence: the
+        // device demonstrably talked to MQTT and produced a real state, so
+        // restore ONLINE immediately even if the paired `device_status` event
+        // is delayed or lost. Newer device evidence also supersedes an older
+        // LWT Offline (evidence ordering).
+        if (committed && state != null && state != 'UNKNOWN') {
+          // Committing a real device state is itself positive liveness
+          // evidence (distinct from the channel reports that ride along with a
+          // poll's stale "offline" verdict, which must never refresh it).
+          _lastDeviceEvidenceAt = DateTime.now();
+          _setConnectivity(_DeviceConnectivity.online);
+        }
         // Phase 3: a Socket.IO report that the device itself confirmed is
         // authoritative and may resolve the pending tap immediately — but ONLY
         // when it was actually committed as newer (the `_applyChannelReport`

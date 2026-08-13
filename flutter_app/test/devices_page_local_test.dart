@@ -32,12 +32,17 @@ void _mockSecureStorage(WidgetTester tester) {
 /// used to drive the local-first fallback paths in widget tests.
 class _CloudDownApi extends ApiService {
   @override
-  Future<List<dynamic>> getDevices() async =>
-      throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+  Future<List<dynamic>> getDevices() async => throw const ApiException(
+    'Could not reach the server',
+    code: 'NETWORK_ERROR',
+  );
 
   @override
   Future<Map<String, dynamic>> getStatus(String deviceId) async =>
-      throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+      throw const ApiException(
+        'Could not reach the server',
+        code: 'NETWORK_ERROR',
+      );
 
   @override
   Future<Map<String, dynamic>> control(
@@ -45,7 +50,10 @@ class _CloudDownApi extends ApiService {
     int channel,
     String state, {
     String? opId,
-  }) async => throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+  }) async => throw const ApiException(
+    'Could not reach the server',
+    code: 'NETWORK_ERROR',
+  );
 }
 
 /// Local Tasmota fetcher stub for widget-level Local Mode tests.
@@ -61,9 +69,9 @@ class _CloudApi extends ApiService {
 
   @override
   Future<Map<String, dynamic>> getStatus(String deviceId) async => {
-        'online': true,
-        'channels': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'},
-      };
+    'online': true,
+    'channels': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'},
+  };
 
   @override
   Future<Map<String, dynamic>> control(
@@ -72,9 +80,9 @@ class _CloudApi extends ApiService {
     String state, {
     String? opId,
   }) async => {
-        'online': true,
-        'channels': {channel: state},
-      };
+    'online': true,
+    'channels': {channel: state},
+  };
 }
 
 /// Cloud whose device list NEVER completes — models the slow/absent backend
@@ -94,7 +102,8 @@ class _HangingCloudApi extends ApiService {
     int channel,
     String state, {
     String? opId,
-  }) async => throw const ApiException('Cloud unavailable', code: 'NETWORK_ERROR');
+  }) async =>
+      throw const ApiException('Cloud unavailable', code: 'NETWORK_ERROR');
 }
 
 class _CmFake {
@@ -161,8 +170,7 @@ class _RecordingCmFake {
   final Map<String, Map<String, String>> responsesByAddress;
   final List<String> log = [];
 
-  bool get hasControlCommand =>
-      log.any((entry) => entry.contains('Power'));
+  bool get hasControlCommand => log.any((entry) => entry.contains('Power'));
 
   int get status5Count =>
       log.where((entry) => entry.contains('Status%205')).length;
@@ -242,9 +250,7 @@ class _FakeRepo extends DeviceRepositoryService {
     statusCalls++;
     return RelayStatusResult(
       online: true,
-      channels: {
-        for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF'),
-      },
+      channels: {for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF')},
       source: source,
       seq: 2,
     );
@@ -319,7 +325,10 @@ class _StatusFailingRepo extends _FakeRepo {
     String deviceId, {
     bool cloudDown = false,
   }) async {
-    throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+    throw const ApiException(
+      'Could not reach the server',
+      code: 'NETWORK_ERROR',
+    );
   }
 }
 
@@ -336,7 +345,36 @@ class _FailOnceRepo extends _FakeRepo {
   }) async {
     if (failNext) {
       failNext = false;
-      throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+      throw const ApiException(
+        'Could not reach the server',
+        code: 'NETWORK_ERROR',
+      );
+    }
+    return super.getStatus(deviceId);
+  }
+}
+
+/// Repository whose NEXT status read returns a successful CLOUD poll that
+/// still reports the device OFFLINE (`online:false`) — the stale / contradicted
+/// verdict that previously caused ONLINE↔OFFLINE flapping. All other reads
+/// behave like [_FakeRepo].
+class _CloudOfflineRepo extends _FakeRepo {
+  bool nextOffline = false;
+
+  @override
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
+    if (nextOffline) {
+      nextOffline = false;
+      statusCalls++;
+      return RelayStatusResult(
+        online: false,
+        channels: {for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF')},
+        source: DeviceTransportSource.cloud,
+        seq: 2,
+      );
     }
     return super.getStatus(deviceId);
   }
@@ -356,9 +394,7 @@ class _CloudThenLocalRepo extends _FakeRepo {
     final viaLocal = statusCalls > 1;
     return RelayStatusResult(
       online: true,
-      channels: {
-        for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF'),
-      },
+      channels: {for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF')},
       source: viaLocal
           ? DeviceTransportSource.local
           : DeviceTransportSource.cloud,
@@ -391,8 +427,7 @@ class _GatedStatusRepo extends _FakeRepo {
 class _StaleControlRepo extends _FakeRepo {
   _StaleControlRepo({super.gateControl = true});
 
-  final DateTime staleAt =
-      DateTime.now().subtract(const Duration(minutes: 5));
+  final DateTime staleAt = DateTime.now().subtract(const Duration(minutes: 5));
 
   @override
   Future<RelayStatusResult> control(
@@ -447,8 +482,9 @@ Future<void> _unmount(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('relay taps drive the repository and confirm via device report',
-      (tester) async {
+  testWidgets('relay taps drive the repository and confirm via device report', (
+    tester,
+  ) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -464,8 +500,11 @@ void main() {
     // confirmed-state label (FLOWING) must never appear before the report.
     expect(repo.controlCalls, 1);
     expect(find.text('TURNING…'), findsOneWidget);
-    expect(find.text('FLOWING'), findsNothing,
-        reason: 'the confirmed-state pill may only appear after a device report');
+    expect(
+      find.text('FLOWING'),
+      findsNothing,
+      reason: 'the confirmed-state pill may only appear after a device report',
+    );
 
     // Release the command: the confirmed report flips channel 1 to FLOWING.
     // `pump()` (not `pumpAndSettle`) so fake time never reaches the 15s poll
@@ -479,8 +518,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('double-tap while a relay command is in flight sends it once',
-      (tester) async {
+  testWidgets('double-tap while a relay command is in flight sends it once', (
+    tester,
+  ) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -491,39 +531,56 @@ void main() {
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
-    expect(repo.controlCalls, 1,
-        reason: 'a pending relay must not be re-sent on a second tap');
+    expect(
+      repo.controlCalls,
+      1,
+      reason: 'a pending relay must not be re-sent on a second tap',
+    );
 
     await _unmount(tester);
   });
 
-  testWidgets('LAN requires the cloud confirmed down; a local read alone keeps ONLINE',
-      (tester) async {
-    final repo = _FakeRepo(source: DeviceTransportSource.local);
-    final socket = _ScriptableSocket();
-    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+  testWidgets(
+    'LAN requires the cloud confirmed down; a local read alone keeps ONLINE',
+    (tester) async {
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
-    // Cloud reachability unknown → the safe cloud-first default keeps ONLINE,
-    // even though the freshest result came over the LAN.
-    expect(find.text('Online'), findsOneWidget,
-        reason: 'a successful local read must not flip the badge to LAN by itself');
-    expect(find.text('LAN'), findsNothing);
+      // Cloud reachability unknown → the safe cloud-first default keeps ONLINE,
+      // even though the freshest result came over the LAN.
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason:
+            'a successful local read must not flip the badge to LAN by itself',
+      );
+      expect(find.text('LAN'), findsNothing);
 
-    // Only a CONFIRMED cloud outage + verified local device = LAN.
-    socket.fireDisconnect();
-    await tester.pump();
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pumpAndSettle();
+      // Only a CONFIRMED cloud outage + verified local device = LAN.
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('LAN'), findsOneWidget,
-        reason: 'cloud confirmed down + verified LAN device = LAN');
-    expect(find.text('Online'), findsNothing);
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'cloud confirmed down + verified LAN device = LAN',
+      );
+      expect(find.text('Online'), findsNothing);
 
-    await _unmount(tester);
-  });
+      await _unmount(tester);
+    },
+  );
 
-  testWidgets('unconfirmed taps keep the pill TURNING until a report lands',
-      (tester) async {
+  testWidgets('unconfirmed taps keep the pill TURNING until a report lands', (
+    tester,
+  ) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -542,63 +599,79 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('TURNING…'), findsNothing);
-    expect(find.textContaining('nope'), findsWidgets,
-        reason: 'the failure is surfaced to the user');
+    expect(
+      find.textContaining('nope'),
+      findsWidgets,
+      reason: 'the failure is surfaced to the user',
+    );
     await _unmount(tester);
   });
 
-  testWidgets('a tap flips the card optimistically; a fresh report supersedes it',
-      (tester) async {
-    final repo = _FakeRepo(gateControl: true);
-    final socket = _ScriptableSocket();
-    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+  testWidgets(
+    'a tap flips the card optimistically; a fresh report supersedes it',
+    (tester) async {
+      final repo = _FakeRepo(gateControl: true);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
-    final colors = tester.element(find.text('CHANNEL 1')).steesColors;
-    int leafDrops() => find
-        .byIcon(Icons.water_drop)
-        .evaluate()
-        .where((e) => (e.widget as Icon).color == colors.leaf)
-        .length;
+      final colors = tester.element(find.text('CHANNEL 1')).steesColors;
+      int leafDrops() => find
+          .byIcon(Icons.water_drop)
+          .evaluate()
+          .where((e) => (e.widget as Icon).color == colors.leaf)
+          .length;
 
-    expect(find.text('DRY'), findsNWidgets(4));
-    expect(leafDrops(), 0);
+      expect(find.text('DRY'), findsNWidgets(4));
+      expect(leafDrops(), 0);
 
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pump();
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
 
-    // The tapped card flips ON immediately (optimistic) while the pill still
-    // shows TURNING, so the UI is responsive without faking a confirmed state.
-    expect(repo.controlCalls, 1);
-    expect(find.text('TURNING…'), findsOneWidget);
-    expect(leafDrops(), 1,
-        reason: 'the requested state is shown before the device confirms');
+      // The tapped card flips ON immediately (optimistic) while the pill still
+      // shows TURNING, so the UI is responsive without faking a confirmed state.
+      expect(repo.controlCalls, 1);
+      expect(find.text('TURNING…'), findsOneWidget);
+      expect(
+        leafDrops(),
+        1,
+        reason: 'the requested state is shown before the device confirms',
+      );
 
-    // A FRESH device report contradicting the optimistic flip (the device
-    // stayed OFF) must overwrite it: back to the confirmed DRY state.
-    socket.push('device_update', {
-      'deviceId': _deviceId,
-      'channel': 1,
-      'state': 'OFF',
-      'updatedAt': DateTime.now().toIso8601String(),
-    });
-    await tester.pump();
+      // A FRESH device report contradicting the optimistic flip (the device
+      // stayed OFF) must overwrite it: back to the confirmed DRY state.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'OFF',
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      await tester.pump();
 
-    expect(find.text('TURNING…'), findsNothing);
-    expect(find.text('DRY'), findsNWidgets(4));
-    expect(leafDrops(), 0,
-        reason: 'a confirmed report supersedes the optimistic flip');
+      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('DRY'), findsNWidgets(4));
+      expect(
+        leafDrops(),
+        0,
+        reason: 'a confirmed report supersedes the optimistic flip',
+      );
 
-    // The late REST response re-confirms the requested state once released.
-    repo.releaseControl.complete();
-    await tester.pump();
-    expect(repo.controlCalls, 1);
-    expect(find.text('FLOWING'), findsOneWidget);
+      // The late REST response re-confirms the requested state once released.
+      repo.releaseControl.complete();
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+      expect(find.text('FLOWING'), findsOneWidget);
 
-    await _unmount(tester);
-  });
+      await _unmount(tester);
+    },
+  );
 
-  testWidgets('cloudDown passed to control tracks the socket cloud monitor',
-      (tester) async {
+  testWidgets('cloudDown passed to control tracks the socket cloud monitor', (
+    tester,
+  ) async {
     final repo = _FakeRepo();
     final socket = _ScriptableSocket();
     await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
@@ -606,100 +679,128 @@ void main() {
     // Unknown (no socket event yet): the safe cloud-first default.
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
-    expect(repo.lastCloudDown, isFalse,
-        reason: 'unknown connectivity must keep cloud-first');
+    expect(
+      repo.lastCloudDown,
+      isFalse,
+      reason: 'unknown connectivity must keep cloud-first',
+    );
 
     // Confirmed disconnect → cloud known unreachable → local immediately.
     socket.fireDisconnect();
     await tester.pump();
     await tester.tap(find.text('CHANNEL 2'));
     await tester.pump();
-    expect(repo.lastCloudDown, isTrue,
-        reason: 'a confirmed disconnect must route local immediately');
+    expect(
+      repo.lastCloudDown,
+      isTrue,
+      reason: 'a confirmed disconnect must route local immediately',
+    );
 
     // Reconnect → cloud reachable again → cloud first.
     socket.fireConnect();
     await tester.pump();
     await tester.tap(find.text('CHANNEL 3'));
     await tester.pump();
-    expect(repo.lastCloudDown, isFalse,
-        reason: 'a connect must restore cloud-first');
+    expect(
+      repo.lastCloudDown,
+      isFalse,
+      reason: 'a connect must restore cloud-first',
+    );
 
     // Connect error → cloud unreachable → local immediately.
     socket.fireConnectError();
     await tester.pump();
     await tester.tap(find.text('CHANNEL 4'));
     await tester.pump();
-    expect(repo.lastCloudDown, isTrue,
-        reason: 'a connect error must route local immediately');
+    expect(
+      repo.lastCloudDown,
+      isTrue,
+      reason: 'a connect error must route local immediately',
+    );
 
     await _unmount(tester);
   });
 
   group('cloud-unavailable device list', () {
     testWidgets(
-        'cached device renders and LAN status succeeds — no red error (#10)',
-        (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudDownApi()),
-        locator: _LocatorStub(cached: '192.168.1.5'),
-        fetch: cm.call,
-        cache: cache,
-      );
-      final socket = _ScriptableSocket();
+      'cached device renders and LAN status succeeds — no red error (#10)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cache = LocalDeviceCache();
+        await cache.upsert({
+          'deviceId': _deviceId,
+          'name': 'Controller',
+          'channels': 4,
+        });
+        final cm = _CmFake(
+          responses: {'Status%205': _macBody, 'State': _stateBody},
+        );
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(api: _CloudDownApi()),
+          locator: _LocatorStub(cached: '192.168.1.5'),
+          fetch: cm.call,
+          cache: cache,
+        );
+        final socket = _ScriptableSocket();
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      // The cached list renders instead of the cloud error state.
-      expect(find.text('Controller'), findsOneWidget);
-      expect(find.textContaining('Could not load devices'), findsNothing);
+        // The cached list renders instead of the cloud error state.
+        expect(find.text('Controller'), findsOneWidget);
+        expect(find.textContaining('Could not load devices'), findsNothing);
 
-      // The cloud API is provably down; confirm it via the socket cloud monitor
-      // so the verified local status resolves to LAN.
-      socket.fireConnectError();
-      await tester.pump();
+        // The cloud API is provably down; confirm it via the socket cloud monitor
+        // so the verified local status resolves to LAN.
+        socket.fireConnectError();
+        await tester.pump();
 
-      // Local status resolved the device: LAN pill, reachable, no error snack.
-      expect(find.text('LAN'), findsOneWidget);
-      expect(find.text('Offline'), findsNothing);
-      expect(find.text('Failed to fetch status'), findsNothing);
+        // Local status resolved the device: LAN pill, reachable, no error snack.
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Offline'), findsNothing);
+        expect(find.text('Failed to fetch status'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
     testWidgets(
-        'cloud down + cache present + no local device → SYNCING, not OFFLINE, '
-        'after a single status failure (#11)', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudDownApi()),
-        locator: _LocatorStub(),
-        cache: cache,
-      );
+      'cloud down + cache present + no local device → SYNCING, not OFFLINE, '
+      'after a single status failure (#11)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cache = LocalDeviceCache();
+        await cache.upsert({
+          'deviceId': _deviceId,
+          'name': 'Controller',
+          'channels': 4,
+        });
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(api: _CloudDownApi()),
+          locator: _LocatorStub(),
+          cache: cache,
+        );
 
-      await _pumpDevicesPage(tester, repo: repo);
+        await _pumpDevicesPage(tester, repo: repo);
 
-      expect(find.text('Controller'), findsOneWidget);
-      expect(find.textContaining('Could not load devices'), findsNothing);
-      // A SINGLE failed status poll is weak evidence: the card must show
-      // SYNCING (unknown), never a fabricated OFFLINE. Only the repeated
-      // failure threshold (or LWT Offline) may mark it offline.
-      expect(find.text('Offline'), findsNothing);
-      expect(find.text('SYNCING'), findsWidgets);
+        expect(find.text('Controller'), findsOneWidget);
+        expect(find.textContaining('Could not load devices'), findsNothing);
+        // A SINGLE failed status poll is weak evidence: the card must show
+        // SYNCING (unknown), never a fabricated OFFLINE. Only the repeated
+        // failure threshold (or LWT Offline) may mark it offline.
+        expect(find.text('Offline'), findsNothing);
+        expect(find.text('SYNCING'), findsWidgets);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('cloud down + empty cache → original load error is kept',
-        (tester) async {
+    testWidgets('cloud down + empty cache → original load error is kept', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
       final repo = DeviceRepositoryService(
         cloud: CloudDeviceTransport(api: _CloudDownApi()),
@@ -735,154 +836,218 @@ void main() {
   });
 
   group('connectivity model (Phase 1)', () {
-    testWidgets('socket disconnect does NOT mark the device OFFLINE',
-        (tester) async {
+    testWidgets('socket disconnect does NOT mark the device OFFLINE', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       expect(find.text('Online'), findsOneWidget);
 
       socket.fireDisconnect();
       await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'a Socket.IO transport drop is not device-offline evidence');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'a Socket.IO transport drop is not device-offline evidence',
+      );
       expect(find.text('Offline'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('a single REST status failure leaves the card SYNCING, not OFFLINE',
-        (tester) async {
-      final repo = _StatusFailingRepo();
-      await _pumpDevicesPage(tester, repo: repo);
+    testWidgets(
+      'a single REST status failure leaves the card SYNCING, not OFFLINE',
+      (tester) async {
+        final repo = _StatusFailingRepo();
+        await _pumpDevicesPage(tester, repo: repo);
 
-      expect(find.text('Offline'), findsNothing,
-          reason: 'one failed poll must not mark the device OFFLINE');
-      expect(find.text('SYNCING'), findsWidgets);
+        expect(
+          find.text('Offline'),
+          findsNothing,
+          reason: 'one failed poll must not mark the device OFFLINE',
+        );
+        expect(find.text('SYNCING'), findsWidgets);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('repeated consecutive status failures mark the device OFFLINE',
-        (tester) async {
-      final repo = _StatusFailingRepo();
-      await _pumpDevicesPage(tester, repo: repo);
+    testWidgets(
+      'repeated consecutive status failures mark the device OFFLINE',
+      (tester) async {
+        final repo = _StatusFailingRepo();
+        await _pumpDevicesPage(tester, repo: repo);
 
-      // The first failure happened during initial load (SYNCING). Two more
-      // 15s poll ticks cross the 3-failure threshold (strong evidence).
-      await tester.pump(const Duration(seconds: 16));
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 16));
-      await tester.pump();
+        // The first failure happened during initial load (SYNCING). Two more
+        // 15s poll ticks cross the 3-failure threshold (strong evidence).
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
 
-      expect(find.text('Offline'), findsOneWidget,
-          reason: '3 consecutive poll failures are strong offline evidence');
+        expect(
+          find.text('Offline'),
+          findsOneWidget,
+          reason: '3 consecutive poll failures are strong offline evidence',
+        );
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('explicit LWT Offline via device_status marks the device OFFLINE',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'explicit LWT Offline via device_status marks the device OFFLINE',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      expect(find.text('Online'), findsOneWidget);
+        expect(find.text('Online'), findsOneWidget);
 
-      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
-      await tester.pump();
+        socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+        await tester.pump();
 
-      expect(find.text('Offline'), findsOneWidget,
-          reason: 'LWT Offline is authoritative device-offline evidence');
+        expect(
+          find.text('Offline'),
+          findsOneWidget,
+          reason: 'LWT Offline is authoritative device-offline evidence',
+        );
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('a positive device_status report restores ONLINE after LWT Offline',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'a positive device_status report restores ONLINE after LWT Offline',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
-      await tester.pump();
-      expect(find.text('Offline'), findsOneWidget);
+        socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+        await tester.pump();
+        expect(find.text('Offline'), findsOneWidget);
 
-      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
-      await tester.pump();
+        socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+        await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'a positive device report restores ONLINE');
-      expect(find.text('Offline'), findsNothing);
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason: 'a positive device report restores ONLINE',
+        );
+        expect(find.text('Offline'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('a cloud device_status event cannot overwrite fresher local evidence',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'a cloud device_status event cannot overwrite fresher local evidence',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo(source: DeviceTransportSource.local);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      // Confirm the cloud is unreachable so the verified local session is LAN.
-      socket.fireConnectError();
-      await tester.pump();
-      expect(find.text('LAN'), findsOneWidget);
+        // Confirm the cloud is unreachable so the verified local session is LAN.
+        socket.fireConnectError();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
 
-      // A cloud LWT-offline event lands while the local session is still fresh.
-      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
-      await tester.pump();
+        // A cloud LWT-offline event lands while the local session is still fresh.
+        socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+        await tester.pump();
 
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'fresher local evidence must never be overwritten by a stale '
-              'cloud verdict');
-      expect(find.text('Offline'), findsNothing);
+        expect(
+          find.text('LAN'),
+          findsOneWidget,
+          reason:
+              'fresher local evidence must never be overwritten by a stale '
+              'cloud verdict',
+        );
+        expect(find.text('Offline'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
   });
 
   group('Phase 4: evidence-based ONLINE / LAN / OFFLINE priority', () {
     testWidgets(
-        'cloud reachable + recent cloud evidence + successful local poll '
-        'keeps ONLINE', (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      'cloud reachable + recent cloud evidence + successful local poll '
+      'keeps ONLINE',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      // Cloud connected and the device reported ONLINE via cloud.
-      expect(find.text('Online'), findsOneWidget);
-      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
-      await tester.pump();
-      expect(find.text('Online'), findsOneWidget);
+        // Cloud connected and the device reported ONLINE via cloud.
+        expect(find.text('Online'), findsOneWidget);
+        socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+        await tester.pump();
+        expect(find.text('Online'), findsOneWidget);
 
-      // A background LOCAL status poll succeeds while the cloud is still up.
-      await tester.pump(const Duration(seconds: 16));
-      await tester.pump();
+        // A background LOCAL status poll succeeds while the cloud is still up.
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'a successful local poll must NOT downgrade ONLINE when the '
-              'cloud is reachable');
-      expect(find.text('LAN'), findsNothing);
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason:
+              'a successful local poll must NOT downgrade ONLINE when the '
+              'cloud is reachable',
+        );
+        expect(find.text('LAN'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('cloud confirmed down + local device success → LAN',
-        (tester) async {
+    testWidgets('cloud confirmed down + local device success → LAN', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireConnectError();
       await tester.pump();
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pumpAndSettle();
 
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'cloud confirmed down + verified local device = LAN');
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'cloud confirmed down + verified local device = LAN',
+      );
       expect(find.text('Offline'), findsNothing);
 
       await _unmount(tester);
@@ -892,7 +1057,11 @@ void main() {
         'after the repeated-failure threshold', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _StatusFailingRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireConnectError();
       await tester.pump();
@@ -905,40 +1074,56 @@ void main() {
       await tester.pump(const Duration(seconds: 16));
       await tester.pump();
 
-      expect(find.text('Offline'), findsOneWidget,
-          reason: 'cloud confirmed down + no LAN + no valid evidence → OFFLINE');
+      expect(
+        find.text('Offline'),
+        findsOneWidget,
+        reason: 'cloud confirmed down + no LAN + no valid evidence → OFFLINE',
+      );
 
       await _unmount(tester);
     });
 
-    testWidgets('LAN + cloud reconnect + fresh device cloud evidence → ONLINE',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'LAN + cloud reconnect + fresh device cloud evidence → ONLINE',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo(source: DeviceTransportSource.local);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      socket.fireConnectError();
-      await tester.pump();
-      expect(find.text('LAN'), findsOneWidget);
+        socket.fireConnectError();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
 
-      // Cloud comes back and delivers fresh positive device evidence.
-      socket.fireConnect();
-      await tester.pump();
-      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
-      await tester.pump();
+        // Cloud comes back and delivers fresh positive device evidence.
+        socket.fireConnect();
+        await tester.pump();
+        socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+        await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'cloud reconnect + fresh device evidence → ONLINE');
-      expect(find.text('LAN'), findsNothing);
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason: 'cloud reconnect + fresh device evidence → ONLINE',
+        );
+        expect(find.text('LAN'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
     testWidgets('a late local poll cannot downgrade ONLINE after newer cloud '
         'evidence', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // Cloud evidence confirms ONLINE.
       socket.push('device_status', {'deviceId': _deviceId, 'online': true});
@@ -949,8 +1134,11 @@ void main() {
       await tester.pump(const Duration(seconds: 16));
       await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'a late local result must not overwrite ONLINE evidence');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'a late local result must not overwrite ONLINE evidence',
+      );
       expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
@@ -960,31 +1148,46 @@ void main() {
         'correct', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'cloud control success keeps ONLINE (cloud reachable)');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'cloud control success keeps ONLINE (cloud reachable)',
+      );
       expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('local control succeeds while cloud is confirmed down → LAN',
-        (tester) async {
+    testWidgets('local control succeeds while cloud is confirmed down → LAN', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireConnectError();
       await tester.pump();
       await tester.tap(find.text('CHANNEL 2'));
       await tester.pumpAndSettle();
 
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'local command with cloud confirmed down = LAN');
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'local command with cloud confirmed down = LAN',
+      );
       expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
@@ -994,16 +1197,26 @@ void main() {
         'ONLINE', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _StatusFailingRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // Socket (re)connects, but the device produced NO valid evidence.
       socket.fireConnect();
       await tester.pump();
 
-      expect(find.text('Online'), findsNothing,
-          reason: 'a connected socket alone is not per-device online evidence');
-      expect(find.text('Offline'), findsNothing,
-          reason: 'and a single poll failure is not offline evidence either');
+      expect(
+        find.text('Online'),
+        findsNothing,
+        reason: 'a connected socket alone is not per-device online evidence',
+      );
+      expect(
+        find.text('Offline'),
+        findsNothing,
+        reason: 'and a single poll failure is not offline evidence either',
+      );
       expect(find.text('SYNCING'), findsWidgets);
 
       await _unmount(tester);
@@ -1013,7 +1226,11 @@ void main() {
         'exists', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _FailOnceRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
       expect(find.text('Online'), findsOneWidget);
 
       // The next background poll fails ONCE; fresh evidence still exists.
@@ -1021,8 +1238,11 @@ void main() {
       await tester.pump(const Duration(seconds: 16));
       await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'one transient failure must not mark the device OFFLINE');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'one transient failure must not mark the device OFFLINE',
+      );
       expect(find.text('Offline'), findsNothing);
 
       await _unmount(tester);
@@ -1030,11 +1250,16 @@ void main() {
   });
 
   group('disconnect probe: instant LAN when the LAN device answers', () {
-    testWidgets('cloud drop probes the verified LAN IP immediately → LAN',
-        (tester) async {
+    testWidgets('cloud drop probes the verified LAN IP immediately → LAN', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // The device was last seen over the CLOUD: no fresh local evidence yet.
       expect(find.text('Online'), findsOneWidget);
@@ -1045,8 +1270,11 @@ void main() {
       socket.fireDisconnect();
       await tester.pump();
 
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'disconnect probe re-establishes local evidence immediately');
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'disconnect probe re-establishes local evidence immediately',
+      );
       expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
@@ -1055,87 +1283,133 @@ void main() {
     testWidgets('connect error probes the LAN too → LAN', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireConnectError();
       await tester.pump();
 
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'a connect error is a confirmed cloud outage too');
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'a connect error is a confirmed cloud outage too',
+      );
       expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('unreachable LAN device → no false LAN, stays SYNCING',
-        (tester) async {
+    testWidgets('unreachable LAN device → no false LAN, stays SYNCING', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _StatusFailingRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // Cloud drops and the LAN cannot be reached: the probe fails (silently)
       // and a single failure is NOT offline evidence.
       socket.fireConnectError();
       await tester.pump();
 
-      expect(find.text('LAN'), findsNothing,
-          reason: 'no local evidence must never fabricate LAN');
-      expect(find.text('Offline'), findsNothing,
-          reason: 'one probe failure is not the repeated-failure threshold');
+      expect(
+        find.text('LAN'),
+        findsNothing,
+        reason: 'no local evidence must never fabricate LAN',
+      );
+      expect(
+        find.text('Offline'),
+        findsNothing,
+        reason: 'one probe failure is not the repeated-failure threshold',
+      );
       expect(find.text('SYNCING'), findsWidgets);
 
       await _unmount(tester);
     });
 
-    testWidgets('repeated cloud-down events do not spawn duplicate probes',
-        (tester) async {
+    testWidgets('repeated cloud-down events do not spawn duplicate probes', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
       final base = repo.statusCalls;
 
       socket.fireDisconnect();
       await tester.pump();
-      expect(repo.statusCalls, base + 1,
-          reason: 'the first cloud-down event triggers exactly one probe');
+      expect(
+        repo.statusCalls,
+        base + 1,
+        reason: 'the first cloud-down event triggers exactly one probe',
+      );
 
       socket.fireConnectError();
       await tester.pump();
-      expect(repo.statusCalls, base + 1,
-          reason: 'a repeated cloud-down event while already down must not probe again');
+      expect(
+        repo.statusCalls,
+        base + 1,
+        reason:
+            'a repeated cloud-down event while already down must not probe again',
+      );
 
       // A real reconnect resets the gate: a later drop probes again.
       socket.fireConnect();
       await tester.pump();
-      expect(repo.statusCalls, base + 2,
-          reason: 'reconnect refetches status (existing reconcile behavior)');
+      expect(
+        repo.statusCalls,
+        base + 2,
+        reason: 'reconnect refetches status (existing reconcile behavior)',
+      );
 
       socket.fireDisconnect();
       await tester.pump();
-      expect(repo.statusCalls, base + 3,
-          reason: 'a new outage after reconnect probes again');
+      expect(
+        repo.statusCalls,
+        base + 3,
+        reason: 'a new outage after reconnect probes again',
+      );
 
       await _unmount(tester);
     });
 
-    testWidgets('probe reuses a status read already in flight',
-        (tester) async {
+    testWidgets('probe reuses a status read already in flight', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _GatedStatusRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // The initial status read is still held in flight.
       expect(repo.statusCalls, 1);
 
       socket.fireDisconnect();
       await tester.pump();
-      expect(repo.statusCalls, 1,
-          reason: 'the probe must reuse the in-flight status read, not duplicate it');
+      expect(
+        repo.statusCalls,
+        1,
+        reason:
+            'the probe must reuse the in-flight status read, not duplicate it',
+      );
 
       socket.fireConnectError();
       await tester.pump();
-      expect(repo.statusCalls, 1,
-          reason: 'repeated events while down never add a second probe');
+      expect(
+        repo.statusCalls,
+        1,
+        reason: 'repeated events while down never add a second probe',
+      );
 
       // Once the in-flight read resolves, the verified local evidence shows LAN.
       repo.releaseStatus.complete();
@@ -1145,11 +1419,16 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('reconnect restores ONLINE; a LAN badge never sticks',
-        (tester) async {
+    testWidgets('reconnect restores ONLINE; a LAN badge never sticks', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireDisconnect();
       await tester.pump();
@@ -1157,45 +1436,66 @@ void main() {
 
       socket.fireConnect();
       await tester.pump();
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'cloud reachability restores ONLINE priority immediately');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'cloud reachability restores ONLINE priority immediately',
+      );
       expect(find.text('LAN'), findsNothing);
 
       socket.push('device_status', {'deviceId': _deviceId, 'online': true});
       await tester.pump();
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'fresh cloud device evidence keeps ONLINE');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'fresh cloud device evidence keeps ONLINE',
+      );
 
       await _unmount(tester);
     });
 
-    testWidgets('healthy-cloud local polls stay ONLINE (probe never downgrades)',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo(source: DeviceTransportSource.local);
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'healthy-cloud local polls stay ONLINE (probe never downgrades)',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo(source: DeviceTransportSource.local);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      expect(find.text('Online'), findsOneWidget);
+        expect(find.text('Online'), findsOneWidget);
 
-      // A background local poll while the cloud is still up must keep ONLINE.
-      await tester.pump(const Duration(seconds: 16));
-      await tester.pump();
-      expect(find.text('Online'), findsOneWidget);
-      expect(find.text('LAN'), findsNothing);
+        // A background local poll while the cloud is still up must keep ONLINE.
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
+        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('multiple taps during cold LAN reuse the one probe',
-        (tester) async {
+    testWidgets('multiple taps during cold LAN reuse the one probe', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireDisconnect();
       await tester.pump();
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'the single disconnect probe already established local evidence');
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason:
+            'the single disconnect probe already established local evidence',
+      );
 
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
@@ -1204,21 +1504,32 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(repo.statusCalls, 2,
-          reason: 'initial load + the ONE disconnect probe — taps add no probe');
-      expect(repo.controlCalls, 2,
-          reason: 'each tap sends its own command but never a duplicate probe');
+      expect(
+        repo.statusCalls,
+        2,
+        reason: 'initial load + the ONE disconnect probe — taps add no probe',
+      );
+      expect(
+        repo.controlCalls,
+        2,
+        reason: 'each tap sends its own command but never a duplicate probe',
+      );
 
       await _unmount(tester);
     });
   });
 
   group('Phase 3: socket-confirmed report resolves pending before REST', () {
-    testWidgets('a confirmed device_update resolves TURNING… immediately',
-        (tester) async {
+    testWidgets('a confirmed device_update resolves TURNING… immediately', (
+      tester,
+    ) async {
       final repo = _FakeRepo(gateControl: true);
       final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       expect(find.text('DRY'), findsNWidgets(4));
 
@@ -1237,8 +1548,11 @@ void main() {
       });
       await tester.pump();
 
-      expect(find.text('TURNING…'), findsNothing,
-          reason: 'a confirmed device report must resolve the pending tap');
+      expect(
+        find.text('TURNING…'),
+        findsNothing,
+        reason: 'a confirmed device report must resolve the pending tap',
+      );
       expect(find.text('FLOWING'), findsOneWidget);
       expect(find.text('DRY'), findsNWidgets(3));
 
@@ -1253,90 +1567,113 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('only a strictly-newer socket report may commit or flip state',
-        (tester) async {
-      final repo = _FakeRepo(gateControl: true);
-      final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'only a strictly-newer socket report may commit or flip state',
+      (tester) async {
+        final repo = _FakeRepo(gateControl: true);
+        final socket = _ScriptableSocket();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      await tester.tap(find.text('CHANNEL 1'));
-      await tester.pump();
-      expect(find.text('TURNING…'), findsOneWidget);
+        await tester.tap(find.text('CHANNEL 1'));
+        await tester.pump();
+        expect(find.text('TURNING…'), findsOneWidget);
 
-      // Fresh report: commits ON, resolves the pending tap.
-      socket.push('device_update', {
-        'deviceId': _deviceId,
-        'channel': 1,
-        'state': 'ON',
-        'updatedAt': DateTime.now().toIso8601String(),
-      });
-      await tester.pump();
-      expect(find.text('TURNING…'), findsNothing);
-      expect(find.text('FLOWING'), findsOneWidget);
+        // Fresh report: commits ON, resolves the pending tap.
+        socket.push('device_update', {
+          'deviceId': _deviceId,
+          'channel': 1,
+          'state': 'ON',
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
+        await tester.pump();
+        expect(find.text('TURNING…'), findsNothing);
+        expect(find.text('FLOWING'), findsOneWidget);
 
-      // A STALE report (older than the confirmed ON) must neither commit nor
-      // flip the channel back — only strictly-newer reports may.
-      socket.push('device_update', {
-        'deviceId': _deviceId,
-        'channel': 1,
-        'state': 'OFF',
-        'updatedAt': DateTime.now()
-            .subtract(const Duration(minutes: 10))
-            .toIso8601String(),
-      });
-      await tester.pump();
+        // A STALE report (older than the confirmed ON) must neither commit nor
+        // flip the channel back — only strictly-newer reports may.
+        socket.push('device_update', {
+          'deviceId': _deviceId,
+          'channel': 1,
+          'state': 'OFF',
+          'updatedAt': DateTime.now()
+              .subtract(const Duration(minutes: 10))
+              .toIso8601String(),
+        });
+        await tester.pump();
 
-      expect(find.text('FLOWING'), findsOneWidget,
-          reason: 'a stale report must never regress the newer confirmed state');
-      // Channels 2-4 were never touched and remain DRY.
-      expect(find.text('DRY'), findsNWidgets(3));
+        expect(
+          find.text('FLOWING'),
+          findsOneWidget,
+          reason: 'a stale report must never regress the newer confirmed state',
+        );
+        // Channels 2-4 were never touched and remain DRY.
+        expect(find.text('DRY'), findsNWidgets(3));
 
-      repo.releaseControl.complete();
-      await tester.pump();
-      expect(repo.controlCalls, 1);
-      expect(find.text('FLOWING'), findsOneWidget);
+        repo.releaseControl.complete();
+        await tester.pump();
+        expect(repo.controlCalls, 1);
+        expect(find.text('FLOWING'), findsOneWidget);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('a late REST response cannot regress the newer socket-confirmed state',
-        (tester) async {
-      final repo = _StaleControlRepo(gateControl: true);
-      final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    testWidgets(
+      'a late REST response cannot regress the newer socket-confirmed state',
+      (tester) async {
+        final repo = _StaleControlRepo(gateControl: true);
+        final socket = _ScriptableSocket();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      await tester.tap(find.text('CHANNEL 1'));
-      await tester.pump();
-      expect(find.text('TURNING…'), findsOneWidget);
+        await tester.tap(find.text('CHANNEL 1'));
+        await tester.pump();
+        expect(find.text('TURNING…'), findsOneWidget);
 
-      // Socket confirms ON (newer).
-      socket.push('device_update', {
-        'deviceId': _deviceId,
-        'channel': 1,
-        'state': 'ON',
-        'updatedAt': DateTime.now().toIso8601String(),
-      });
-      await tester.pump();
-      expect(find.text('FLOWING'), findsOneWidget);
+        // Socket confirms ON (newer).
+        socket.push('device_update', {
+          'deviceId': _deviceId,
+          'channel': 1,
+          'state': 'ON',
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
+        await tester.pump();
+        expect(find.text('FLOWING'), findsOneWidget);
 
-      // The REST response lands late and reports OFF with an OLDER timestamp.
-      // The staleness guard must keep the socket-confirmed ON.
-      repo.releaseControl.complete();
-      await tester.pump();
+        // The REST response lands late and reports OFF with an OLDER timestamp.
+        // The staleness guard must keep the socket-confirmed ON.
+        repo.releaseControl.complete();
+        await tester.pump();
 
-      expect(find.text('FLOWING'), findsOneWidget,
-          reason: 'a stale REST report must never regress the newer confirmed state');
-      expect(find.text('DRY'), findsNWidgets(3));
-      expect(repo.controlCalls, 1);
+        expect(
+          find.text('FLOWING'),
+          findsOneWidget,
+          reason:
+              'a stale REST report must never regress the newer confirmed state',
+        );
+        expect(find.text('DRY'), findsNWidgets(3));
+        expect(repo.controlCalls, 1);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
     testWidgets('a tap after socket confirmation does not spawn a second command '
         'while REST is in flight', (tester) async {
       final repo = _FakeRepo(gateControl: true);
       final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
@@ -1357,8 +1694,12 @@ void main() {
       // Second tap during the still-in-flight REST must be ignored.
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
-      expect(repo.controlCalls, 1,
-          reason: 'exactly one command per tap: the guard persists until REST finishes');
+      expect(
+        repo.controlCalls,
+        1,
+        reason:
+            'exactly one command per tap: the guard persists until REST finishes',
+      );
 
       repo.releaseControl.complete();
       await tester.pump();
@@ -1373,19 +1714,32 @@ void main() {
         'quickly and reconciles to ONLINE', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
+      final cm = _CmFake(
+        responses: {'Status%205': _macBody, 'State': _stateBody},
+      );
       final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudApi(devices: [
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-        ])),
+        cloud: CloudDeviceTransport(
+          api: _CloudApi(
+            devices: [
+              {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+            ],
+          ),
+        ),
         locator: _LocatorStub(cached: '192.168.1.5'),
         fetch: cm.call,
         cache: cache,
       );
       final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // Card rendered without waiting on anything and the confirmed local
       // status filled in the ON/OFF states.
@@ -1406,13 +1760,19 @@ void main() {
     });
 
     testWidgets('cold start: cloud list hangs but LAN device answers → page '
-        'renders immediately, no 15s cloud timeout wait, then LAN badge',
-        (tester) async {
+        'renders immediately, no 15s cloud timeout wait, then LAN badge', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
+      final cm = _CmFake(
+        responses: {'Status%205': _macBody, 'State': _stateBody},
+      );
       final repo = DeviceRepositoryService(
         cloud: CloudDeviceTransport(api: _HangingCloudApi()),
         locator: _LocatorStub(cached: '192.168.1.5'),
@@ -1420,7 +1780,11 @@ void main() {
         cache: cache,
       );
       final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // The device card + confirmed states render WITHOUT the cloud list ever
       // resolving (previously the page stayed on the spinner until the 15s
@@ -1428,8 +1792,11 @@ void main() {
       expect(find.text('Controller'), findsOneWidget);
       expect(find.text('DRY'), findsNWidgets(4));
       expect(find.text('Could not load devices'), findsNothing);
-      expect(find.byType(CircularProgressIndicator), findsNothing,
-          reason: 'the page must never sit on an infinite spinner');
+      expect(
+        find.byType(CircularProgressIndicator),
+        findsNothing,
+        reason: 'the page must never sit on an infinite spinner',
+      );
 
       // Confirm the cloud outage via the socket monitor → the verified local
       // evidence resolves the badge to LAN.
@@ -1462,8 +1829,11 @@ void main() {
         'SYNCING, never a fabricated ONLINE', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
       final repo = DeviceRepositoryService(
         cloud: CloudDeviceTransport(api: _CloudDownApi()),
         locator: _LocatorStub(), // no LAN device reachable
@@ -1486,9 +1856,14 @@ void main() {
         'to ONLINE via existing rules', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
+      final cm = _CmFake(
+        responses: {'Status%205': _macBody, 'State': _stateBody},
+      );
       final repo = DeviceRepositoryService(
         cloud: CloudDeviceTransport(api: _CloudDownApi()),
         locator: _LocatorStub(cached: '192.168.1.5'),
@@ -1496,7 +1871,11 @@ void main() {
         cache: cache,
       );
       final socket = _ScriptableSocket();
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       socket.fireConnectError();
       await tester.pump();
@@ -1535,42 +1914,56 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
 
-      expect(repo.statusCalls, 2,
-          reason: 'initial load + the single fast-failure LAN probe');
-      expect(find.text('LAN'), findsOneWidget,
-          reason: 'confirmed cloud loss + verified local device = LAN');
+      expect(
+        repo.statusCalls,
+        2,
+        reason: 'initial load + the single fast-failure LAN probe',
+      );
+      expect(
+        find.text('LAN'),
+        findsOneWidget,
+        reason: 'confirmed cloud loss + verified local device = LAN',
+      );
       expect(find.text('Online'), findsNothing);
       expect(find.text('Offline'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('cloud fails but the LAN device is unreachable → no false LAN',
-        (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _StatusFailingRepo();
-      var healthy = true;
-      await _pumpDevicesPage(
-        tester,
-        repo: repo,
-        socketFactory: (u, o) => socket,
-        healthCheck: () async => healthy,
-      );
-      expect(find.text('SYNCING'), findsWidgets);
+    testWidgets(
+      'cloud fails but the LAN device is unreachable → no false LAN',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _StatusFailingRepo();
+        var healthy = true;
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          healthCheck: () async => healthy,
+        );
+        expect(find.text('SYNCING'), findsWidgets);
 
-      healthy = false;
-      await tester.pump(const Duration(seconds: 5));
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.pump();
+        healthy = false;
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
 
-      expect(find.text('LAN'), findsNothing,
-          reason: 'no fresh local device evidence must never fabricate LAN');
-      expect(find.text('Offline'), findsNothing,
-          reason: 'one failed probe is not the repeated-failure threshold');
-      expect(find.text('SYNCING'), findsWidgets);
+        expect(
+          find.text('LAN'),
+          findsNothing,
+          reason: 'no fresh local device evidence must never fabricate LAN',
+        );
+        expect(
+          find.text('Offline'),
+          findsNothing,
+          reason: 'one failed probe is not the repeated-failure threshold',
+        );
+        expect(find.text('SYNCING'), findsWidgets);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
     testWidgets('cloud recovers → socket reconnect restores Online immediately '
         '(health-down never wedges LAN)', (tester) async {
@@ -1600,15 +1993,19 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Online'), findsOneWidget,
-          reason: 'fresh cloud confirmation restores ONLINE immediately');
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'fresh cloud confirmation restores ONLINE immediately',
+      );
       expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('healthy cloud: one bounded probe per interval, no bursts',
-        (tester) async {
+    testWidgets('healthy cloud: one bounded probe per interval, no bursts', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
       var checks = 0;
@@ -1626,8 +2023,11 @@ void main() {
       await tester.pump(const Duration(seconds: 16)); // ticks at 5/10/15s
       await tester.pump();
 
-      expect(checks, 3,
-          reason: 'a healthy cloud gets exactly one bounded probe per interval');
+      expect(
+        checks,
+        3,
+        reason: 'a healthy cloud gets exactly one bounded probe per interval',
+      );
       expect(find.text('Online'), findsOneWidget);
       expect(find.text('LAN'), findsNothing);
 
@@ -1652,8 +2052,11 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
-      expect(repo.statusCalls, base + 1,
-          reason: 'the confirmed outage triggers exactly one LAN probe');
+      expect(
+        repo.statusCalls,
+        base + 1,
+        reason: 'the confirmed outage triggers exactly one LAN probe',
+      );
       expect(find.text('LAN'), findsOneWidget);
 
       // The socket now notices the same outage on its own: cloud already marked
@@ -1662,8 +2065,11 @@ void main() {
       await tester.pump();
       socket.fireConnectError();
       await tester.pump();
-      expect(repo.statusCalls, base + 1,
-          reason: 'repeated cloud-down signals while already down never re-probe');
+      expect(
+        repo.statusCalls,
+        base + 1,
+        reason: 'repeated cloud-down signals while already down never re-probe',
+      );
 
       await _unmount(tester);
     });
@@ -1673,53 +2079,79 @@ void main() {
     const foreignMac = '{"StatusNET":{"Mac":"00:11:22:33:44:55"}}';
 
     testWidgets(
-        'cloud down + warm verified endpoint → direct probe, no mDNS, no '
-        're-verification', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cm = _RecordingCmFake({
-        '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
-      });
-      final locator = _LocatorStub(cached: '192.168.1.5');
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudApi(devices: const [
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-        ])),
-        locator: locator,
-        fetch: cm.call,
-        cache: LocalDeviceCache(),
-      );
-      final socket = _ScriptableSocket();
+      'cloud down + warm verified endpoint → direct probe, no mDNS, no '
+      're-verification',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cm = _RecordingCmFake({
+          '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
+        });
+        final locator = _LocatorStub(cached: '192.168.1.5');
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(
+            api: _CloudApi(
+              devices: const [
+                {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+              ],
+            ),
+          ),
+          locator: locator,
+          fetch: cm.call,
+          cache: LocalDeviceCache(),
+        );
+        final socket = _ScriptableSocket();
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      // First contact discovered the candidate and identity-verified it once.
-      expect(cm.status5Count, 1,
-          reason: 'one identity verification on first contact');
-      expect(find.text('Online'), findsOneWidget);
+        // First contact discovered the candidate and identity-verified it once.
+        expect(
+          cm.status5Count,
+          1,
+          reason: 'one identity verification on first contact',
+        );
+        expect(find.text('Online'), findsOneWidget);
 
-      socket.fireDisconnect();
-      await tester.pump();
-      await tester.pump();
+        socket.fireDisconnect();
+        await tester.pump();
+        await tester.pump();
 
-      // LAN resolves through the warm verified endpoint: no second Status 5,
-      // no mDNS, no cloud re-probe.
-      expect(find.text('LAN'), findsOneWidget);
-      expect(cm.status5Count, 1,
-          reason: 'warm verified endpoint skips re-verification');
-      expect(locator.mDnsCalls, 0,
-          reason: 'the fast path never falls back to mDNS');
-      expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2,
-          reason: 'both reads went straight to the known verified IP');
+        // LAN resolves through the warm verified endpoint: no second Status 5,
+        // no mDNS, no cloud re-probe.
+        expect(find.text('LAN'), findsOneWidget);
+        expect(
+          cm.status5Count,
+          1,
+          reason: 'warm verified endpoint skips re-verification',
+        );
+        expect(
+          locator.mDnsCalls,
+          0,
+          reason: 'the fast path never falls back to mDNS',
+        );
+        expect(
+          cm.log.where((e) => e == '192.168.1.5 State').length,
+          2,
+          reason: 'both reads went straight to the known verified IP',
+        );
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('cloud down + freshly persisted verified IP → fast probe',
-        (tester) async {
+    testWidgets('cloud down + freshly persisted verified IP → fast probe', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
       final cm = _RecordingCmFake({
         '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
       });
@@ -1735,7 +2167,11 @@ void main() {
       );
       final socket = _ScriptableSocket();
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // Fresh persisted verified IP short-circuits discovery; the transport
       // still re-verifies (Status 5) before reading, but no mDNS runs.
@@ -1747,61 +2183,76 @@ void main() {
       await tester.pump();
 
       expect(find.text('LAN'), findsOneWidget);
-      expect(locator.mDnsCalls, 0,
-          reason: 'the persisted verified IP kept discovery off the mDNS path');
-      expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2);
-
-      await _unmount(tester);
-    });
-
-    testWidgets(
-        'cloud-learned lastIp is never trusted blindly — Status 5 identity '
-        'verification still runs before reading', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cm = _RecordingCmFake({
-        '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
-      });
-      final locator = _LocatorStub(cached: '192.168.1.5');
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudApi(devices: const [
-          {
-            'deviceId': _deviceId,
-            'name': 'Controller',
-            'channels': 4,
-            'lastIp': '192.168.1.5',
-          },
-        ])),
-        locator: locator,
-        fetch: cm.call,
-        cache: LocalDeviceCache(),
+      expect(
+        locator.mDnsCalls,
+        0,
+        reason: 'the persisted verified IP kept discovery off the mDNS path',
       );
-      final socket = _ScriptableSocket();
-
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
-
-      // The cloud-learned IP was not trusted as-is: the first contact is the
-      // identity check, never a raw status read.
-      expect(cm.log.first, '192.168.1.5 Status%205');
-      expect(cm.status5Count, 1);
-      expect(find.text('Online'), findsOneWidget);
-
-      socket.fireDisconnect();
-      await tester.pump();
-      await tester.pump();
-
-      expect(find.text('LAN'), findsOneWidget);
       expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2);
 
       await _unmount(tester);
     });
 
     testWidgets(
-        'repurposed IP (foreign MAC) is rejected, never controlled, and '
+      'cloud-learned lastIp is never trusted blindly — Status 5 identity '
+      'verification still runs before reading',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cm = _RecordingCmFake({
+          '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
+        });
+        final locator = _LocatorStub(cached: '192.168.1.5');
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(
+            api: _CloudApi(
+              devices: const [
+                {
+                  'deviceId': _deviceId,
+                  'name': 'Controller',
+                  'channels': 4,
+                  'lastIp': '192.168.1.5',
+                },
+              ],
+            ),
+          ),
+          locator: locator,
+          fetch: cm.call,
+          cache: LocalDeviceCache(),
+        );
+        final socket = _ScriptableSocket();
+
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        // The cloud-learned IP was not trusted as-is: the first contact is the
+        // identity check, never a raw status read.
+        expect(cm.log.first, '192.168.1.5 Status%205');
+        expect(cm.status5Count, 1);
+        expect(find.text('Online'), findsOneWidget);
+
+        socket.fireDisconnect();
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('LAN'), findsOneWidget);
+        expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets('repurposed IP (foreign MAC) is rejected, never controlled, and '
         're-discovered', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
       final cm = _RecordingCmFake({
         '192.168.1.5': {'Status%205': foreignMac},
       });
@@ -1814,7 +2265,11 @@ void main() {
       );
       final socket = _ScriptableSocket();
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // The known IP holds a different device → identity mismatch → discarded,
       // mDNS searched (nothing found) → SYNCING, never OFFLINE.
@@ -1829,19 +2284,26 @@ void main() {
 
       // Even after cloud-down the foreign box is never read or controlled.
       expect(cm.hasControlCommand, isFalse);
-      expect(cm.log.where((e) => e.contains('State')), isEmpty,
-          reason: 'a mismatched identity must never be status-read');
+      expect(
+        cm.log.where((e) => e.contains('State')),
+        isEmpty,
+        reason: 'a mismatched identity must never be status-read',
+      );
       expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
     });
 
-    testWidgets('known IP unreachable → mDNS discovery fallback still runs',
-        (tester) async {
+    testWidgets('known IP unreachable → mDNS discovery fallback still runs', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      await cache.upsert({
+        'deviceId': _deviceId,
+        'name': 'Controller',
+        'channels': 4,
+      });
       final cm = _RecordingCmFake({});
       final locator = _LocatorStub(cached: '192.168.1.5');
       final repo = DeviceRepositoryService(
@@ -1852,7 +2314,11 @@ void main() {
       );
       final socket = _ScriptableSocket();
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
       // HTTP 404 on Status 5 = unreachable → identity unavailable → candidate
       // kept, then mDNS searched; nothing found → SYNCING (not OFFLINE).
@@ -1864,87 +2330,308 @@ void main() {
       await tester.pump();
 
       expect(find.text('LAN'), findsNothing);
-      expect(locator.mDnsCalls, greaterThanOrEqualTo(2),
-          reason: 'the fallback ladder runs again on the cloud-down probe');
+      expect(
+        locator.mDnsCalls,
+        greaterThanOrEqualTo(2),
+        reason: 'the fallback ladder runs again on the cloud-down probe',
+      );
       expect(cm.hasControlCommand, isFalse);
 
       await _unmount(tester);
     });
 
     testWidgets(
-        'device changed IP → repurposed old IP is discarded and mDNS finds the '
-        'new address, which is re-verified and cached', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cache = LocalDeviceCache();
-      await cache.upsert(
-          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
-      final cm = _RecordingCmFake({
-        '192.168.1.5': {'Status%205': foreignMac},
-        '192.168.1.50': {'Status%205': _macBody, 'State': _stateBody},
-      });
-      final locator = _LocatorStub(
-        cached: '192.168.1.5',
-        verifiedAt: DateTime.now().subtract(const Duration(seconds: 5)),
-        mDnsAddresses: const ['192.168.1.50'],
-      );
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudDownApi()),
-        locator: locator,
-        fetch: cm.call,
-        cache: cache,
-      );
+      'device changed IP → repurposed old IP is discarded and mDNS finds the '
+      'new address, which is re-verified and cached',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cache = LocalDeviceCache();
+        await cache.upsert({
+          'deviceId': _deviceId,
+          'name': 'Controller',
+          'channels': 4,
+        });
+        final cm = _RecordingCmFake({
+          '192.168.1.5': {'Status%205': foreignMac},
+          '192.168.1.50': {'Status%205': _macBody, 'State': _stateBody},
+        });
+        final locator = _LocatorStub(
+          cached: '192.168.1.5',
+          verifiedAt: DateTime.now().subtract(const Duration(seconds: 5)),
+          mDnsAddresses: const ['192.168.1.50'],
+        );
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(api: _CloudDownApi()),
+          locator: locator,
+          fetch: cm.call,
+          cache: cache,
+        );
+        final socket = _ScriptableSocket();
+
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        // Fresh verified old IP → transport re-verifies → foreign MAC → identity
+        // mismatch → endpoint invalidated → mDNS finds 192.168.1.50 → verified.
+        expect(cm.log, contains('192.168.1.5 Status%205'));
+        expect(
+          cm.log,
+          isNot(contains('192.168.1.5 State')),
+          reason: 'the repurposed old IP is never status-read',
+        );
+        expect(locator.discarded, contains(_deviceId));
+        expect(locator.storedVerified, contains('192.168.1.50'));
+        expect(locator.mDnsCalls, greaterThanOrEqualTo(1));
+        expect(
+          cm.log.where((e) => e == '192.168.1.50 State').length,
+          1,
+          reason: 'the status read happened at the freshly discovered IP',
+        );
+
+        socket.fireDisconnect();
+        await tester.pump();
+        await tester.pump();
+
+        // The newly learned verified IP now serves the cloud-down probe directly.
+        expect(find.text('LAN'), findsOneWidget);
+        expect(cm.log.where((e) => e == '192.168.1.50 State').length, 2);
+        expect(cm.log, isNot(contains('192.168.1.5 State')));
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'cloud-down probe reuses a status read already in flight — no second '
+      'probe',
+      (tester) async {
+        final repo = _GatedStatusRepo(source: DeviceTransportSource.local);
+        final socket = _ScriptableSocket();
+
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        // Initial load holds one status read in flight.
+        expect(repo.statusCalls, 1);
+
+        // Every cloud-down signal while that read is still pending reuses it.
+        socket.fireDisconnect();
+        await tester.pump();
+        socket.fireConnectError();
+        await tester.pump();
+        expect(
+          repo.statusCalls,
+          1,
+          reason: 'the single-flight status read is not duplicated',
+        );
+
+        repo.releaseStatus.complete();
+        await tester.pumpAndSettle();
+        expect(find.text('LAN'), findsOneWidget);
+
+        await _unmount(tester);
+      },
+    );
+  });
+
+  group('evidence ordering: ONLINE↔OFFLINE flapping guard', () {
+    testWidgets('a cloud poll reporting offline cannot flip a device confirmed '
+        'online by a committed device_update', (tester) async {
       final socket = _ScriptableSocket();
+      final repo = _CloudOfflineRepo();
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      expect(find.text('Online'), findsOneWidget);
 
-      // Fresh verified old IP → transport re-verifies → foreign MAC → identity
-      // mismatch → endpoint invalidated → mDNS finds 192.168.1.50 → verified.
-      expect(cm.log, contains('192.168.1.5 Status%205'));
-      expect(cm.log, isNot(contains('192.168.1.5 State')),
-          reason: 'the repurposed old IP is never status-read');
-      expect(locator.discarded, contains(_deviceId));
-      expect(locator.storedVerified, contains('192.168.1.50'));
-      expect(locator.mDnsCalls, greaterThanOrEqualTo(1));
-      expect(cm.log.where((e) => e == '192.168.1.50 State').length, 1,
-          reason: 'the status read happened at the freshly discovered IP');
-
-      socket.fireDisconnect();
+      // Fresh positive MQTT evidence.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'ON',
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
       await tester.pump();
+      expect(find.text('Online'), findsOneWidget);
+
+      // The very next 15s poll comes back "offline" from the cloud.
+      repo.nextOffline = true;
+      await tester.pump(const Duration(seconds: 16));
       await tester.pump();
 
-      // The newly learned verified IP now serves the cloud-down probe directly.
-      expect(find.text('LAN'), findsOneWidget);
-      expect(cm.log.where((e) => e == '192.168.1.50 State').length, 2);
-      expect(cm.log, isNot(contains('192.168.1.5 State')));
+      expect(
+        find.text('Offline'),
+        findsNothing,
+        reason:
+            'a stale cloud offline verdict must not overwrite newer '
+            'positive device evidence',
+      );
+      expect(find.text('Online'), findsOneWidget);
 
       await _unmount(tester);
     });
 
     testWidgets(
-        'cloud-down probe reuses a status read already in flight — no second '
-        'probe', (tester) async {
-      final repo = _GatedStatusRepo(source: DeviceTransportSource.local);
+      'repeated cloud offline verdicts never flip a healthy device — no '
+      'ONLINE↔OFFLINE flapping',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _CloudOfflineRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        expect(find.text('Online'), findsOneWidget);
+
+        for (var round = 0; round < 3; round++) {
+          socket.push('device_update', {
+            'deviceId': _deviceId,
+            'channel': 1,
+            'state': 'ON',
+            'updatedAt': DateTime.now().toUtc().toIso8601String(),
+          });
+          await tester.pump();
+          repo.nextOffline = true;
+          await tester.pump(const Duration(seconds: 16));
+          await tester.pump();
+        }
+
+        expect(
+          find.text('Offline'),
+          findsNothing,
+          reason:
+              'each committed device report re-freshes evidence ahead of '
+              'the stale offline verdict',
+        );
+        expect(find.text('Online'), findsOneWidget);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'a newer committed device_update overwrites an older LWT Offline',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _FakeRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+        await tester.pump();
+        expect(find.text('Offline'), findsOneWidget);
+
+        socket.push('device_update', {
+          'deviceId': _deviceId,
+          'channel': 1,
+          'state': 'ON',
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+        await tester.pump();
+
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason:
+              'a device that demonstrably talked to MQTT supersedes an '
+              'older authoritative Offline',
+        );
+        expect(find.text('Offline'), findsNothing);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'LWT Offline after fresh device evidence is still authoritative and '
+      'stays OFFLINE',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _CloudOfflineRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+
+        socket.push('device_update', {
+          'deviceId': _deviceId,
+          'channel': 1,
+          'state': 'ON',
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+        await tester.pump();
+        expect(find.text('Online'), findsOneWidget);
+
+        // A real LWT Offline always wins, even right after fresh evidence.
+        socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+        await tester.pump();
+        expect(find.text('Offline'), findsOneWidget);
+
+        // Subsequent cloud polls keep the card OFFLINE — the offline verdict's
+        // own channel reports must never re-fresh liveness evidence.
+        repo.nextOffline = true;
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
+        repo.nextOffline = true;
+        await tester.pump(const Duration(seconds: 16));
+        await tester.pump();
+
+        expect(
+          find.text('Offline'),
+          findsOneWidget,
+          reason:
+              'only positive device evidence newer than the LWT Offline '
+              'may hold the card online',
+        );
+        expect(find.text('Online'), findsNothing);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets('a successful control ACK revives a device LWT put OFFLINE', (
+      tester,
+    ) async {
       final socket = _ScriptableSocket();
+      final repo = _FakeRepo();
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
 
-      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
-
-      // Initial load holds one status read in flight.
-      expect(repo.statusCalls, 1);
-
-      // Every cloud-down signal while that read is still pending reuses it.
-      socket.fireDisconnect();
+      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
       await tester.pump();
-      socket.fireConnectError();
-      await tester.pump();
-      expect(repo.statusCalls, 1,
-          reason: 'the single-flight status read is not duplicated');
+      expect(find.text('Offline'), findsOneWidget);
 
-      repo.releaseStatus.complete();
+      await tester.tap(find.text('CHANNEL 1'));
       await tester.pumpAndSettle();
-      expect(find.text('LAN'), findsOneWidget);
+
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason:
+            'a successful control ACK is strong, newer positive '
+            'evidence that revives the device',
+      );
+      expect(find.text('Offline'), findsNothing);
 
       await _unmount(tester);
     });
   });
 }
-
