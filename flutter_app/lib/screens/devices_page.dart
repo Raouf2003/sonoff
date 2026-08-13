@@ -514,6 +514,15 @@ class _DevicesPageState extends State<DevicesPage>
       ch.pending = true;
       ch.desired = targetState ? 'ON' : 'OFF';
       _channelLoading[index] = true;
+      // Optimistic visual flip: the card reflects the requested state at tap
+      // time. The first confirmed report via `_applyChannelReport` overwrites
+      // it; on total failure the catch path degrades to UNKNOWN.
+      if (targetState) {
+        _rippleControllers[index].repeat(reverse: true);
+      } else {
+        _rippleControllers[index].stop();
+        _rippleControllers[index].reset();
+      }
     });
     try {
       final result = await _repository.control(
@@ -569,6 +578,8 @@ class _DevicesPageState extends State<DevicesPage>
           ch.reported = null;
           ch.source = null;
           ch.updatedAt = null;
+          _rippleControllers[index].stop();
+          _rippleControllers[index].reset();
         }
       });
       if (socketConfirmed) {
@@ -922,6 +933,7 @@ class _DevicesPageState extends State<DevicesPage>
             channel: i + 1,
             config: _configFor(i),
             reported: _channels[i].reported,
+            desired: _channels[i].desired,
             pending: _channels[i].pending,
             loading: _channelLoading[i],
             offline: _isOffline,
@@ -1072,6 +1084,7 @@ class _WaterCard extends AnimatedWidget {
   final int channel;
   final ChannelConfig config;
   final String? reported;
+  final String? desired;
   final bool pending;
   final bool loading;
   final bool offline;
@@ -1084,6 +1097,7 @@ class _WaterCard extends AnimatedWidget {
     required this.channel,
     required this.config,
     required this.reported,
+    required this.desired,
     required this.pending,
     required this.loading,
     required this.offline,
@@ -1101,6 +1115,7 @@ class _WaterCard extends AnimatedWidget {
         channel: channel,
         config: config,
         reported: reported,
+        desired: desired,
         pending: pending,
         loading: loading,
         offline: offline,
@@ -1115,6 +1130,7 @@ class _WaterCardBody extends StatefulWidget {
   final int channel;
   final ChannelConfig config;
   final String? reported;
+  final String? desired;
   final bool pending;
   final bool loading;
   final bool offline;
@@ -1125,6 +1141,7 @@ class _WaterCardBody extends StatefulWidget {
     required this.channel,
     required this.config,
     required this.reported,
+    required this.desired,
     required this.pending,
     required this.loading,
     required this.offline,
@@ -1158,7 +1175,9 @@ class _WaterCardBodyState extends State<_WaterCardBody>
   @override
   Widget build(BuildContext context) {
     final c = widget.config;
-    final isOn = widget.reported == 'ON';
+    final isOn = widget.pending
+        ? widget.desired == 'ON'
+        : widget.reported == 'ON';
     final isUnknown = widget.reported == null;
     final colors = context.steesColors;
     // Only loading disables taps: offline/unknown cards stay tappable so the

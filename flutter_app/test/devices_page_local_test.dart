@@ -303,12 +303,12 @@ void main() {
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
-    // While the (gated) command is in flight the intent is PENDING — the UI
-    // must NOT commit ON (no optimistic flip), so the pill shows TURNING.
+    // While the (gated) command is in flight the pill stays TURNING — the
+    // confirmed-state label (FLOWING) must never appear before the report.
     expect(repo.controlCalls, 1);
     expect(find.text('TURNING…'), findsOneWidget);
     expect(find.text('FLOWING'), findsNothing,
-        reason: 'no optimistic ON may be shown before the device confirms');
+        reason: 'the confirmed-state pill may only appear after a device report');
 
     // Release the command: the confirmed report flips channel 1 to FLOWING.
     // `pump()` (not `pumpAndSettle`) so fake time never reaches the 15s poll
@@ -355,7 +355,7 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('unconfirmed taps never flip a channel ON until a report lands',
+  testWidgets('unconfirmed taps keep the pill TURNING until a report lands',
       (tester) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
@@ -377,6 +377,56 @@ void main() {
     expect(find.text('TURNING…'), findsNothing);
     expect(find.textContaining('nope'), findsWidgets,
         reason: 'the failure is surfaced to the user');
+    await _unmount(tester);
+  });
+
+  testWidgets('a tap flips the card optimistically; a fresh report supersedes it',
+      (tester) async {
+    final repo = _FakeRepo(gateControl: true);
+    final socket = _ScriptableSocket();
+    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+    final colors = tester.element(find.text('CHANNEL 1')).steesColors;
+    int leafDrops() => find
+        .byIcon(Icons.water_drop)
+        .evaluate()
+        .where((e) => (e.widget as Icon).color == colors.leaf)
+        .length;
+
+    expect(find.text('DRY'), findsNWidgets(4));
+    expect(leafDrops(), 0);
+
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+
+    // The tapped card flips ON immediately (optimistic) while the pill still
+    // shows TURNING, so the UI is responsive without faking a confirmed state.
+    expect(repo.controlCalls, 1);
+    expect(find.text('TURNING…'), findsOneWidget);
+    expect(leafDrops(), 1,
+        reason: 'the requested state is shown before the device confirms');
+
+    // A FRESH device report contradicting the optimistic flip (the device
+    // stayed OFF) must overwrite it: back to the confirmed DRY state.
+    socket.push('device_update', {
+      'deviceId': _deviceId,
+      'channel': 1,
+      'state': 'OFF',
+      'updatedAt': DateTime.now().toIso8601String(),
+    });
+    await tester.pump();
+
+    expect(find.text('TURNING…'), findsNothing);
+    expect(find.text('DRY'), findsNWidgets(4));
+    expect(leafDrops(), 0,
+        reason: 'a confirmed report supersedes the optimistic flip');
+
+    // The late REST response re-confirms the requested state once released.
+    repo.releaseControl.complete();
+    await tester.pump();
+    expect(repo.controlCalls, 1);
+    expect(find.text('FLOWING'), findsOneWidget);
+
     await _unmount(tester);
   });
 
