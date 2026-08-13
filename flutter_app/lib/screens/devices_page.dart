@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
+import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/control_timeline.dart';
 import '../services/device_repository_service.dart';
@@ -36,21 +37,25 @@ class DevicesPage extends StatefulWidget {
   final ValueChanged<int> onNavigateToTab;
   const DevicesPage({super.key, required this.onNavigateToTab})
       : testRepository = null,
-        testSocketFactory = null;
+        testSocketFactory = null,
+        testHealthCheck = null;
 
-  /// Test seam: injects a fake repository / socket connector so widget tests
-  /// exercise the relay gate and cloud→local list fallback without network.
+  /// Test seam: injects a fake repository / socket connector / cloud health
+  /// probe so widget tests exercise the relay gate and cloud→local fallback
+  /// without network.
   @visibleForTesting
   const DevicesPage.test({
     super.key,
     required this.onNavigateToTab,
     this.testRepository,
     this.testSocketFactory,
+    this.testHealthCheck,
   });
 
   final DeviceRepositoryService? testRepository;
   final io.Socket Function(String url, Map<String, dynamic> options)?
       testSocketFactory;
+  final Future<bool> Function()? testHealthCheck;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -67,6 +72,21 @@ class _DevicesPageState extends State<DevicesPage>
   int _deviceChannels = 4;
 
   io.Socket? _socket;
+
+  // Fast cloud-failure detection. Socket.IO is the live real-time cloud signal,
+  // but its disconnect detection can take 10-20s+ after Internet drops while
+  // the phone stays on Wi-Fi. A lightweight bounded /api/health probe catches
+  // the same outage in a couple of seconds so the LAN fallback probe starts
+  // immediately instead of waiting for the socket's own timeout.
+  static const Duration _cloudHealthInterval = Duration(seconds: 5);
+  static const int _cloudHealthConfirmFailures = 2;
+  static const Duration _cloudHealthRecheckDelay = Duration(milliseconds: 400);
+  Timer? _cloudHealthTimer;
+  bool _cloudHealthInFlight = false;
+  int _cloudHealthFailures = 0;
+
+  late final Future<bool> Function() _healthCheck =
+      widget.testHealthCheck ?? ApiService().checkHealth;
 
   // CLOUD reachability, driven by the Socket.IO cloud monitor (the socket is
   // the app's live signal that the backend is reachable). Initialized `true` so
@@ -274,6 +294,7 @@ class _DevicesPageState extends State<DevicesPage>
     }
     _loadDevices();
     _connectSocket();
+    _startCloudHealthMonitor();
     _statusTimer = Timer.periodic(
       const Duration(seconds: 15),
       (_) => _fetchStatus(silent: true),
@@ -284,6 +305,8 @@ class _DevicesPageState extends State<DevicesPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _statusTimer?.cancel();
+    _cloudHealthTimer?.cancel();
+    _cloudHealthTimer = null;
     for (final c in _rippleControllers) {
       c.dispose();
     }
@@ -298,7 +321,14 @@ class _DevicesPageState extends State<DevicesPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
+      _startCloudHealthMonitor();
       _syncAfterReconnect();
+    } else if (state != AppLifecycleState.resumed) {
+      // Pause the fast reachability probe in the background: it exists to make
+      // the ONLINE → LAN transition fast while the user is looking, not to burn
+      // battery/network while the app is hidden. The 15s status poll stays as-is.
+      _cloudHealthTimer?.cancel();
+      _cloudHealthTimer = null;
     }
   }
 
@@ -541,6 +571,61 @@ class _DevicesPageState extends State<DevicesPage>
   void _probeLocalAfterCloudDown() {
     if (!mounted || _selectedDeviceId == null) return;
     _fetchStatus(silent: true);
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Fast cloud-failure detection (complements Socket.IO)
+  // ──────────────────────────────────────────────────────────────
+
+  void _startCloudHealthMonitor() {
+    _cloudHealthTimer?.cancel();
+    _cloudHealthTimer = Timer.periodic(_cloudHealthInterval, (_) {
+      _checkCloudHealth();
+    });
+  }
+
+  /// Bounded reachability probe. Never overlaps itself and only flips the cloud
+  /// state to down on CONSECUTIVE failures (flicker guard). Recovery stays
+  /// socket-driven: the socket's own reconnect (`onConnect`) restores the
+  /// cloud-connected state and Online immediately — it never waits for the 15s
+  /// poll or `kLocalReportHold`, so this probe needs no restore path of its own.
+  Future<void> _checkCloudHealth() async {
+    if (!mounted || _cloudHealthInFlight) return;
+    _cloudHealthInFlight = true;
+    try {
+      final ok = await _healthCheck();
+      if (!mounted) return;
+      if (ok) {
+        _cloudHealthFailures = 0;
+        return;
+      }
+      if (!_socketConnected) return; // already down; the socket confirms recovery
+      _cloudHealthFailures++;
+      if (_cloudHealthFailures >= _cloudHealthConfirmFailures) {
+        // Confirmed by consecutive failures: mark the cloud down NOW and start
+        // the existing LAN probe immediately — no socket timeout wait.
+        _cloudHealthFailures = 0;
+        _confirmCloudDown();
+      } else {
+        // A single transient failure is weak evidence: re-probe shortly so a
+        // genuine outage is confirmed within ~2s while a lone packet blip is
+        // filtered out.
+        Timer(_cloudHealthRecheckDelay, _checkCloudHealth);
+      }
+    } finally {
+      _cloudHealthInFlight = false;
+    }
+  }
+
+  /// The single place the health monitor flips the cloud state to down. Shares
+  /// the exact same follow-up as a socket disconnect: immediate LAN probe, no
+  /// duplicate when the socket later notices the same outage on its own.
+  void _confirmCloudDown() {
+    if (!mounted || !_socketConnected) return;
+    _socketConnected = false;
+    _cloudHealthFailures = 0;
+    _probeLocalAfterCloudDown();
+    if (mounted) setState(() {});
   }
 
   Future<void> _fetchStatus({bool silent = false}) async {

@@ -360,6 +360,7 @@ Future<void> _pumpDevicesPage(
   WidgetTester tester, {
   required DeviceRepositoryService repo,
   io.Socket Function(String url, Map<String, dynamic> options)? socketFactory,
+  Future<bool> Function()? healthCheck,
 }) async {
   _mockSecureStorage(tester);
   await tester.pumpWidget(
@@ -370,6 +371,9 @@ Future<void> _pumpDevicesPage(
           onNavigateToTab: (_) {},
           testRepository: repo,
           testSocketFactory: socketFactory ?? (url, opts) => _FakeSocket(),
+          // Healthy cloud by default so the fast reachability probe never
+          // disturbs existing tests; fast-failure tests inject their own probe.
+          testHealthCheck: healthCheck ?? () async => true,
         ),
       ),
     ),
@@ -1445,6 +1449,163 @@ void main() {
       await tester.pump();
       expect(find.text('Online'), findsOneWidget);
       expect(find.text('LAN'), findsNothing);
+
+      await _unmount(tester);
+    });
+  });
+
+  group('fast cloud-failure detection (health monitor)', () {
+    testWidgets('Online → Internet lost → fast confirmed failure → immediate '
+        'LAN probe → LAN (no socket timeout wait)', (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      var healthy = true;
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        healthCheck: () async => healthy,
+      );
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
+
+      // Internet dies. The first health probe fails (weak evidence alone) and
+      // schedules an immediate confirm; the second consecutive failure confirms
+      // the outage and fires the existing LAN probe at once.
+      healthy = false;
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+
+      expect(repo.statusCalls, 2,
+          reason: 'initial load + the single fast-failure LAN probe');
+      expect(find.text('LAN'), findsOneWidget,
+          reason: 'confirmed cloud loss + verified local device = LAN');
+      expect(find.text('Online'), findsNothing);
+      expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cloud fails but the LAN device is unreachable → no false LAN',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _StatusFailingRepo();
+      var healthy = true;
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        healthCheck: () async => healthy,
+      );
+      expect(find.text('SYNCING'), findsWidgets);
+
+      healthy = false;
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+
+      expect(find.text('LAN'), findsNothing,
+          reason: 'no fresh local device evidence must never fabricate LAN');
+      expect(find.text('Offline'), findsNothing,
+          reason: 'one failed probe is not the repeated-failure threshold');
+      expect(find.text('SYNCING'), findsWidgets);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cloud recovers → socket reconnect restores Online immediately '
+        '(health-down never wedges LAN)', (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      var healthy = true;
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        healthCheck: () async => healthy,
+      );
+      expect(find.text('Online'), findsOneWidget);
+
+      // Internet lost → fast-confirmed → LAN.
+      healthy = false;
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget);
+
+      // Internet returns: the socket reconnect restores Online right away —
+      // no 15s poll or kLocalReportHold wait, and the health-down state never
+      // wedges the badge in LAN.
+      healthy = true;
+      socket.fireConnect();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Online'), findsOneWidget,
+          reason: 'fresh cloud confirmation restores ONLINE immediately');
+      expect(find.text('LAN'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('healthy cloud: one bounded probe per interval, no bursts',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      var checks = 0;
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        healthCheck: () async {
+          checks++;
+          return true;
+        },
+      );
+
+      expect(find.text('Online'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 16)); // ticks at 5/10/15s
+      await tester.pump();
+
+      expect(checks, 3,
+          reason: 'a healthy cloud gets exactly one bounded probe per interval');
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('health-confirmed outage: the socket later dropping does NOT '
+        'spawn a duplicate probe', (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      var healthy = true;
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        healthCheck: () async => healthy,
+      );
+      final base = repo.statusCalls;
+      expect(base, 1, reason: 'one status read on initial load');
+
+      healthy = false;
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+      expect(repo.statusCalls, base + 1,
+          reason: 'the confirmed outage triggers exactly one LAN probe');
+      expect(find.text('LAN'), findsOneWidget);
+
+      // The socket now notices the same outage on its own: cloud already marked
+      // down, so no second probe is spawned.
+      socket.fireDisconnect();
+      await tester.pump();
+      socket.fireConnectError();
+      await tester.pump();
+      expect(repo.statusCalls, base + 1,
+          reason: 'repeated cloud-down signals while already down never re-probe');
 
       await _unmount(tester);
     });

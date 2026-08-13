@@ -200,6 +200,23 @@ class ApiService {
     return _send(() => http.delete(Uri.parse('$kBaseUrl$path'), headers: headers));
   }
 
+  /// Lightweight, bounded reachability probe against the backend's
+  /// unauthenticated `/api/health` endpoint. Returns `true` only when the
+  /// backend answers within a short window; NEVER throws (any failure —
+  /// timeout, DNS, TLS, non-200 — is simply `false`). Feeds the devices page's
+  /// fast cloud-failure detector so the app notices an Internet/cloud outage
+  /// before the Socket.IO disconnect timeout does, without a heavyweight call.
+  Future<bool> checkHealth() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$kBaseUrl/api/health'))
+          .timeout(const Duration(seconds: 2));
+      return res.statusCode == 200;
+    } on Object {
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>> signup(String username, String password) async {
     final res = await post('/api/auth/signup', {
       'username': username,
