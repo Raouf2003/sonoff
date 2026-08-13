@@ -60,7 +60,6 @@ class _DevicesPageState extends State<DevicesPage>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   late final DeviceRepositoryService _repository =
       widget.testRepository ?? DeviceRepositoryService();
-  DeviceTransportSource? _lastTransportSource;
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
   bool _loadError = false;
@@ -231,7 +230,6 @@ class _DevicesPageState extends State<DevicesPage>
   void _applyResult(RelayStatusResult result) {
     final freshLocal = _lastLocalEvidenceAt != null &&
         DateTime.now().difference(_lastLocalEvidenceAt!) < kLocalReportHold;
-    _lastTransportSource = result.source;
     if (result.source == DeviceTransportSource.local) {
       // A verified local report is always positive liveness evidence.
       _lastLocalEvidenceAt = DateTime.now();
@@ -396,14 +394,17 @@ class _DevicesPageState extends State<DevicesPage>
       _socketConnected = true;
       // Reconnect: reconcile instead of waiting for the next 15s poll.
       _syncAfterReconnect();
+      if (mounted) setState(() {});
     });
     _socket?.onDisconnect((_) {
       _socketConnected = false;
       _socketDown();
+      if (mounted) setState(() {});
     });
     _socket?.onConnectError((_) {
       _socketConnected = false;
       _socketDown();
+      if (mounted) setState(() {});
     });
 
     // Live events are fire-and-forget wake-ups, never the sole source of
@@ -421,7 +422,6 @@ class _DevicesPageState extends State<DevicesPage>
         // A cloud status event must never overwrite a fresher local session.
         if (freshLocal) return;
         // A socket event is always cloud truth.
-        _lastTransportSource = DeviceTransportSource.cloud;
         if (online) {
           // Positive device report: restore ONLINE.
           _lastDeviceEvidenceAt = DateTime.now();
@@ -551,7 +551,6 @@ class _DevicesPageState extends State<DevicesPage>
         ControlTimeline.end(opId);
         return;
       }
-      _lastTransportSource = result.source;
       ControlTimeline.mark(opId, _selectedDeviceId!, channel,
           'HTTP response received');
       // The socket may already have confirmed this relay (Phase 3): then
@@ -891,7 +890,13 @@ class _DevicesPageState extends State<DevicesPage>
               ],
             ),
           ),
-          _StatusPill(connectivity: _connectivity, source: _lastTransportSource),
+          _StatusPill(
+            connectivity: _connectivity,
+            cloudReachable: _socketConnected,
+            localEvidenceFresh: _lastLocalEvidenceAt != null &&
+                DateTime.now().difference(_lastLocalEvidenceAt!) <
+                    kLocalReportHold,
+          ),
         ],
       ),
     );
@@ -1032,19 +1037,36 @@ class _HeroIcon extends StatelessWidget {
 
 class _StatusPill extends StatelessWidget {
   final _DeviceConnectivity connectivity;
-  final DeviceTransportSource? source;
-  const _StatusPill({required this.connectivity, this.source});
+
+  /// Whether the cloud is reachable (Socket.IO connected, or still unknown —
+  /// the safe cloud-first default). ONLINE has priority whenever the cloud is
+  /// up; a successful local read alone must never downgrade the badge to LAN.
+  final bool cloudReachable;
+
+  /// Whether the device produced RECENT local evidence (within the local-report
+  /// hold window). LAN is only shown when the cloud is CONFIRMED unreachable
+  /// AND the device was verified locally — never because the last request
+  /// happened to use the LAN transport.
+  final bool localEvidenceFresh;
+
+  const _StatusPill({
+    required this.connectivity,
+    required this.cloudReachable,
+    required this.localEvidenceFresh,
+  });
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     // 'LAN' is the subtle Local Mode indicator: same styling as 'Online' so the
     // relay UI itself never changes; only the label differentiates transport.
+    // LAN means "cloud confirmed down + device verified on the LAN", NOT
+    // "the last successful request ran on the LAN".
     final isOnline = connectivity == _DeviceConnectivity.online;
-    final isLocal = isOnline && source == DeviceTransportSource.local;
+    final showLan = isOnline && !cloudReachable && localEvidenceFresh;
     final color = isOnline ? colors.leaf : colors.mist;
     final label = isOnline
-        ? (isLocal ? 'LAN' : 'Online')
+        ? (showLan ? 'LAN' : 'Online')
         : connectivity == _DeviceConnectivity.offline
             ? 'Offline'
             : 'SYNCING';
