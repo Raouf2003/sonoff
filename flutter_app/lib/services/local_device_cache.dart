@@ -95,6 +95,10 @@ class LocalDeviceCache {
       'channels': raw['channels'] is num
           ? (raw['channels'] as num).toInt()
           : 4,
+      // Last known LAN IP (learned by the backend via MQTT telemetry). Kept so
+      // an offline load can still seed the local discovery candidate list.
+      if (raw['lastIp'] is String && (raw['lastIp'] as String).isNotEmpty)
+        'lastIp': raw['lastIp'] as String,
     };
   }
 }

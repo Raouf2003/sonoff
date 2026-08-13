@@ -74,6 +74,9 @@ class _LocatorStub implements DeviceLocator {
   Future<void> storeVerifiedAddress(String deviceId, String ip) async {}
 
   @override
+  Future<void> storeCandidateAddress(String deviceId, String ip) async {}
+
+  @override
   Future<void> discardAddress(String deviceId) async {}
 
   @override

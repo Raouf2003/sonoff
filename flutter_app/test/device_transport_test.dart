@@ -181,6 +181,19 @@ void main() {
       expect(status['POWER2'], 'OFF');
     });
 
+    test('State with IPAddress surfaces it as ipAddress (DHCP self-heal)', () {
+      final status = parseLocalState(
+        '{"POWER1":"ON","IPAddress":"192.168.1.77"}',
+      );
+      expect(status['ipAddress'], '192.168.1.77');
+      expect(status['POWER1'], 'ON');
+    });
+
+    test('State without IPAddress has no ipAddress key', () {
+      final status = parseLocalState('{"POWER1":"ON"}');
+      expect(status.containsKey('ipAddress'), isFalse);
+    });
+
     test('State nesting under /cm Command wrapper is resolved', () {
       final status = parseLocalState('{"Command":{"Power":"OFF"}}');
       expect(status['online'], isTrue);

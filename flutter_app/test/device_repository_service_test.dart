@@ -110,8 +110,10 @@ class _FakeLocator implements DeviceLocator {
   int verifiedAtQueries = 0;
   int mDnsQueries = 0;
   int stores = 0;
+  int candidateStores = 0;
   int discards = 0;
   String? lastStored;
+  String? lastCandidate;
 
   @override
   Future<String?> cachedAddress(String deviceId) async {
@@ -129,6 +131,12 @@ class _FakeLocator implements DeviceLocator {
   Future<void> storeVerifiedAddress(String deviceId, String ip) async {
     stores++;
     lastStored = ip;
+  }
+
+  @override
+  Future<void> storeCandidateAddress(String deviceId, String ip) async {
+    candidateStores++;
+    lastCandidate = ip;
   }
 
   @override
@@ -342,7 +350,12 @@ void main() {
     test('control: local unreachable → cloud is used once', () async {
       final cloud = _FakeCloudApi();
       final cm = _CmFake()..unreachable = true;
-      final locator = _FakeLocator(cached: '192.168.1.5');
+      // A previously-VERIFIED address that no longer answers is dead weight and
+      // must be discarded (a cloud-learned CANDIDATE would instead be kept).
+      final locator = _FakeLocator(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now().subtract(kVerifiedIpTtl * 2),
+      );
       final repo = _repo(cloud, locator: locator, cm: cm);
 
       final result = await repo.control(_deviceId, 1, 'ON');
@@ -350,7 +363,7 @@ void main() {
       expect(cloud.controlCalls, 1);
       expect(result.source, DeviceTransportSource.cloud);
       expect(locator.discards, 1,
-          reason: 'the dead cached IP must not be trusted next time');
+          reason: 'the dead verified cached IP must not be trusted next time');
     });
 
     test('status: no local device → cloud is used once', () async {
@@ -689,6 +702,164 @@ void main() {
           reason: 'the tap hit the warm endpoint, no further discovery');
       expect(locator.mDnsQueries, 0);
       expect(cloud.controlCalls, 0);
+    });
+  });
+
+  group('cloud-learned IP candidates seed local discovery', () {
+    test('getDevices seeds a candidate for every device lastIp', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = [
+          {
+            'deviceId': _deviceId,
+            'name': 'Controller',
+            'channels': 4,
+            'lastIp': '192.168.1.5',
+          },
+        ];
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      final devices = await repo.getDevices();
+
+      expect(devices, hasLength(1));
+      expect(locator.candidateStores, 1);
+      expect(locator.lastCandidate, '192.168.1.5',
+          reason: 'the cloud-learned IP becomes an unverified local hint');
+    });
+
+    test('offline getDevices seeds candidates from the cached list', () async {
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cache = LocalDeviceCache();
+      await cache.replaceAll([
+        {
+          'deviceId': _deviceId,
+          'name': 'Controller',
+          'channels': 4,
+          'lastIp': '192.168.1.5',
+        },
+      ]);
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator, cache: cache);
+
+      final devices = await repo.getDevices();
+
+      expect(devices, hasLength(1));
+      expect(locator.candidateStores, 1);
+      expect(locator.lastCandidate, '192.168.1.5');
+    });
+
+    test('getDevices ignores non-IP and missing lastIp values', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+          {
+            'deviceId': '222222222222',
+            'name': 'NoIP',
+            'channels': 1,
+            'lastIp': 'not-an-ip',
+          },
+        ];
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      await repo.getDevices();
+
+      expect(locator.candidateStores, 0);
+    });
+
+    test(
+        'offline control works via a candidate: cloud down + reachable device',
+        () async {
+      // The exact reported scenario: internet OFF, phone and device on the same
+      // Wi-Fi. The cloud cannot help, but the cloud-learned IP (seeded while
+      // online) lets discovery find the device WITHOUT mDNS.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5'); // verifiedAt == null
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(cloud.controlCalls, 0,
+          reason: 'the LAN device was reachable — no cloud needed');
+      expect(result.channels[1]!.state, 'ON');
+      expect(result.source, DeviceTransportSource.local);
+      expect(locator.mDnsQueries, 0,
+          reason: 'the candidate IP verified — mDNS was never needed');
+      expect(locator.stores, 1,
+          reason: 'the verified candidate is promoted to a verified entry');
+    });
+
+    test('an unreachable candidate is KEPT (device may be off)', () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake()..unreachable = true;
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(locator.discards, 0,
+          reason: 'a cloud-learned hint survives transient unavailability');
+      expect(locator.mDnsQueries, 1,
+          reason: 'mDNS still gets a chance after the candidate fails');
+    });
+
+    test('a candidate with a foreign MAC is discarded', () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake(
+        responses: {'Power1%20ON': '{"POWER1":"ON"}', 'State': '{"POWER1":"ON"}'},
+        macByAddress: {'192.168.1.5': [_foreignMacBody]},
+      );
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(locator.discards, 1,
+          reason: 'a repurposed address must never be trusted');
+    });
+
+    test('a local report with a new IPAddress refreshes the discovery cache',
+        () async {
+      final cloud = _FakeCloudApi();
+      // The box answers at 192.168.1.5 but reports its current address as
+      // 192.168.1.77 (DHCP lease changed).
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON","IPAddress":"192.168.1.77"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await repo.control(_deviceId, 1, 'ON');
+      await pumpEventQueue();
+
+      expect(locator.lastStored, '192.168.1.77',
+          reason: 'the freshest reported address is remembered for next time');
+    });
+
+    test('a matching reported IPAddress does not churn the cache', () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON","IPAddress":"192.168.1.5"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await repo.control(_deviceId, 1, 'ON');
+      await pumpEventQueue();
+
+      expect(locator.stores, 1,
+          reason: 'only the candidate-promotion write happens; the matching '
+              'report adds no extra write');
+      expect(locator.lastStored, '192.168.1.5');
     });
   });
 }

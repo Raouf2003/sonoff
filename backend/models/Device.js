@@ -40,6 +40,16 @@ const deviceSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
+  // Last LAN IP the device reported through MQTT telemetry
+  // (`tele/<deviceId>/STATE` carries `IPAddress`). It is ONLY a discovery
+  // hint for the app's local-first path: the app re-verifies identity via
+  // `Status 5` before trusting it, and the backend never uses it for anything
+  // other than letting the app find the device on the LAN.
+  lastIp: {
+    type: String,
+    default: null,
+    trim: true,
+  },
   // LEGACY/COMPATIBILITY ONLY. deviceId is the single identity; hardwareId is
   // kept so devices that predate the MAC-based model (stees_* deviceIds) can
   // still be recognized by their physical MAC for duplicate detection. For

@@ -103,6 +103,20 @@ enum TransportFailureKind {
   logical,
 }
 
+/// Outcome of a local identity probe (`Status 5` MAC check). Lets discovery
+/// distinguish "that IP no longer answers" (keep a cloud-learned candidate as
+/// a hint) from "that IP belongs to a different device" (discard it).
+enum LocalIdentityCheck {
+  /// The box at the address truthfully reported the expected MAC.
+  verified,
+
+  /// The address could not be reached (off, network change, timeout).
+  unavailable,
+
+  /// The address answered but with a different MAC — the IP was repurposed.
+  mismatch,
+}
+
 /// Transport-level failure carrying a stable category so the repository can
 /// decide whether a fallback is allowed. The message is always human-readable.
 class DeviceTransportException implements Exception {

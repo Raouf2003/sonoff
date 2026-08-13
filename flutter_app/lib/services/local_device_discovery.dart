@@ -22,6 +22,14 @@ abstract class DeviceLocator {
   /// reported a matching canonical MAC — the cache never bypasses verification.
   Future<void> storeVerifiedAddress(String deviceId, String ip);
 
+  /// Persists an UNVERIFIED IP hint (e.g. the last IP the cloud backend learned
+  /// from MQTT telemetry). Stored without a `verifiedAt`, so discovery still
+  /// runs `Status 5` before trusting it. Skipped when the address is already
+  /// known so an existing verified entry is never downgraded. A candidate that
+  /// fails verification is kept (the box may be off) unless identity mismatch
+  /// proves the address was repurposed.
+  Future<void> storeCandidateAddress(String deviceId, String ip);
+
   /// Removes a cached IP (stale / repurposed / MAC mismatch).
   Future<void> discardAddress(String deviceId);
 
@@ -78,6 +86,21 @@ class LocalDeviceDiscovery implements DeviceLocator {
       _key(deviceId),
       '{"ip":${_json(ip)},"verifiedAt":${_json(DateTime.now().toIso8601String())}}',
     );
+  }
+
+  @override
+  Future<void> storeCandidateAddress(String deviceId, String ip) async {
+    if (ip.isEmpty) return;
+    final prefs = await _prefs();
+    final key = _key(deviceId);
+    final raw = prefs.getString(key);
+    if (raw != null && raw.isNotEmpty) {
+      final existing = _decodeEntry(raw)?.ip ?? (raw.contains('{') ? null : raw);
+      if (existing == ip) return; // already known (verified or candidate)
+    }
+    // verifiedAt:null marks this as a CLOUD-LEARNED HINT, never trusted until
+    // `Status 5` confirms the MAC.
+    await prefs.setString(key, '{"ip":${_json(ip)},"verifiedAt":null}');
   }
 
   @override
@@ -139,7 +162,11 @@ Future<List<String>> _browseTasmota(Duration timeout) async {
   try {
     await discovery.initialize();
     await discovery.start();
-    await Future<void>.delayed(timeout);
+    // The browse window bounds how long we LOOK for services; the extra grace
+    // lets service RESOLUTIONS (which bonsoir delivers asynchronously after a
+    // Found event) land before we stop, so a device found just before the
+    // deadline still yields its IPs.
+    await Future<void>.delayed(timeout + const Duration(milliseconds: 600));
     await discovery.stop();
     return addresses.toList();
   } catch (_) {

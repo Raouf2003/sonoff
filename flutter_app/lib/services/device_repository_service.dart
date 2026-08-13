@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'api_service.dart';
 import 'cloud_device_transport.dart';
@@ -95,7 +96,9 @@ class DeviceRepositoryService {
 
   /// The registered device list, cloud-first with a local cache fallback
   /// (unchanged: the list itself remains cloud-authorised; Local Mode never
-  /// invents devices).
+  /// invents devices). Also seeds the local discovery candidate list from each
+  /// device's last-known LAN IP so a later offline session can find the device
+  /// WITHOUT mDNS — identity is still verified with `Status 5` before use.
   Future<List<Map<String, dynamic>>> getDevices() async {
     try {
       final devices = await _cloud.getDevices();
@@ -104,6 +107,7 @@ class DeviceRepositoryService {
       } on Object catch (e) {
         _log('cache refresh failed after cloud list fetch (${_describe(e)})');
       }
+      await _seedCandidates(devices);
       _lastSource = DeviceTransportSource.cloud;
       _log('device list from cloud (${devices.length}) — cache refreshed');
       return devices;
@@ -118,9 +122,35 @@ class DeviceRepositoryService {
         _log('cache empty — surfacing original cloud error');
         rethrow;
       }
+      await _seedCandidates(cached);
       _lastSource = DeviceTransportSource.local;
       return cached;
     }
+  }
+
+  /// Best-effort, non-authoritative: persists each device's cloud-learned LAN
+  /// IP as an UNVERIFIED discovery candidate. Never trusted until `Status 5`
+  /// confirms the MAC, so it is safe to seed from the (untrusted) cloud. Any
+  /// failure is swallowed — a seed is an optimization, never a blocker.
+  Future<void> _seedCandidates(List<Map<String, dynamic>> devices) async {
+    await Future.wait([
+      for (final d in devices)
+        () async {
+          final id = d['deviceId'];
+          final ip = d['lastIp'];
+          if (id is! String || id.isEmpty || ip is! String || ip.isEmpty) {
+            return;
+          }
+          if (InternetAddress.tryParse(ip) == null) return;
+          try {
+            await _locator
+                .storeCandidateAddress(id, ip)
+                .timeout(const Duration(seconds: 2));
+          } on Object catch (e) {
+            _log('candidate seed failed for $id (${_describe(e)})');
+          }
+        }(),
+    ]);
   }
 
   /// Status, LOCAL-FIRST: a live LAN read (the freshest possible report) wins
@@ -250,7 +280,9 @@ class DeviceRepositoryService {
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    return local.getStatus(deviceId);
+    final result = await local.getStatus(deviceId);
+    _maybeLearnIp(deviceId, local.address, result);
+    return result;
   }
 
   Future<Map<String, dynamic>> _localControl(
@@ -262,7 +294,37 @@ class DeviceRepositoryService {
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    return local.control(deviceId, channel, state);
+    final result = await local.control(deviceId, channel, state);
+    _maybeLearnIp(deviceId, local.address, result);
+    return result;
+  }
+
+  /// The device's own report often carries its current LAN IP (`State` →
+  /// `IPAddress`). When it differs from the endpoint we used, the DHCP lease
+  /// probably changed: refresh the discovery cache so the next attempt goes
+  /// straight to the current address. Best-effort and never blocking.
+  void _maybeLearnIp(
+    String deviceId,
+    String currentAddress,
+    Map<String, dynamic> result,
+  ) {
+    final ip = result['ipAddress'];
+    if (ip is! String || ip.isEmpty || ip == currentAddress) return;
+    if (InternetAddress.tryParse(ip) == null) return;
+    unawaited(_learnIp(deviceId, ip));
+  }
+
+  Future<void> _learnIp(String deviceId, String ip) async {
+    try {
+      await _locator
+          .storeVerifiedAddress(deviceId, ip)
+          .timeout(const Duration(seconds: 2));
+      _warmCache[deviceId] = _buildLocal(ip, deviceId);
+      _warmVerifiedAt[deviceId] = DateTime.now();
+      _log('learned device IP from local report: $ip');
+    } on Object catch (e) {
+      _log('IP learn failed for $deviceId (${_describe(e)})');
+    }
   }
 
   /// Single-flight discovery per deviceId: concurrent callers (a status poll
@@ -304,8 +366,9 @@ class DeviceRepositoryService {
     final cached = await _locator.cachedAddress(deviceId);
     if (cached != null && cached.isNotEmpty) {
       final verifiedAt = await _locator.cachedVerifiedAt(deviceId);
-      final fresh =
-          verifiedAt != null && DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
+      final isVerified = verifiedAt != null;
+      final fresh = isVerified &&
+          DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
       if (fresh) {
         final transport = _buildLocal(cached, deviceId);
         _warmCache[deviceId] = transport;
@@ -314,14 +377,32 @@ class DeviceRepositoryService {
         return transport;
       }
       final transport = _buildLocal(cached, deviceId);
-      if (await transport.verifyIdentity()) {
-        _warmCache[deviceId] = transport;
-        _warmVerifiedAt[deviceId] = DateTime.now();
-        _log('re-verified cached IP: $cached');
-        return transport;
+      switch (await transport.checkIdentity()) {
+        case LocalIdentityCheck.verified:
+          _warmCache[deviceId] = transport;
+          _warmVerifiedAt[deviceId] = DateTime.now();
+          await _locator.storeVerifiedAddress(deviceId, cached);
+          _log('verified cached IP: $cached');
+          return transport;
+        case LocalIdentityCheck.mismatch:
+          // The box at this address is NOT our device — the IP was repurposed.
+          // Drop it so we never probe a stranger's box again.
+          await _locator.discardAddress(deviceId);
+          _log('cached IP identity mismatch — discarding $cached');
+          break;
+        case LocalIdentityCheck.unavailable:
+          if (isVerified) {
+            // A previously-confirmed address that no longer answers (box off /
+            // network change): drop it rather than probe it forever.
+            await _locator.discardAddress(deviceId);
+            _log('verified cached IP unreachable — discarding $cached');
+          } else {
+            // A cloud-learned hint that is not reachable RIGHT NOW: keep it —
+            // the box may be powered off or waking. mDNS still runs below.
+            _log('candidate IP unreachable — keeping $cached as a hint');
+          }
+          break;
       }
-      _log('cached IP failed identity — discarding stale entry');
-      await _locator.discardAddress(deviceId);
     }
 
     final window = urgent ? kTapMdnWindow : kWarmMdnWindow;

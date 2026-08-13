@@ -88,3 +88,79 @@ test('a raw stat/POWERn payload resolves the pending ACK and feeds runtimeState'
   assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
   assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
 });
+
+function ipStateGateway({ lastIp }) {
+  const gw = new MqttGateway();
+  gw.client = makeClient();
+  const applied = [];
+  gw.runtimeState = {
+    ensureDeviceState() {},
+    touchDevice() {},
+    applyChannelState(deviceId, ch, st) {
+      applied.push({ deviceId, ch, st });
+      return { state: st, updatedAt: Date.now() };
+    },
+  };
+  gw.deviceRegistry = {
+    get: () => ({ deviceId: 'dev-a', lastIp }),
+    all: () => [],
+    isOwned: () => true,
+  };
+  return gw;
+}
+
+test('tele/STATE with a changed IPAddress records the device lastIp', () => {
+  const gw = ipStateGateway({ lastIp: '192.168.1.8' });
+  const ipUpdates = [];
+  gw.deviceRegistry.updateIp = (deviceId, ip) => ipUpdates.push({ deviceId, ip });
+  const saved = [];
+  gw.deviceModel = {
+    updateOne(filter, update) {
+      saved.push({ filter, update });
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-a/STATE', JSON.stringify({ IPAddress: '192.168.1.42', POWER1: 'ON' }));
+
+  assert.deepStrictEqual(ipUpdates, [{ deviceId: 'dev-a', ip: '192.168.1.42' }]);
+  assert.deepStrictEqual(saved, [
+    { filter: { deviceId: 'dev-a' }, update: { $set: { lastIp: '192.168.1.42' } } },
+  ]);
+});
+
+test('tele/STATE with an unchanged IPAddress does not re-persist', () => {
+  const gw = ipStateGateway({ lastIp: '192.168.1.8' });
+  gw.deviceRegistry.updateIp = () => {
+    throw new Error('updateIp must not be called for an unchanged IP');
+  };
+  let writes = 0;
+  gw.deviceModel = {
+    updateOne() {
+      writes++;
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-a/STATE', JSON.stringify({ IPAddress: '192.168.1.8', POWER1: 'ON' }));
+
+  assert.strictEqual(writes, 0);
+});
+
+test('tele/STATE with no IPAddress leaves lastIp untouched', () => {
+  const gw = ipStateGateway({ lastIp: null });
+  gw.deviceRegistry.updateIp = () => {
+    throw new Error('updateIp must not be called without an IP');
+  };
+  let writes = 0;
+  gw.deviceModel = {
+    updateOne() {
+      writes++;
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-a/STATE', JSON.stringify({ POWER1: 'ON' }));
+
+  assert.strictEqual(writes, 0);
+});

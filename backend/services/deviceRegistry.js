@@ -21,11 +21,19 @@ class DeviceRegistry {
       name: d.name,
       type: d.type || 'sonoff-4ch',
       channels: d.channels || 4,
+      lastIp: d.lastIp || null,
     };
   }
 
   get(deviceId) {
     return this.devices.get(deviceId) || null;
+  }
+
+  // Records the LAN IP a claimed device most recently reported through MQTT
+  // telemetry, so the app can learn it as a local discovery candidate.
+  updateIp(deviceId, ip) {
+    const d = this.devices.get(deviceId);
+    if (d) d.lastIp = ip;
   }
 
   ownerOf(deviceId) {

@@ -1,4 +1,5 @@
 const mqtt = require('mqtt');
+const Device = require('../models/Device');
 const Sensor = require('../models/Sensor');
 
 const ACK_TIMEOUT_MS = 5000;
@@ -55,6 +56,9 @@ class MqttGateway {
     // device, used to expose devices observed on the broker in the last
     // RECENT_WINDOW_MS regardless of claim status.
     this.recentDevices = new Map();
+    // Injectable Device model so unit tests can capture lastIp persistence
+    // without a Mongo connection.
+    this.deviceModel = Device;
   }
 
   init({ io, deviceRegistry, runtimeState }) {
@@ -317,6 +321,25 @@ class MqttGateway {
     console.log(`Pending commands cleared (${reason}): ${this.pending.size}`);
   }
 
+  // Remembers the LAN IP a claimed device reported via tele/STATE. Only
+  // touched when the value actually changes, so a device announcing every
+  // TelePeriod does not hammer the DB. The IP is just a hint: the app
+  // re-verifies identity via `Status 5` before ever using it.
+  _recordDeviceIp(deviceId, ip) {
+    if (!ip || typeof ip !== 'string') return;
+    ip = ip.trim();
+    if (!ip) return;
+    const current = this.deviceRegistry.get(deviceId);
+    if (!current) return; // not a claimed device — nothing to record
+    if (current.lastIp === ip) return;
+    this.deviceRegistry.updateIp(deviceId, ip);
+    this.deviceModel
+      .updateOne({ deviceId }, { $set: { lastIp: ip } })
+      .catch((err) =>
+        console.error(`Device lastIp update error for ${deviceId}:`, err.message),
+      );
+  }
+
   _handle(topic, payload) {
     const parts = topic.split('/');
     const id = parts[1];
@@ -373,6 +396,9 @@ class MqttGateway {
     if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
+      // tele/STATE carries the device's current LAN IP; learn it as the
+      // local-first discovery hint exposed via GET /api/devices.
+      this._recordDeviceIp(deviceId, parsed.IPAddress);
     } else if (isResult && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);

@@ -119,6 +119,22 @@ class LocalDeviceTransport implements DeviceTransport {
     }
   }
 
+  /// Like [verifyIdentity] but distinguishes WHY the probe failed, so discovery
+  /// can keep a transiently-unreachable candidate while dropping a repurposed
+  /// address (identity mismatch).
+  Future<LocalIdentityCheck> checkIdentity() async {
+    try {
+      await _verifyIdentity();
+      return LocalIdentityCheck.verified;
+    } on DeviceTransportException catch (e) {
+      return e.kind == TransportFailureKind.logical
+          ? LocalIdentityCheck.mismatch
+          : LocalIdentityCheck.unavailable;
+    } on Object {
+      return LocalIdentityCheck.unavailable;
+    }
+  }
+
   Future<void> _verifyIdentity() async {
     final body = await _cm('Status%205');
     final mac = normalizeMac(extractMacFromStatus5(body));
@@ -232,12 +248,20 @@ String? _findMacValue(Object? node) {
 /// checks can treat a fresh LAN read as authoritative. Channels absent from
 /// the response are simply absent — the page treats any channel key that isn't
 /// 'ON' as OFF, matching how a fresh cloud status behaves.
+///
+/// When the response carries the device's LAN address (`IPAddress`), it is
+/// surfaced as `ipAddress` so the repository can refresh its discovery cache
+/// when the device's DHCP lease changes.
 Map<String, dynamic> parseLocalState(String body) {
   final power = <String, dynamic>{};
+  String? ipAddress;
   final trimmed = body.trim();
   if (trimmed.isNotEmpty) {
     try {
-      _collectPowerKeys(jsonDecode(trimmed), power);
+      final decoded = jsonDecode(trimmed);
+      _collectPowerKeys(decoded, power);
+      final ip = _findStringValue(decoded, 'ipaddress');
+      if (ip != null && ip.isNotEmpty) ipAddress = ip;
     } catch (_) {
       // Not JSON (e.g. an error page): channels simply stay absent.
     }
@@ -253,7 +277,36 @@ Map<String, dynamic> parseLocalState(String body) {
       };
     }
   }
-  return <String, dynamic>{'online': true, ...power, 'channels': channels};
+  return <String, dynamic>{
+    'online': true,
+    ...power,
+    'ipAddress': ?ipAddress,
+    'channels': channels,
+  };
+}
+
+/// First string value whose key matches [keyLower] (case-insensitive), found
+/// anywhere in the decoded JSON tree. Returns null when absent.
+String? _findStringValue(Object? node, String keyLower) {
+  if (node is Map) {
+    for (final entry in node.entries) {
+      if (entry.key is String &&
+          (entry.key as String).toLowerCase() == keyLower &&
+          entry.value is String) {
+        return entry.value as String;
+      }
+    }
+    for (final v in node.values) {
+      final found = _findStringValue(v, keyLower);
+      if (found != null) return found;
+    }
+  } else if (node is List) {
+    for (final v in node) {
+      final found = _findStringValue(v, keyLower);
+      if (found != null) return found;
+    }
+  }
+  return null;
 }
 
 /// 'POWER3' -> 3, 'POWER' -> 1, anything else -> null.

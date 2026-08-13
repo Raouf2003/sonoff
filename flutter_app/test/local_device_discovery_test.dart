@@ -49,4 +49,35 @@ void main() {
     await locator.discardAddress(_id);
     expect(await locator.cachedAddress(_id), isNull);
   });
+
+  test('storeCandidateAddress writes an envelope without a verifiedAt', () async {
+    final locator = LocalDeviceDiscovery();
+    await locator.storeCandidateAddress(_id, '192.168.1.9');
+
+    expect(await locator.cachedAddress(_id), '192.168.1.9');
+    expect(await locator.cachedVerifiedAt(_id), isNull,
+        reason: 'a candidate is a hint — never trusted until Status 5');
+  });
+
+  test('storeCandidateAddress skips an already-known address (keeps verified)',
+      () async {
+    final locator = LocalDeviceDiscovery();
+    await locator.storeVerifiedAddress(_id, '192.168.1.5');
+    final verifiedAt = await locator.cachedVerifiedAt(_id);
+
+    await locator.storeCandidateAddress(_id, '192.168.1.5');
+
+    expect(await locator.cachedVerifiedAt(_id), verifiedAt,
+        reason: 'a matching candidate must not downgrade a verified entry');
+    expect(await locator.cachedAddress(_id), '192.168.1.5');
+  });
+
+  test('storeCandidateAddress overwrites a different known address', () async {
+    final locator = LocalDeviceDiscovery();
+    await locator.storeVerifiedAddress(_id, '192.168.1.5');
+    await locator.storeCandidateAddress(_id, '192.168.1.20');
+
+    expect(await locator.cachedAddress(_id), '192.168.1.20');
+    expect(await locator.cachedVerifiedAt(_id), isNull);
+  });
 }
