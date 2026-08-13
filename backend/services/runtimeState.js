@@ -8,15 +8,34 @@ class RuntimeState {
     this.freshMs = parseInt(process.env.DEVICE_FRESH_MS || '300000', 10);
   }
 
+  // Channels are seeded UNKNOWN (never OFF): a channel that has not been
+  // observed reporting a real state must never be presented as a confident
+  // "OFF". Only device reports (MQTT STATE/RESULT/POWERn) can turn a channel
+  // into ON/OFF, and each report is timestamped.
   ensureDeviceState(deviceId, channels) {
     let state = this.deviceStates.get(deviceId);
     if (!state) {
       const chans = {};
-      for (let i = 1; i <= channels; i++) chans[i] = 'OFF';
+      for (let i = 1; i <= channels; i++) {
+        chans[i] = { state: 'UNKNOWN', updatedAt: null };
+      }
       state = { channels: chans, lastSeen: null, online: false };
       this.deviceStates.set(deviceId, state);
     }
     return state.channels;
+  }
+
+  // Records a device-reported channel state and stamps it with the current
+  // server time. Returns the updated channel entry so callers can emit its
+  // timestamp. A state other than ON/OFF is recorded as UNKNOWN.
+  applyChannelState(deviceId, channel, state) {
+    const st = this.deviceStates.get(deviceId);
+    const chans = st ? st.channels : this.ensureDeviceState(deviceId, channel);
+    if (!chans[channel]) chans[channel] = { state: 'UNKNOWN', updatedAt: null };
+    const normalized = state === 'ON' || state === 'OFF' ? state : 'UNKNOWN';
+    chans[channel].state = normalized;
+    chans[channel].updatedAt = Date.now();
+    return chans[channel];
   }
 
   touchDevice(deviceId) {
@@ -43,6 +62,25 @@ class RuntimeState {
 
   getDeviceState(deviceId) {
     return this.deviceStates.get(deviceId) || null;
+  }
+
+  // Read-model for the status API: per-channel `{ state, updatedAt }` with
+  // UNKNOWN (not OFF) for anything never observed, plus liveness. Never
+  // fabricates an OFF for an unobserved channel.
+  getDeviceStatus(deviceId) {
+    const state = this.deviceStates.get(deviceId);
+    const channels = {};
+    if (state) {
+      for (const [ch, c] of Object.entries(state.channels)) {
+        channels[ch] = {
+          state: c.state || 'UNKNOWN',
+          updatedAt: c.updatedAt
+            ? new Date(c.updatedAt).toISOString()
+            : null,
+        };
+      }
+    }
+    return { online: this.isOnline(deviceId), channels };
   }
 }
 

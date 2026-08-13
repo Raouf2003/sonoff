@@ -158,8 +158,32 @@ class LocalDeviceTransport implements DeviceTransport {
   ) async {
     _assertTarget(deviceId);
     await _verifyIdentity();
-    final body = await _cm('Power$channel%20${state.toUpperCase()}');
-    return parseLocalState(body);
+    final expected = state.toUpperCase();
+    // Send the command. If this itself fails the device was never reached
+    // (availability) — the caller may fall back to cloud.
+    await _cm('Power$channel%20$expected');
+    // Read back the device's resulting state and CONFIRM it matches. The UI
+    // must never treat the tap as fact; only a device report may.
+    String body;
+    try {
+      body = await _cm('State');
+    } on Object {
+      throw const DeviceTransportException(
+        'The device did not confirm the command before timing out.',
+        kind: TransportFailureKind.logical,
+        code: 'UNCONFIRMED',
+      );
+    }
+    final status = parseLocalState(body);
+    final reported = status['POWER$channel'] ?? status['POWER'];
+    if (reported != expected) {
+      throw DeviceTransportException(
+        'The device reported $reported instead of $expected.',
+        kind: TransportFailureKind.logical,
+        code: 'UNCONFIRMED',
+      );
+    }
+    return status;
   }
 }
 
@@ -203,7 +227,9 @@ String? _findMacValue(Object? node) {
 
 /// Converts a Tasmota `State` / `Power` response body into the logical status
 /// shape the devices page already consumes: `online: true` plus the `POWERn`
-/// channels as 'ON'/'OFF' (single-relay `POWER` included). Channels absent from
+/// channels as 'ON'/'OFF' (single-relay `POWER` included), and a per-channel
+/// `channels` map with a receive-time `updatedAt` so downstream staleness
+/// checks can treat a fresh LAN read as authoritative. Channels absent from
 /// the response are simply absent — the page treats any channel key that isn't
 /// 'ON' as OFF, matching how a fresh cloud status behaves.
 Map<String, dynamic> parseLocalState(String body) {
@@ -216,7 +242,30 @@ Map<String, dynamic> parseLocalState(String body) {
       // Not JSON (e.g. an error page): channels simply stay absent.
     }
   }
-  return <String, dynamic>{'online': true, ...power};
+  final now = DateTime.now().toIso8601String();
+  final channels = <String, dynamic>{};
+  for (final e in power.entries) {
+    final ch = _channelNumberFromKey(e.key);
+    if (ch != null) {
+      channels[ch.toString()] = {
+        'state': e.value,
+        'updatedAt': now,
+      };
+    }
+  }
+  return <String, dynamic>{'online': true, ...power, 'channels': channels};
+}
+
+/// 'POWER3' -> 3, 'POWER' -> 1, anything else -> null.
+int? _channelNumberFromKey(String key) {
+  final upper = key.toUpperCase();
+  if (upper == 'POWER') return 1;
+  if (upper.startsWith('POWER')) {
+    final digits = upper.substring(5);
+    if (digits.isEmpty) return 1;
+    return int.tryParse(digits);
+  }
+  return null;
 }
 
 void _collectPowerKeys(Object? node, Map<String, dynamic> out) {

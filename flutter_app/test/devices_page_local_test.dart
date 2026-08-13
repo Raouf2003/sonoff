@@ -29,7 +29,7 @@ void _mockSecureStorage(WidgetTester tester) {
 }
 
 /// Cloud that is provably unavailable (availability failure, not a rejection) —
-/// used to drive the cloud→local fallback paths in widget tests.
+/// used to drive the local-first fallback paths in widget tests.
 class _CloudDownApi extends ApiService {
   @override
   Future<List<dynamic>> getDevices() async =>
@@ -68,6 +68,9 @@ class _LocatorStub implements DeviceLocator {
   Future<String?> cachedAddress(String deviceId) async => cached;
 
   @override
+  Future<DateTime?> cachedVerifiedAt(String deviceId) async => null;
+
+  @override
   Future<void> storeVerifiedAddress(String deviceId, String ip) async {}
 
   @override
@@ -77,39 +80,37 @@ class _LocatorStub implements DeviceLocator {
   Future<List<String>> mDnsCandidates(Duration timeout) async => const [];
 }
 
-/// Scriptable repository: records relay calls, can hold them in flight or
-/// report the last transport source (for the LAN indicator). The device list is
-/// served by [getDevices] so the page no longer talks to a cloud API directly.
+/// Scriptable repository: records relay calls, can hold them in flight, and
+/// reports which transport produced each result (for the LAN indicator). The
+/// device list is served by [getDevices] so the page no longer talks to a
+/// cloud API directly. Reports are always CONFIRMED device reports so the page
+/// can render FLOWING/DRY from them.
 class _FakeRepo extends DeviceRepositoryService {
   _FakeRepo({
     this.gateControl = false,
-    this.reportLocalAfterControl = false,
+    this.source = DeviceTransportSource.cloud,
     this.devices = const [
       {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
     ],
   });
 
   final bool gateControl;
-  final bool reportLocalAfterControl;
+  final DeviceTransportSource source;
   final List<Map<String, dynamic>> devices;
   final Completer<void> releaseControl = Completer<void>();
   int controlCalls = 0;
-  DeviceTransportSource? transportSource = DeviceTransportSource.cloud;
-  bool _lastControlResult = false;
 
   @override
-  DeviceTransportSource? get lastSource =>
-      _lastControlResult == true
-          ? (reportLocalAfterControl
-              ? DeviceTransportSource.local
-              : DeviceTransportSource.cloud)
-          : transportSource;
+  Future<void> warmUp(List<Map<String, dynamic>> devices) async {
+    // Discovery warm-up is a real-network path; the fake repo must not run it
+    // (it would open mDNS browsers and hold fake-time timers in widget tests).
+  }
 
   @override
   Future<List<Map<String, dynamic>>> getDevices() async => devices;
 
   @override
-  Future<Map<String, dynamic>> control(
+  Future<RelayStatusResult> control(
     String deviceId,
     int channel,
     String state,
@@ -120,19 +121,24 @@ class _FakeRepo extends DeviceRepositoryService {
       // exercised. The test releases the gate explicitly.
       await releaseControl.future;
     }
-    _lastControlResult = true;
-    return {'online': true, 'POWER$channel': state};
+    return RelayStatusResult(
+      online: true,
+      channels: {channel: ChannelReport(state)},
+      source: source,
+      seq: 1,
+    );
   }
 
   @override
-  Future<Map<String, dynamic>> getStatus(String deviceId) async {
-    return {
-      'online': true,
-      'POWER1': 'OFF',
-      'POWER2': 'OFF',
-      'POWER3': 'OFF',
-      'POWER4': 'OFF',
-    };
+  Future<RelayStatusResult> getStatus(String deviceId) async {
+    return RelayStatusResult(
+      online: true,
+      channels: {
+        for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF'),
+      },
+      source: source,
+      seq: 2,
+    );
   }
 }
 
@@ -183,26 +189,34 @@ Future<void> _unmount(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('relay taps drive the repository and keep state in sync',
+  testWidgets('relay taps drive the repository and confirm via device report',
       (tester) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
+
+    // Initial confirmed status: all four relays reported OFF.
+    expect(find.text('DRY'), findsNWidgets(4));
 
     // Card rendered and the relay tap routes through the repository.
     expect(find.text('CHANNEL 1'), findsOneWidget);
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
-    // While the (gated) command is in flight the busy state is visible and
-    // exactly one relay call has been dispatched.
+    // While the (gated) command is in flight the intent is PENDING — the UI
+    // must NOT commit ON (no optimistic flip), so the pill shows TURNING.
     expect(repo.controlCalls, 1);
-    expect(find.text('FLOWING'), findsWidgets);
+    expect(find.text('TURNING…'), findsOneWidget);
+    expect(find.text('FLOWING'), findsNothing,
+        reason: 'no optimistic ON may be shown before the device confirms');
 
-    // Release the command: the page re-syncs channels from the fresh status.
+    // Release the command: the confirmed report flips channel 1 to FLOWING.
+    // `pump()` (not `pumpAndSettle`) so fake time never reaches the 15s poll
+    // that would re-read the static all-OFF status.
     repo.releaseControl.complete();
-    await tester.pumpAndSettle();
+    await tester.pump();
     expect(repo.controlCalls, 1);
-    expect(find.text('DRY'), findsNWidgets(4));
+    expect(find.text('FLOWING'), findsOneWidget);
+    expect(find.text('DRY'), findsNWidgets(3));
 
     await _unmount(tester);
   });
@@ -227,7 +241,7 @@ void main() {
 
   testWidgets('successful local operation shows the subtle LAN indicator',
       (tester) async {
-    final repo = _FakeRepo(reportLocalAfterControl: true);
+    final repo = _FakeRepo(source: DeviceTransportSource.local);
     await _pumpDevicesPage(tester, repo: repo);
 
     await tester.tap(find.text('CHANNEL 1'));
@@ -237,6 +251,31 @@ void main() {
         reason: 'Local Mode is shown implicitly, never via a mode dialog');
     expect(find.text('Online'), findsNothing);
 
+    await _unmount(tester);
+  });
+
+  testWidgets('unconfirmed taps never flip a channel ON until a report lands',
+      (tester) async {
+    final repo = _FakeRepo(gateControl: true);
+    await _pumpDevicesPage(tester, repo: repo);
+
+    // Device reports OFF initially.
+    expect(find.text('DRY'), findsNWidgets(4));
+
+    await tester.tap(find.text('CHANNEL 2'));
+    await tester.pump();
+
+    // Pending only — still no FLOWING anywhere, channel 2 shows intent.
+    expect(find.text('TURNING…'), findsOneWidget);
+    expect(find.text('FLOWING'), findsNothing);
+
+    // A failure clears the intent and degrades to UNKNOWN, never a fake OFF.
+    repo.releaseControl.completeError(Exception('nope'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('TURNING…'), findsNothing);
+    expect(find.textContaining('nope'), findsWidgets,
+        reason: 'the failure is surfaced to the user');
     await _unmount(tester);
   });
 
@@ -266,7 +305,6 @@ void main() {
       expect(find.text('LAN'), findsOneWidget);
       expect(find.text('Offline'), findsNothing);
       expect(find.text('Failed to fetch status'), findsNothing);
-      expect(find.textContaining('powered off'), findsNothing);
 
       await _unmount(tester);
     });

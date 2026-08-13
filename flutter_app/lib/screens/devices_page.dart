@@ -11,6 +11,19 @@ import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
 
+/// Per-channel state on the devices page. `reported` is ONLY ever set from a
+/// device report (local HTTP read-back, cloud MQTT report via socket/poll).
+/// The user's tap only sets [desired] + [pending] until a report confirms it.
+class _ChannelState {
+  String? reported; // 'ON' / 'OFF' / null = UNKNOWN
+  bool pending = false;
+  String? desired; // last intent while awaiting confirmation
+  DeviceTransportSource? source;
+  DateTime? updatedAt; // receive time on the phone
+  DateTime? serverTs; // backend per-channel updatedAt (cloud reports)
+  int seq = 0; // bumped on every ACCEPTED report; rollback guard
+}
+
 class DevicesPage extends StatefulWidget {
   final ValueChanged<int> onNavigateToTab;
   const DevicesPage({super.key, required this.onNavigateToTab})
@@ -36,7 +49,7 @@ class DevicesPage extends StatefulWidget {
 }
 
 class _DevicesPageState extends State<DevicesPage>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late final DeviceRepositoryService _repository =
       widget.testRepository ?? DeviceRepositoryService();
   DeviceTransportSource? _lastTransportSource;
@@ -53,11 +66,18 @@ class _DevicesPageState extends State<DevicesPage>
   static const int _maxPollFailures = 3;
   int _pollFailures = 0;
 
-  final List<bool> channelStates = [false, false, false, false];
+  // A cloud report whose backend updatedAt is older than this is considered
+  // stale and can never overwrite a fresh LAN read.
+  static const Duration _kCloudFreshWindow = Duration(minutes: 5);
+
+  final List<_ChannelState> _channels =
+      List.generate(4, (_) => _ChannelState());
   final List<bool> _channelLoading = [false, false, false, false];
   final Set<String> _pendingRelays = {};
   final List<AnimationController> _rippleControllers = [];
   final List<AnimationController> _entranceControllers = [];
+
+  bool _statusInFlight = false;
 
   void _setConnected(bool connected) {
     if (!mounted || _connected == connected) return;
@@ -81,22 +101,88 @@ class _DevicesPageState extends State<DevicesPage>
     }
   }
 
-  void _setChannelState(int index, bool newState, {bool applyRipple = true}) {
+  /// THE single controlled writer for channel state. Every report — local
+  /// command/status, cloud poll, socket event — funnels through here and is
+  /// rejected when it is stale. A device report with `state == null` means
+  /// UNKNOWN: it never fabricates OFF and never clears a confirmed state.
+  void _applyChannelReport(
+    int index,
+    ChannelReport report,
+    DeviceTransportSource source,
+  ) {
     if (index < 0 || index >= _deviceChannels) return;
-    setState(() => channelStates[index] = newState);
-    if (applyRipple) {
-      if (newState) {
+    final ch = _channels[index];
+    final now = DateTime.now();
+
+    if (report.state == null) {
+      // UNKNOWN report: only meaningful when we have nothing confirmed.
+      if (ch.reported == null && !ch.pending) {
+        setState(() {
+          ch.source = source;
+          ch.updatedAt = report.updatedAt ?? now;
+          ch.seq++;
+        });
+      }
+      return;
+    }
+
+    final incomingTs = report.updatedAt ?? now;
+
+    if (source == DeviceTransportSource.cloud) {
+      // A strictly older cloud report must never overwrite a newer one.
+      if (ch.serverTs != null &&
+          report.updatedAt != null &&
+          !report.updatedAt!.isAfter(ch.serverTs!)) {
+        return;
+      }
+      // A fresh LAN read is the closest truth. A cloud report may only replace
+      // it when the backend genuinely has newer (recent) information.
+      final hasFreshLocal = ch.source == DeviceTransportSource.local &&
+          ch.updatedAt != null &&
+          now.difference(ch.updatedAt!) < kLocalReportHold;
+      final cloudFresh = report.updatedAt == null ||
+          now.difference(report.updatedAt!) < _kCloudFreshWindow;
+      if (hasFreshLocal && !cloudFresh) return;
+    } else {
+      // Local is the freshest possible report; only a strictly-newer local
+      // read may replace the current one (guards an older local read that
+      // lands late).
+      if (ch.source == DeviceTransportSource.local &&
+          ch.updatedAt != null &&
+          incomingTs.isBefore(ch.updatedAt!)) {
+        return;
+      }
+    }
+
+    setState(() {
+      ch.reported = report.state;
+      ch.updatedAt = incomingTs;
+      if (source == DeviceTransportSource.cloud && report.updatedAt != null) {
+        ch.serverTs = report.updatedAt;
+      }
+      ch.source = source;
+      ch.seq++;
+      if (report.state == 'ON') {
         _rippleControllers[index].repeat(reverse: true);
       } else {
         _rippleControllers[index].stop();
         _rippleControllers[index].reset();
       }
+    });
+  }
+
+  void _applyResult(RelayStatusResult result) {
+    _lastTransportSource = result.source;
+    _setConnected(result.online);
+    for (final e in result.channels.entries) {
+      _applyChannelReport(e.key - 1, e.value, result.source);
     }
   }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     for (int i = 0; i < 4; i++) {
       _rippleControllers.add(
         AnimationController(
@@ -121,6 +207,7 @@ class _DevicesPageState extends State<DevicesPage>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _statusTimer?.cancel();
     for (final c in _rippleControllers) {
       c.dispose();
@@ -131,6 +218,13 @@ class _DevicesPageState extends State<DevicesPage>
     _socket?.disconnect();
     _socket?.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      _syncAfterReconnect();
+    }
   }
 
   Future<void> _loadDevices() async {
@@ -149,6 +243,9 @@ class _DevicesPageState extends State<DevicesPage>
           _selectDevice(_devices.first['deviceId'] as String);
         }
       }
+      // Background local discovery warm-up so relay taps use a verified IP
+      // instead of waiting on mDNS. Never blocks the UI.
+      unawaited(_repository.warmUp(_devices));
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -179,9 +276,10 @@ class _DevicesPageState extends State<DevicesPage>
       _deviceChannels = device['channels'] as int? ?? 4;
     });
     // Switch context fully: previous device's states and animations must not
-    // leak into the newly selected device's grid.
+    // leak into the newly selected device's grid. Channels start UNKNOWN
+    // (never a fabricated OFF) until the next report.
     for (int i = 0; i < 4; i++) {
-      channelStates[i] = false;
+      _channels[i] = _ChannelState();
       _channelLoading[i] = false;
     }
     _stopRipples();
@@ -198,7 +296,7 @@ class _DevicesPageState extends State<DevicesPage>
   int get _activeCount {
     var n = 0;
     for (int i = 0; i < _deviceChannels; i++) {
-      if (channelStates[i]) n++;
+      if (_channels[i].reported == 'ON') n++;
     }
     return n;
   }
@@ -218,8 +316,8 @@ class _DevicesPageState extends State<DevicesPage>
     });
 
     _socket?.onConnect((_) {
-      // Socket is up. Device liveness is driven by device_status/polling, so
-      // there is nothing to flip here — no-op on purpose.
+      // Reconnect: reconcile instead of waiting for the next 15s poll.
+      _syncAfterReconnect();
     });
     _socket?.onDisconnect((_) => _socketDown());
     _socket?.onConnectError((_) => _socketDown());
@@ -250,10 +348,15 @@ class _DevicesPageState extends State<DevicesPage>
         final deviceId = map['deviceId'] as String?;
         if (deviceId != null && deviceId != _selectedDeviceId) return;
         final channel = map['channel'] as int;
-        final index = channel - 1;
-        if (index < 0 || index >= _deviceChannels) return;
-        final state = map['state'] as String;
-        _setChannelState(index, state == 'ON');
+        final state = map['state'] as String?;
+        DateTime? updatedAt;
+        final ua = map['updatedAt'];
+        if (ua is String) updatedAt = DateTime.tryParse(ua);
+        _applyChannelReport(
+          channel - 1,
+          ChannelReport(state == 'UNKNOWN' ? null : state, updatedAt: updatedAt),
+          DeviceTransportSource.cloud,
+        );
       } catch (_) {
         // Ignore malformed event; polling re-establishes truth.
       }
@@ -262,72 +365,104 @@ class _DevicesPageState extends State<DevicesPage>
     _socket?.connect();
   }
 
+  // Reconnect / resume / post-load reconciliation: refresh local availability
+  // in the background and re-fetch fresh state through the single writer, so a
+  // stale response can never win.
+  void _syncAfterReconnect() {
+    if (!mounted) return;
+    _pollFailures = 0;
+    _fetchStatus(silent: true);
+    unawaited(_repository.warmUp(_devices));
+  }
+
   Future<void> _fetchStatus({bool silent = false}) async {
     if (_selectedDeviceId == null) return;
+    if (_statusInFlight) return; // overlapping-poll guard
+    _statusInFlight = true;
     try {
-      final data = await _repository.getStatus(_selectedDeviceId!);
+      final result = await _repository.getStatus(_selectedDeviceId!);
+      if (!mounted) return;
       _pollFailures = 0;
-      _setConnected(data['online'] == true);
-      _lastTransportSource = _repository.lastSource;
-      setState(() {
-        for (int i = 0; i < _deviceChannels; i++) {
-          final on = data['POWER${i + 1}'] == 'ON';
-          channelStates[i] = on;
-          if (on) {
-            _rippleControllers[i].repeat(reverse: true);
-          } else {
-            _rippleControllers[i].stop();
-            _rippleControllers[i].reset();
+      _applyResult(result);
+    } catch (e) {
+      if (mounted) {
+        if (!silent) {
+          _setConnected(false);
+          _showError('Failed to fetch status');
+        } else {
+          // Background polling: stay silent until several consecutive failures.
+          _pollFailures++;
+          if (_pollFailures >= _maxPollFailures) {
+            _setConnected(false);
           }
         }
-      });
-    } catch (e) {
-      if (!silent) {
-        _setConnected(false);
-        _showError('Failed to fetch status');
-        return;
       }
-      // Background polling: stay silent until several consecutive failures.
-      _pollFailures++;
-      if (_pollFailures >= _maxPollFailures) {
-        _setConnected(false);
-      }
+    } finally {
+      _statusInFlight = false;
     }
   }
 
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
     // No `_connected` gate here: the repository owns reachability. This lets a
-    // tap reach the transport layer so the cloud→local fallback can run when
-    // the backend/socket is down; the card visuals still reflect `_connected`.
+    // tap reach the transport layer so the local-first path can run; the card
+    // visuals still reflect `_connected`.
     final key = '${_selectedDeviceId}_$channel';
     if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
-    final prev = channelStates[index];
+    final ch = _channels[index];
+    final seqBefore = ch.seq;
     _pendingRelays.add(key);
-    _setChannelState(index, targetState);
-    setState(() => _channelLoading[index] = true);
+    setState(() {
+      ch.pending = true;
+      ch.desired = targetState ? 'ON' : 'OFF';
+      _channelLoading[index] = true;
+    });
     try {
-      await _repository.control(
+      final result = await _repository.control(
         _selectedDeviceId!,
         channel,
         targetState ? 'ON' : 'OFF',
       );
-      _lastTransportSource = _repository.lastSource;
-      // A relay command that succeeded means the device IS reachable.
-      _setConnected(true);
+      if (!mounted) return;
+      _lastTransportSource = result.source;
+      _setConnected(result.online);
+      setState(() {
+        ch.pending = false;
+        ch.desired = null;
+        _channelLoading[index] = false;
+      });
+      _applyResult(result);
+      // If the changed channel did not come back with a confirmed report,
+      // reconcile immediately rather than leaving a silent pending state.
+      if (result.channels[channel]?.state == null) {
+        _fetchStatus(silent: true);
+      }
     } catch (e) {
+      if (!mounted) return;
       final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        ch.pending = false;
+        ch.desired = null;
+        _channelLoading[index] = false;
+        // NEVER roll back to a stale value. Only degrade to UNKNOWN when
+        // nothing newer arrived while the command was in flight; otherwise a
+        // fresher device report already owns the channel.
+        if (ch.seq == seqBefore) {
+          ch.reported = null;
+          ch.source = null;
+          ch.updatedAt = null;
+        }
+      });
       if (msg.toLowerCase().contains('not connected') ||
           msg.toLowerCase().contains('offline') ||
           msg.toLowerCase().contains('powered off')) {
         _setConnected(false);
       }
-      _setChannelState(index, prev);
       _showError(msg);
+      _fetchStatus(silent: true); // reconcile
     } finally {
       _pendingRelays.remove(key);
-      if (mounted) setState(() => _channelLoading[index] = false);
     }
   }
 
@@ -661,7 +796,8 @@ class _DevicesPageState extends State<DevicesPage>
             index: i,
             channel: i + 1,
             config: _configFor(i),
-            isOn: channelStates[i],
+            reported: _channels[i].reported,
+            pending: _channels[i].pending,
             loading: _channelLoading[i],
             offline: !_connected,
             entrance: _entranceControllers[i],
@@ -808,7 +944,8 @@ class _WaterCard extends AnimatedWidget {
   final int index;
   final int channel;
   final ChannelConfig config;
-  final bool isOn;
+  final String? reported;
+  final bool pending;
   final bool loading;
   final bool offline;
   final AnimationController entrance;
@@ -819,7 +956,8 @@ class _WaterCard extends AnimatedWidget {
     required this.index,
     required this.channel,
     required this.config,
-    required this.isOn,
+    required this.reported,
+    required this.pending,
     required this.loading,
     required this.offline,
     required this.entrance,
@@ -835,7 +973,8 @@ class _WaterCard extends AnimatedWidget {
       child: _WaterCardBody(
         channel: channel,
         config: config,
-        isOn: isOn,
+        reported: reported,
+        pending: pending,
         loading: loading,
         offline: offline,
         ripple: ripple,
@@ -848,7 +987,8 @@ class _WaterCard extends AnimatedWidget {
 class _WaterCardBody extends StatefulWidget {
   final int channel;
   final ChannelConfig config;
-  final bool isOn;
+  final String? reported;
+  final bool pending;
   final bool loading;
   final bool offline;
   final AnimationController ripple;
@@ -857,7 +997,8 @@ class _WaterCardBody extends StatefulWidget {
   const _WaterCardBody({
     required this.channel,
     required this.config,
-    required this.isOn,
+    required this.reported,
+    required this.pending,
     required this.loading,
     required this.offline,
     required this.ripple,
@@ -890,11 +1031,12 @@ class _WaterCardBodyState extends State<_WaterCardBody>
   @override
   Widget build(BuildContext context) {
     final c = widget.config;
-    final isOn = widget.isOn;
+    final isOn = widget.reported == 'ON';
+    final isUnknown = widget.reported == null;
     final colors = context.steesColors;
-    // Only loading disables taps: offline cards stay tappable so the cloud→local
-    // fallback can run when the socket/backend is down. Offline still renders
-    // grey via widget.offline below.
+    // Only loading disables taps: offline/unknown cards stay tappable so the
+    // local-first path can run when the socket/backend is down. Offline still
+    // renders grey via widget.offline below.
     final disabled = widget.loading;
 
     return GestureDetector(
@@ -909,97 +1051,106 @@ class _WaterCardBodyState extends State<_WaterCardBody>
       child: AnimatedScale(
         scale: 1.0 - _press.value * 0.03,
         duration: const Duration(milliseconds: 120),
-child: AnimatedOpacity(
-            opacity: widget.loading ? 0.6 : (widget.offline ? 0.72 : 1.0),
-            duration: const Duration(milliseconds: 200),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 350),
-              curve: Curves.easeInOut,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppRadius.lg),
+        child: AnimatedOpacity(
+          opacity: widget.loading ? 0.6 : (widget.offline ? 0.72 : 1.0),
+          duration: const Duration(milliseconds: 200),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOut,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              color: widget.offline
+                  ? colors.submerged.withValues(alpha: 0.5)
+                  : colors.submerged,
+              border: Border.all(
                 color: widget.offline
-                    ? colors.submerged.withValues(alpha: 0.5)
-                    : colors.submerged,
-                border: Border.all(
-                  color: widget.offline
-                      ? colors.mist.withValues(alpha: 0.5)
-                      : isOn
-                          ? colors.leaf
-                          : colors.border,
-                  width: widget.offline ? 1 : (isOn ? 1.2 : 1),
+                    ? colors.mist.withValues(alpha: 0.5)
+                    : isOn
+                        ? colors.leaf
+                        : colors.border,
+                width: widget.offline ? 1 : (isOn ? 1.2 : 1),
+              ),
+              boxShadow: [AppShadows.cardShadow(colors.border)],
+            ),
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              AppSpacing.sm,
+              AppSpacing.md,
+              AppSpacing.sm,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      c.subtitle,
+                      style: GoogleFonts.inter(
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.1,
+                        color: widget.offline
+                            ? colors.mist.withValues(alpha: 0.6)
+                            : colors.mist,
+                      ),
+                    ),
+                    _DropletToggle(
+                      isOn: isOn,
+                      loading: widget.loading,
+                      disabled: widget.offline,
+                      activeColor: colors.leaf,
+                      onTap: disabled ? null : () => widget.onToggle(!isOn),
+                    ),
+                  ],
                 ),
-                boxShadow: [AppShadows.cardShadow(colors.border)],
-              ),
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.md,
-                AppSpacing.sm,
-                AppSpacing.md,
-                AppSpacing.sm,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        c.subtitle,
-                        style: GoogleFonts.inter(
-                          fontSize: 8.5,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 1.1,
-                          color: widget.offline
-                              ? colors.mist.withValues(alpha: 0.6)
-                              : colors.mist,
-                        ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      height: 34,
+                      child: Center(
+                        child: widget.offline
+                            ? Icon(
+                                c.icon,
+                                size: 30,
+                                color: isOn
+                                    ? colors.leaf.withValues(alpha: 0.6)
+                                    : colors.mist.withValues(alpha: 0.35),
+                              )
+                            : _RippleIcon(
+                                icon: c.icon,
+                                size: 30,
+                                color: isOn
+                                    ? colors.leaf
+                                    : colors.mist.withValues(alpha: 0.45),
+                                ripple: widget.ripple,
+                              ),
                       ),
-                      _DropletToggle(
-                        isOn: isOn,
-                        loading: widget.loading,
-                        disabled: widget.offline,
-                        activeColor: colors.leaf,
-                        onTap: disabled ? null : () => widget.onToggle(!isOn),
-                      ),
-                    ],
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        height: 34,
-                        child: Center(
-                          child: widget.offline
-                              ? Icon(
-                                  c.icon,
-                                  size: 30,
-                                  color: isOn
-                                      ? colors.leaf.withValues(alpha: 0.6)
-                                      : colors.mist.withValues(alpha: 0.35),
-                                )
-                              : _RippleIcon(
-                                  icon: c.icon,
-                                  size: 30,
-                                  color: isOn
-                                      ? colors.leaf
-                                      : colors.mist.withValues(alpha: 0.45),
-                                  ripple: widget.ripple,
-                                ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (widget.offline)
-                    const _OfflineBadge()
-                  else
-                    _FlowPill(isOn: isOn, color: colors.leaf),
-                ],
-              ),
+                    ),
+                  ],
+                ),
+                _buildStatusPill(colors, isOn, isUnknown),
+              ],
             ),
           ),
+        ),
       ),
     );
+  }
+
+  Widget _buildStatusPill(SteesColors colors, bool isOn, bool isUnknown) {
+    if (widget.pending) {
+      return _SyncPill(label: 'TURNING…', color: colors.stream);
+    }
+    if (isUnknown) {
+      // UNKNOWN is never rendered as OFF. Connected+unknown → syncing;
+      // otherwise the device is unreachable.
+      return widget.offline ? const _OfflineBadge() : _SyncPill(label: 'SYNCING', color: colors.mist);
+    }
+    return _FlowPill(isOn: isOn, color: colors.leaf);
   }
 }
 
@@ -1070,7 +1221,7 @@ class _DropletToggle extends StatelessWidget {
     final colors = context.steesColors;
     return GestureDetector(
       // `disabled` here is purely visual (grey when offline). Taps always
-      // reach the repository so the local fallback can run while offline.
+      // reach the repository so the local-first path can run while offline.
       onTap: loading ? null : onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
@@ -1152,6 +1303,39 @@ class _OfflineBadge extends StatelessWidget {
               fontWeight: FontWeight.w700,
               letterSpacing: 0.8,
               color: colors.mist.withValues(alpha: 0.8),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SyncPill extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _SyncPill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.sync, size: 9, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: GoogleFonts.sora(
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              color: color,
             ),
           ),
         ],

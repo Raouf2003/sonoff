@@ -105,6 +105,10 @@ class MqttGateway {
       console.log(`Backend connected to MQTT broker at ${url}`);
       this._subscribe();
       this._failPending('connection reset');
+      // Fast state recovery: ask every claimed device to report its current
+      // STATE right now instead of waiting up to a TelePeriod. `State` is a
+      // read-only query, never a control command.
+      this.requestStateSync();
     });
 
     this.client.on('reconnect', () => {
@@ -131,18 +135,52 @@ class MqttGateway {
   }
 
   _subscribe() {
-    this.client.subscribe('stat/+/RESULT');
-    this.client.subscribe('stat/+/POWER+');
-    this.client.subscribe('tele/+/STATE');
-    this.client.subscribe('tele/+/LWT');
-    this.client.subscribe('tele/+/SENSOR');
+    // qos1 for the topics that carry relay state and command ACKs so a
+    // transient broker gap is less likely to lose a state report; SENSOR
+    // telemetry stays qos0 to bound the load from a shared public broker.
+    this.client.subscribe('stat/+/RESULT', { qos: 1 });
+    this.client.subscribe('stat/+/POWER+', { qos: 1 });
+    this.client.subscribe('tele/+/STATE', { qos: 1 });
+    this.client.subscribe('tele/+/LWT', { qos: 1 });
+    this.client.subscribe('tele/+/SENSOR', { qos: 0 });
     console.log('MQTT subscriptions (re)registered');
+  }
+
+  // Bounded, idempotent read-only state recovery. Publishes an empty
+  // `cmnd/<deviceId>/State` for every claimed device so runtimeState is
+  // repopulated quickly after a backend restart or MQTT reconnect instead of
+  // waiting up to TelePeriod. Never sends control commands and never retries
+  // on a timer — one pass per (re)connect, plus one pass after the registry
+  // has loaded the claimed devices from the database.
+  requestStateSync() {
+    if (this._stateSyncTimer) {
+      clearTimeout(this._stateSyncTimer);
+    }
+    this._stateSyncTimer = setTimeout(() => {
+      this._stateSyncTimer = null;
+      if (!this.isConnected()) return;
+      for (const device of this.deviceRegistry.all()) {
+        const topic = `cmnd/${device.deviceId}/State`;
+        console.log(`[mqtt] requesting state sync for ${device.deviceId}`);
+        this.client.publish(topic, '', { qos: 1, retain: false }, (err) => {
+          if (err) {
+            console.error(
+              `[mqtt] state sync publish failed for ${device.deviceId}: ${err.message}`,
+            );
+          }
+        });
+      }
+    }, 500);
   }
 
   // ACK-based command. Publishes to MQTT, registers a pending command, and
   // resolves only when the matching stat/.../RESULT (or tele/STATE) ack
   // arrives. Rejects on timeout, publish failure, or disconnect so callers
   // never mistake a silent device for success.
+  //
+  // A concurrent command for the SAME device+channel explicitly SUPERSEDES the
+  // previous one (deterministic last-writer-wins) and rejects the older
+  // promise with `SUPERSEDED` — no caller is ever left hanging forever.
   publishCommand(deviceId, channel, state) {
     return new Promise((resolve, reject) => {
       const c = this.client;
@@ -155,7 +193,14 @@ class MqttGateway {
       const key = `${deviceId}:${channel}`;
       const expected = String(state).toUpperCase();
       const prev = this.pending.get(key);
-      if (prev) clearTimeout(prev.timer);
+      if (prev) {
+        clearTimeout(prev.timer);
+        const err = new Error(
+          `Command superseded for ${deviceId} channel ${channel}`,
+        );
+        err.code = 'SUPERSEDED';
+        if (prev.reject) prev.reject(err);
+      }
 
       const timer = setTimeout(() => {
         this.pending.delete(key);
@@ -258,7 +303,7 @@ class MqttGateway {
     const acked = String(observed).toUpperCase() === p.state;
     console.log(`ACK received: ${deviceId} POWER${channel} = ${observed} (expected ${p.state}, acked: ${acked})`);
     console.log(`Pending commands: ${this.pending.size}`);
-    if (p.resolve) p.resolve(acked);
+    if (p.resolve) p.resolve({ acked, observed: String(observed).toUpperCase() });
   }
 
   _failPending(reason) {
@@ -332,26 +377,37 @@ class MqttGateway {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
       this._resolveAcks(deviceId, parsed);
     } else if (isResult) {
+      // Raw stat/<deviceId>/POWERn = "ON"/"OFF" (non-JSON payload). It is both
+      // a device state report AND the direct reply to a command, so it updates
+      // state and resolves any pending ACK for that channel.
       const m = topic.match(/POWER(\d*)$/);
       if (m) {
         const ch = channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
         const st = payload.trim().toUpperCase();
-        if (st === 'ON' || st === 'OFF') channelUpdates[ch] = st;
+        if (st === 'ON' || st === 'OFF') {
+          channelUpdates[ch] = st;
+          this._resolvePending(deviceId, ch, st);
+        }
       }
     }
 
     if (Object.keys(channelUpdates).length) {
-      const chans = this.runtimeState.ensureDeviceState(deviceId, channelCount);
-      for (const [ch, st] of Object.entries(channelUpdates)) {
-        chans[Number(ch)] = st;
-      }
+      this.runtimeState.ensureDeviceState(deviceId, channelCount);
       this.runtimeState.touchDevice(deviceId);
-      if (this.io && ownerId) {
-        const room = `user:${ownerId}`;
-        for (const [ch, st] of Object.entries(channelUpdates)) {
-          this.io.to(room).emit('device_update', { deviceId, channel: Number(ch), state: st });
+      for (const [ch, st] of Object.entries(channelUpdates)) {
+        const entry = this.runtimeState.applyChannelState(deviceId, Number(ch), st);
+        if (this.io && ownerId) {
+          const room = `user:${ownerId}`;
+          this.io.to(room).emit('device_update', {
+            deviceId,
+            channel: Number(ch),
+            state: st,
+            updatedAt: entry.updatedAt
+              ? new Date(entry.updatedAt).toISOString()
+              : null,
+          });
+          this.io.to(room).emit('device_status', { deviceId, online: true });
         }
-        this.io.to(room).emit('device_status', { deviceId, online: true });
       }
     }
   }

@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/device_type.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/device_repository_service.dart';
 import '../services/local_device_cache.dart';
 import '../services/provisioning_service.dart';
 import '../theme/app_theme.dart';
@@ -48,7 +49,8 @@ class ProvisionDeviceScreen extends StatefulWidget {
   const ProvisionDeviceScreen({super.key})
       : testApi = null,
         testDeviceId = null,
-        testFailureCode = null;
+        testFailureCode = null,
+        testWarmUp = null;
 
   /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
   /// failure state and injects an [ApiService] so widget tests can exercise the
@@ -61,6 +63,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
     this.testApi,
     this.testDeviceId,
     this.testFailureCode,
+    this.testWarmUp,
   });
 
   @visibleForTesting
@@ -71,6 +74,11 @@ class ProvisionDeviceScreen extends StatefulWidget {
 
   @visibleForTesting
   final String? testFailureCode;
+
+  /// Test seam: replaces the real background discovery warm-up (which opens
+  /// mDNS browsers and holds fake-time timers) with a no-op in widget tests.
+  @visibleForTesting
+  final Future<void> Function(List<Map<String, dynamic>> devices)? testWarmUp;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -127,6 +135,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   /// the cloud is temporarily unreachable. Best-effort only — a cache write
   /// failure never fails provisioning.
   final LocalDeviceCache _deviceCache = LocalDeviceCache();
+
+  /// Used after a successful provisioning to kick off background local
+  /// discovery warm-up so the device's first relay tap uses a verified LAN IP
+  /// instead of waiting on mDNS. Best-effort only.
+  final DeviceRepositoryService _repository = DeviceRepositoryService();
 
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
@@ -1263,6 +1276,15 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       debugPrint('[PROVISION] REGISTER_SUCCESS deviceId=$deviceId');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       await _cacheUpsertDevice(deviceId, name);
+      // Background local discovery warm-up: bounded, single-flight, never
+      // blocks the flow or affects the provisioning outcome.
+      unawaited(
+        _warmUpDevice({
+          'deviceId': deviceId,
+          'name': name,
+          'channels': _deviceType.channelCount,
+        }),
+      );
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } on ApiException catch (e) {
@@ -1580,6 +1602,18 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     } on Object catch (e) {
       debugPrint('[LOCAL] cache remove failed for $deviceId: $e');
     }
+  }
+
+  // Background discovery warm-up after a successful claim so the first relay
+  // tap on the devices page uses a verified LAN IP. Test seam: widget tests
+  // replace this with a no-op so no real mDNS browser/timer is created.
+  Future<void> _warmUpDevice(Map<String, dynamic> device) async {
+    final hook = widget.testWarmUp;
+    if (hook != null) {
+      await hook([device]);
+      return;
+    }
+    await _repository.warmUp([device]);
   }
 
   void _setSuccess(String msg) {

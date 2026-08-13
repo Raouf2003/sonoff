@@ -87,6 +87,7 @@ Future<void> _pumpWizard(
                     testApi: api,
                     testDeviceId: '34987AC30304',
                     testFailureCode: code,
+                    testWarmUp: (_) async {},
                   ),
                 ),
               ),

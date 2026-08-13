@@ -7,26 +7,40 @@ import 'local_device_cache.dart';
 import 'local_device_discovery.dart';
 import 'local_device_transport.dart';
 
-/// How long the cloud→local lookup is allowed to take in total (cached-IP
-/// probe + mDNS window + per-candidate MAC checks). A relay tap on a degraded
-/// network never blocks past this before surfacing the cloud's error.
-const Duration kLocalFallbackBudget = Duration(seconds: 10);
+/// How long a single LOCAL attempt (cached-IP probe + possible quick mDNS
+/// window + identity verify + command + read-back) may take before the
+/// repository gives up and falls back to cloud. Warm taps are sub-second;
+/// this is the worst case for a cold LAN so the user never waits 10-20s.
+const Duration kLocalBudget = Duration(seconds: 6);
 
-/// mDNS browse window for a single lookup. Bounded by contract — discovery
-/// never runs indefinitely.
-const Duration kLocalMDnsWindow = Duration(seconds: 5);
+/// mDNS browse window for a TAP-time discovery (only used when no verified IP
+/// is cached). Kept short so a first tap is still snappy.
+const Duration kTapMdnWindow = Duration(seconds: 2);
+
+/// mDNS browse window for BACKGROUND warm-up discovery (page load / resume /
+/// reconnect / after provisioning).
+const Duration kWarmMdnWindow = Duration(seconds: 5);
+
+/// A verified IP is trusted without re-probing for this long. After the TTL it
+/// is re-verified with `Status 5` before use (cheap, one LAN round trip).
+const Duration kVerifiedIpTtl = Duration(minutes: 10);
+
+/// A local device report stays "fresh" (and therefore beats a stale cloud
+/// report) for this window after it was read.
+const Duration kLocalReportHold = Duration(seconds: 60);
 
 /// The single service the devices page uses for relay control and status.
 ///
-/// Cloud is ALWAYS preferred. Local Mode is a transparent fallback for the SAME
-/// already-provisioned devices, triggered only when the cloud failure is an
-/// availability failure:
+/// The transport order is LOCAL-FIRST: whenever the phone can reach the device
+/// on the LAN the device's own report (HTTP) is the closest source of truth,
+/// and the cloud is the fallback/remote transport. The two are never combined
+/// for one user action — either the local command confirms, or the cloud
+/// command runs; never both.
 ///
-///   * no network / connection failure / timeout / backend 5xx  → try local
-///   * 400 / 401 / 403 / 404 / ownership / validation / conflicts → NEVER
-///
-/// The UI never learns which transport ran; it only reads [lastSource] for the
-/// optional, subtle connection indicator.
+/// Local logical rejections (identity mismatch, unconfirmed command) are NEVER
+/// rerouted to the cloud: an identity violation is a security/ownership matter
+/// and an unconfirmed command means the device was already contacted, so a
+/// cloud resend would be a duplicate execution.
 class DeviceRepositoryService {
   DeviceRepositoryService({
     CloudDeviceTransport? cloud,
@@ -46,19 +60,42 @@ class DeviceRepositoryService {
 
   DeviceTransportSource? _lastSource;
 
+  /// Monotonic operation sequence, stamped at request START so a response that
+  /// started earlier but lands later can be recognised and rejected.
+  int _seq = 0;
+
+  /// Warm in-memory verified endpoints (keyed by deviceId). Populated by
+  /// background discovery so relay taps normally use an already-verified IP
+  /// without waiting on mDNS.
+  final Map<String, LocalDeviceTransport> _warmCache = {};
+  final Map<String, DateTime> _warmVerifiedAt = {};
+
+  /// In-flight discovery futures per deviceId: a background status poll and a
+  /// relay tap targeting the same device share ONE bounded discovery window.
+  final Map<String, Future<LocalDeviceTransport?>> _discoveryInFlight = {};
+
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
   DeviceTransportSource? get lastSource => _lastSource;
 
-  /// The registered device list, cloud-first with a local cache fallback.
-  ///
-  /// Cloud success refreshes the cache. An availability failure on the cloud
-  /// (no network / timeout / 5xx / device-offline 409) falls back to the
-  /// cached mirror so the devices page can still render and reach devices on
-  /// the LAN — a cloud outage is never treated as data loss. When there is NO
-  /// cloud AND NO cache, the original error is surfaced unchanged so the page
-  /// keeps its familiar "could not load" state. Logical rejections (400/401/
-  /// 403/404/coded 409) are never masked by the cache.
+  /// Background discovery warm-up for every registered device: cached verified
+  /// IP first, then bounded mDNS, each endpoint MAC-verified before caching.
+  /// Bounded, single-flight per device, and never blocks the UI.
+  Future<void> warmUp(List<Map<String, dynamic>> devices) async {
+    for (final d in devices) {
+      final id = d['deviceId'];
+      if (id is! String || id.isEmpty) continue;
+      try {
+        await _findLocal(id).timeout(kLocalBudget);
+      } on Object catch (e) {
+        _log('warm-up failed for $id (${_describe(e)})');
+      }
+    }
+  }
+
+  /// The registered device list, cloud-first with a local cache fallback
+  /// (unchanged: the list itself remains cloud-authorised; Local Mode never
+  /// invents devices).
   Future<List<Map<String, dynamic>>> getDevices() async {
     try {
       final devices = await _cloud.getDevices();
@@ -86,93 +123,130 @@ class DeviceRepositoryService {
     }
   }
 
-  Future<Map<String, dynamic>> getStatus(String deviceId) async {
-    Map<String, dynamic> result;
+  /// Status, LOCAL-FIRST: a live LAN read (the freshest possible report) wins
+  /// whenever the device is reachable. When the LAN cannot be reached the
+  /// cloud's status is used. A cloud report that says ONLINE is only accepted
+  /// if it is fresh; a stale cloud answer never overwrites a fresh LAN read.
+  Future<RelayStatusResult> getStatus(String deviceId) async {
+    final seq = ++_seq;
+    // LOCAL first.
     try {
-      result = await _cloud.getStatus(deviceId);
-    } on Object catch (e) {
-      if (!isAvailabilityFailure(e)) rethrow;
-      _log(
-        'cloud unavailable for $deviceId (${_describe(e)}), '
-        'starting local fallback',
-      );
-      return _fallback(() => _localStatus(deviceId), originalError: e);
-    }
-    // The cloud answered. When it reports the device online we are done; when
-    // it reports the device OFFLINE at the cloud, the device may still be on
-    // the LAN (the same outage often hides it from MQTT). Probe local and
-    // prefer the live LAN status when it verifies — never paper over cloud
-    // truth with a guessed answer.
-    if (result['online'] != true) {
-      return _probeLocalStatus(deviceId, cloudResult: result);
-    }
-    _lastSource = DeviceTransportSource.cloud;
-    return result;
-  }
-
-  /// Cloud is healthy but says the device is offline. Try the LAN; keep the
-  /// cloud's (offline) answer untouched when the LAN cannot find the device.
-  Future<Map<String, dynamic>> _probeLocalStatus(
-    String deviceId, {
-    required Map<String, dynamic> cloudResult,
-  }) async {
-    _lastSource = DeviceTransportSource.cloud;
-    try {
-      final local = await _localStatus(deviceId).timeout(kLocalFallbackBudget);
-      _log('local status success for $deviceId — using LAN state');
+      final local = await _localStatus(deviceId).timeout(kLocalBudget);
       _lastSource = DeviceTransportSource.local;
-      return local;
-    } on Object {
-      _log('local status failed for $deviceId — keeping cloud truth (offline)');
+      _log('local status success for $deviceId');
+      return parseRelayStatus(
+        local,
+        source: DeviceTransportSource.local,
+        seq: seq,
+      );
+    } on Object catch (e) {
+      if (e is DeviceTransportException &&
+          e.kind == TransportFailureKind.logical) {
+        rethrow; // identity violation — never fall back to the cloud for it.
+      }
+      _log('local status failed for $deviceId (${_describe(e)})');
+    }
+
+    // CLOUD fallback.
+    try {
+      final cloud = await _cloud.getStatus(deviceId);
       _lastSource = DeviceTransportSource.cloud;
-      return cloudResult;
+      final result = parseRelayStatus(
+        cloud,
+        source: DeviceTransportSource.cloud,
+        seq: ++_seq,
+      );
+      // The cloud answered and reports the device ONLINE: trust its (fresh)
+      // reports. If it reports OFFLINE, the device may still be on the LAN —
+      // probe local once more and prefer the live LAN report when it verifies.
+      if (result.online) return result;
+      try {
+        final local = await _localStatus(deviceId).timeout(kLocalBudget);
+        _lastSource = DeviceTransportSource.local;
+        return parseRelayStatus(
+          local,
+          source: DeviceTransportSource.local,
+          seq: ++_seq,
+        );
+      } on Object {
+        // The LAN could not be reached either: the cloud's (offline) answer is
+        // still valid truth, so keep it instead of turning a valid response
+        // into an error.
+        _log('cloud said offline and the LAN re-probe failed — keeping cloud truth');
+        return result;
+      }
+    } on Object catch (e) {
+      _log('cloud status failed for $deviceId (${_describe(e)})');
+      rethrow;
     }
   }
 
-  Future<Map<String, dynamic>> control(
+  /// Relay command, LOCAL-FIRST. The command is NEVER sent through both
+  /// transports: a local confirmation (device reported the requested state via
+  /// HTTP read-back) wins; otherwise the cloud runs the command once.
+  ///
+  /// A local logical failure (identity mismatch / unconfirmed command) is
+  /// rethrown, never rerouted to the cloud.
+  Future<RelayStatusResult> control(
     String deviceId,
     int channel,
     String state,
   ) async {
+    final seq = ++_seq;
+    DeviceTransportException? localFailure;
+    // LOCAL first.
     try {
-      final result = await _cloud.control(deviceId, channel, state);
+      final local = await _localControl(deviceId, channel, state)
+          .timeout(kLocalBudget);
+      _lastSource = DeviceTransportSource.local;
+      _log('local control success for $deviceId channel $channel');
+      return parseRelayStatus(
+        local,
+        source: DeviceTransportSource.local,
+        seq: seq,
+      );
+    } on Object catch (e) {
+      if (e is DeviceTransportException &&
+          e.kind == TransportFailureKind.logical) {
+        _log('local control REJECTED for $deviceId (${_describe(e)})');
+        rethrow;
+      }
+      localFailure = e is DeviceTransportException
+          ? e
+          : DeviceTransportException('Local control failed: $e');
+      _log('local control failed for $deviceId (${_describe(localFailure)})');
+    }
+
+    // CLOUD fallback.
+    try {
+      final cloud = await _cloud.control(deviceId, channel, state);
       _lastSource = DeviceTransportSource.cloud;
+      final result = parseRelayStatus(
+        cloud,
+        source: DeviceTransportSource.cloud,
+        seq: ++_seq,
+      );
+      _log('cloud control success for $deviceId channel $channel');
       return result;
     } on Object catch (e) {
-      if (!isAvailabilityFailure(e)) rethrow;
-      _log(
-        'cloud unavailable for $deviceId (${_describe(e)}), '
-        'starting local fallback',
+      if (e is ApiException && !isAvailabilityFailure(e)) rethrow;
+      if (e is DeviceTransportException &&
+          e.kind == TransportFailureKind.logical) {
+        rethrow;
+      }
+      _log('cloud control failed for $deviceId (${_describe(e)})');
+      // Local already failed (any success would have returned above), so both
+      // transports are down: wrap the local failure so the UI gets one
+      // human-readable availability error.
+      throw DeviceTransportException(
+        'The device could not be reached locally or via the cloud.',
+        cause: localFailure,
       );
-      return _fallback(
-        () => _localControl(deviceId, channel, state),
-        originalError: e,
-      );
     }
-  }
-
-  /// Attempts the local path. Preserves the ORIGINAL cloud availability error
-  /// when the device is not reachable on the LAN either, so the UI shows the
-  /// same offline message it always did — it never pretends success.
-  Future<Map<String, dynamic>> _fallback(
-    Future<Map<String, dynamic>> Function() run, {
-    required Object originalError,
-  }) async {
-    Map<String, dynamic>? result;
-    try {
-      result = await run().timeout(kLocalFallbackBudget);
-    } on Object {
-      result = null;
-    }
-    if (result != null) {
-      _lastSource = DeviceTransportSource.local;
-      return result;
-    }
-    throw originalError;
   }
 
   Future<Map<String, dynamic>> _localStatus(String deviceId) async {
-    final local = await _findLocal(deviceId);
+    final local = await _findLocal(deviceId, urgent: true);
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
@@ -184,44 +258,85 @@ class DeviceRepositoryService {
     int channel,
     String state,
   ) async {
-    final local = await _findLocal(deviceId);
+    final local = await _findLocal(deviceId, urgent: true);
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
     return local.control(deviceId, channel, state);
   }
 
-  /// Discovery ladder for a single device: verified-IP cache first, then mDNS.
-  /// Every candidate is identity-verified via `Status 5` (`normalizeMac ==
-  /// deviceId`) before it is used or cached; a stale/repurposed cached IP is
-  /// discarded and re-discovered.
-  Future<LocalDeviceTransport?> _findLocal(String deviceId) async {
-    _log('starting discovery for $deviceId');
+  /// Single-flight discovery per deviceId: concurrent callers (a status poll
+  /// and a relay tap, or two status refreshes) await the SAME bounded
+  /// discovery instead of each opening their own mDNS browser.
+  Future<LocalDeviceTransport?> _findLocal(
+    String deviceId, {
+    bool urgent = false,
+  }) {
+    final existing = _discoveryInFlight[deviceId];
+    if (existing != null) {
+      _log('reusing in-flight discovery for $deviceId');
+      return existing;
+    }
+    final future = _discoverLocal(deviceId, urgent: urgent).whenComplete(() {
+      _discoveryInFlight.remove(deviceId);
+    });
+    _discoveryInFlight[deviceId] = future;
+    return future;
+  }
+
+  /// Discovery ladder for a single device: warm in-memory endpoint, then the
+  /// persisted verified-IP cache, then mDNS. Every accepted endpoint is
+  /// identity-verified (`Status 5`, `normalizeMac == deviceId`) before it is
+  /// used or cached; a stale/repurposed cached IP is discarded and re-found.
+  Future<LocalDeviceTransport?> _discoverLocal(
+    String deviceId, {
+    bool urgent = false,
+  }) async {
+    final warm = _warmCache[deviceId];
+    final warmAt = _warmVerifiedAt[deviceId];
+    if (warm != null &&
+        warmAt != null &&
+        DateTime.now().difference(warmAt) < kVerifiedIpTtl) {
+      _log('using warm verified endpoint for $deviceId');
+      return warm;
+    }
 
     final cached = await _locator.cachedAddress(deviceId);
     if (cached != null && cached.isNotEmpty) {
-      _log('trying cached IP: $cached');
-      final transport = _buildLocal(cached, deviceId);
-      if (await transport.verifyIdentity()) {
-        _log('verified cached IP: $cached');
+      final verifiedAt = await _locator.cachedVerifiedAt(deviceId);
+      final fresh =
+          verifiedAt != null && DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
+      if (fresh) {
+        final transport = _buildLocal(cached, deviceId);
+        _warmCache[deviceId] = transport;
+        _warmVerifiedAt[deviceId] = verifiedAt;
+        _log('using fresh verified cached IP: $cached');
         return transport;
       }
-      // Stale / unreachable / repurposed: never use it, forget it.
-      _log('cached IP failed — discarding stale entry');
+      final transport = _buildLocal(cached, deviceId);
+      if (await transport.verifyIdentity()) {
+        _warmCache[deviceId] = transport;
+        _warmVerifiedAt[deviceId] = DateTime.now();
+        _log('re-verified cached IP: $cached');
+        return transport;
+      }
+      _log('cached IP failed identity — discarding stale entry');
       await _locator.discardAddress(deviceId);
     }
 
-    _log('starting mDNS discovery');
-    final candidates = await _locator.mDnsCandidates(kLocalMDnsWindow);
+    final window = urgent ? kTapMdnWindow : kWarmMdnWindow;
+    _log('starting mDNS discovery ($window)');
+    final candidates = await _locator.mDnsCandidates(window);
     for (final ip in candidates) {
       _log('mDNS candidate: $ip — verifying MAC');
       final transport = _buildLocal(ip, deviceId);
       if (await transport.verifyIdentity()) {
         _log('verified local device: $ip');
         await _locator.storeVerifiedAddress(deviceId, ip);
+        _warmCache[deviceId] = transport;
+        _warmVerifiedAt[deviceId] = DateTime.now();
         return transport;
       }
-      // A foreign Tasmota (or a non-Tasmota responder) is ignored.
       _log('mDNS candidate failed identity check — skipped');
     }
 
@@ -236,7 +351,7 @@ class DeviceRepositoryService {
       return 'ApiException(status=${error.statusCode}, code=${error.code})';
     }
     if (error is DeviceTransportException) {
-      return 'DeviceTransportException(kind=${error.kind})';
+      return 'DeviceTransportException(kind=${error.kind}, code=${error.code})';
     }
     return error.runtimeType.toString();
   }

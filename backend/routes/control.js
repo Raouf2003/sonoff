@@ -39,12 +39,15 @@ router.post('/control', async (req, res) => {
       return res.status(503).json({ error: 'MQTT broker not connected' });
     }
 
-    let acked = false;
+    let outcome;
     try {
-      acked = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
+      outcome = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
     } catch (err) {
       if (err.code === 'ACK_TIMEOUT') {
         return res.status(504).json({ error: 'Device did not acknowledge the command' });
+      }
+      if (err.code === 'SUPERSEDED') {
+        return res.status(409).json({ error: 'A newer command superseded this one', code: 'SUPERSEDED' });
       }
       if (err.code === 'MQTT_DISCONNECTED' || /not connected|connection closed|connection reset/i.test(err.message || '')) {
         return res.status(503).json({ error: 'MQTT broker not connected' });
@@ -52,8 +55,25 @@ router.post('/control', async (req, res) => {
       return res.status(500).json({ error: `Failed to publish command: ${err.message}` });
     }
 
+    // The device report that resolved the ACK is the authoritative state: the
+    // actual reported value (which may differ from the request), whether it
+    // matched, and the runtimeState timestamp of that report.
+    const reported = outcome.observed || state.toUpperCase();
     const key = `POWER${channel}`;
-    res.json({ [key]: state.toUpperCase(), acked });
+    const entry = runtimeState.getDeviceState(device.deviceId);
+    const chEntry = entry ? entry.channels[channel] : null;
+    res.json({
+      [key]: reported,
+      acked: !!outcome.acked,
+      channels: {
+        [String(channel)]: {
+          state: reported,
+          updatedAt: chEntry && chEntry.updatedAt
+            ? new Date(chEntry.updatedAt).toISOString()
+            : null,
+        },
+      },
+    });
   } catch (err) {
     console.error('Control error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -77,15 +97,23 @@ router.get('/status', async (req, res) => {
       return res.status(403).json({ error: 'You do not own this device' });
     }
 
-    const deviceState = runtimeState.getDeviceState(deviceId);
-    const channels = deviceState ? deviceState.channels : {};
     const count = device.channels || 4;
+    const deviceStatus = runtimeState.getDeviceStatus(deviceId);
+    const channels = deviceStatus.channels || {};
 
+    // Per-channel `{ state, updatedAt }` — the authoritative shape. Channels
+    // never observed report UNKNOWN (not a fabricated OFF).
     const status = {};
+    status.channels = {};
     for (let i = 1; i <= count; i++) {
-      status[`POWER${i}`] = channels[i] || 'OFF';
+      const c = channels[String(i)] || { state: 'UNKNOWN', updatedAt: null };
+      status.channels[String(i)] = { state: c.state || 'UNKNOWN', updatedAt: c.updatedAt || null };
     }
-    status.online = runtimeState.isOnline(deviceId);
+    // Legacy flat keys preserved for backward compatibility.
+    for (let i = 1; i <= count; i++) {
+      status[`POWER${i}`] = status.channels[String(i)].state;
+    }
+    status.online = deviceStatus.online;
     res.json(status);
   } catch (err) {
     console.error('Status error:', err);

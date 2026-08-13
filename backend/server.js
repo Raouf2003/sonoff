@@ -61,6 +61,9 @@ async function loadFromDb() {
     return;
   }
   await deviceRegistry.init();
+  // The registry now knows every claimed device — request their current STATE
+  // so runtimeState recovers fast even if MQTT connected before the DB loaded.
+  mqttGateway.requestStateSync();
 }
 
 initRuntime();

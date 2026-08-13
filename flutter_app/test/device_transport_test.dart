@@ -200,6 +200,63 @@ void main() {
     });
   });
 
+  group('parseRelayStatus / ChannelReport (pure)', () {
+    test('canonical channels map is parsed into per-channel reports', () {
+      final iso = DateTime.now().toIso8601String();
+      final result = parseRelayStatus(
+        {
+          'online': true,
+          'channels': {
+            '1': {'state': 'ON', 'updatedAt': iso},
+            '2': {'state': 'OFF', 'updatedAt': iso},
+            '3': {'state': 'UNKNOWN', 'updatedAt': null},
+          },
+        },
+        source: DeviceTransportSource.cloud,
+        seq: 7,
+      );
+      expect(result.online, isTrue);
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(result.seq, 7);
+      expect(result.channels[1]!.state, 'ON');
+      expect(result.channels[2]!.state, 'OFF');
+      expect(result.channels[2]!.updatedAt, isNotNull);
+      expect(result.channels[3]!.isUnknown, isTrue,
+          reason: "backend 'UNKNOWN' maps to a null/unknown report");
+      expect(result.channels[1]!.isOn, isTrue);
+      expect(result.channels[2]!.isOn, isFalse);
+    });
+
+    test('legacy flat POWERn keys are read when channels is absent', () {
+      final result = parseRelayStatus(
+        {'online': true, 'POWER1': 'ON', 'POWER2': 'UNKNOWN'},
+        source: DeviceTransportSource.local,
+        seq: 1,
+      );
+      expect(result.channels[1]!.state, 'ON');
+      expect(result.channels[2]!.isUnknown, isTrue);
+    });
+
+    test('bare POWER maps to channel 1 when no numbered keys exist', () {
+      final result = parseRelayStatus(
+        {'online': true, 'POWER': 'OFF'},
+        source: DeviceTransportSource.cloud,
+        seq: 1,
+      );
+      expect(result.channels[1]!.state, 'OFF');
+    });
+
+    test('offline flag is preserved', () {
+      final result = parseRelayStatus(
+        {'online': false},
+        source: DeviceTransportSource.cloud,
+        seq: 1,
+      );
+      expect(result.online, isFalse);
+      expect(result.channels, isEmpty);
+    });
+  });
+
   group('LocalDeviceTransport identity gate', () {
     test('matching Status 5 MAC → identity verified', () async {
       final cm = _CmFake({
@@ -275,10 +332,12 @@ void main() {
   });
 
   group('LocalDeviceTransport commands', () {
-    test('relay ON: verifies identity then sends Power<N> ON', () async {
+    test('relay ON: verifies identity, commands, then CONFIRMS via read-back',
+        () async {
       final cm = _CmFake({
         'Status%205': _macBody,
         'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON"}',
       });
       final t = LocalDeviceTransport(
         address: '192.168.1.5',
@@ -286,15 +345,16 @@ void main() {
         fetcher: cm.call,
       );
       final result = await t.control(_deviceId, 1, 'ON');
-      expect(cm.called, ['Status%205', 'Power1%20ON']);
+      expect(cm.called, ['Status%205', 'Power1%20ON', 'State']);
       expect(result['POWER1'], 'ON');
       expect(result['online'], isTrue);
     });
 
-    test('relay OFF on channel 3 sends Power3 OFF', () async {
+    test('relay OFF on channel 3 sends Power3 OFF and confirms', () async {
       final cm = _CmFake({
         'Status%205': _macBody,
         'Power3%20OFF': '{"POWER3":"OFF"}',
+        'State': '{"POWER3":"OFF"}',
       });
       final t = LocalDeviceTransport(
         address: '192.168.1.5',
@@ -302,8 +362,50 @@ void main() {
         fetcher: cm.call,
       );
       final result = await t.control(_deviceId, 3, 'OFF');
-      expect(cm.called, ['Status%205', 'Power3%20OFF']);
+      expect(cm.called, ['Status%205', 'Power3%20OFF', 'State']);
       expect(result['POWER3'], 'OFF');
+    });
+
+    test('relay command whose read-back disagrees throws logical UNCONFIRMED',
+        () async {
+      final cm = _CmFake({
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"OFF"}',
+      });
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await expectLater(
+        t.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.logical)
+              .having((e) => e.code, 'code', 'UNCONFIRMED'),
+        ),
+      );
+    });
+
+    test('relay command whose read-back fails throws logical UNCONFIRMED',
+        () async {
+      final cm = _CmFake({'Status%205': _macBody, 'Power1%20ON': '{"POWER1":"ON"'});
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await expectLater(
+        t.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.code,
+            'code',
+            'UNCONFIRMED',
+          ),
+        ),
+      );
     });
 
     test('getStatus reads State and returns device status shape', () async {

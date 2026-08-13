@@ -8,6 +8,88 @@ import 'api_service.dart';
 /// never branches on it.
 enum DeviceTransportSource { cloud, local }
 
+/// A single channel's reported state. `state` is `'ON'`/`'OFF'` only when the
+/// DEVICE itself reported it; `null` means UNKNOWN (never observed, or the
+/// report was not confirmed). `updatedAt` is the device/server receive-time
+/// when available, and is used to reject stale reports.
+class ChannelReport {
+  final String? state;
+  final DateTime? updatedAt;
+  const ChannelReport(this.state, {this.updatedAt});
+
+  bool get isUnknown => state == null || state == 'UNKNOWN';
+  bool get isOn => state == 'ON';
+}
+
+/// Result of a status read or a relay command: the device's reported state.
+/// `channels` is keyed by 1-based channel number. The UI must only commit a
+/// channel's ON/OFF from a non-null `state` here — never from the user's tap
+/// or from a bare command ACK.
+class RelayStatusResult {
+  final bool online;
+  final Map<int, ChannelReport> channels;
+  final DeviceTransportSource source;
+  final int seq;
+  const RelayStatusResult({
+    required this.online,
+    required this.channels,
+    required this.source,
+    required this.seq,
+  });
+}
+
+/// Normalizes a transport response map (the canonical `channels` shape, or the
+/// legacy flat `POWERn` keys) into [RelayStatusResult]. `seq` is the
+/// monotonic operation sequence assigned by the caller.
+RelayStatusResult parseRelayStatus(
+  Map<String, dynamic> data, {
+  required DeviceTransportSource source,
+  required int seq,
+}) {
+  final channels = <int, ChannelReport>{};
+
+  final rawChannels = data['channels'];
+  if (rawChannels is Map) {
+    for (final e in rawChannels.entries) {
+      final idx = int.tryParse('${e.key}');
+      if (idx == null || idx < 1) continue;
+      final c = e.value;
+      String? state;
+      DateTime? ts;
+      if (c is Map) {
+        final s = c['state'];
+        state = s is String ? s : null;
+        final ua = c['updatedAt'];
+        ts = ua is String ? DateTime.tryParse(ua) : null;
+      }
+      channels[idx] = ChannelReport(state == 'UNKNOWN' ? null : state,
+          updatedAt: ts);
+    }
+  }
+
+  // Legacy fallback: flat `POWERn` keys (transports/tests that don't emit the
+  // `channels` map). A 'UNKNOWN' flat value is treated as unknown.
+  if (channels.isEmpty) {
+    for (var i = 1; i <= 16; i++) {
+      final v = data['POWER$i'];
+      if (v is String) {
+        channels[i] = ChannelReport(v == 'UNKNOWN' ? null : v);
+      }
+    }
+    final bare = data['POWER'];
+    if (bare is String && !channels.containsKey(1)) {
+      channels[1] = ChannelReport(bare == 'UNKNOWN' ? null : bare);
+    }
+  }
+
+  return RelayStatusResult(
+    online: data['online'] == true,
+    channels: channels,
+    source: source,
+    seq: seq,
+  );
+}
+
 /// Category of a [DeviceTransportException].
 enum TransportFailureKind {
   /// The transport itself is unavailable (no network, timeout, backend/server
@@ -28,11 +110,16 @@ class DeviceTransportException implements Exception {
     this.message, {
     this.kind = TransportFailureKind.availability,
     this.cause,
+    this.code,
   });
 
   final String message;
   final TransportFailureKind kind;
   final Object? cause;
+
+  /// Stable machine-readable discriminator (e.g. `UNCONFIRMED`) so callers
+  /// can branch without parsing display text.
+  final String? code;
 
   @override
   String toString() => message;

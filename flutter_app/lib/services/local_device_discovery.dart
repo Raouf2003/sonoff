@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:bonsoir/bonsoir.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -12,6 +13,10 @@ abstract class DeviceLocator {
   /// The IP cached for [deviceId] after a previous identity verification, or
   /// null when the device was never seen locally (or its cache was discarded).
   Future<String?> cachedAddress(String deviceId);
+
+  /// When the cached IP was verified, or null when unknown/legacy. Used to skip
+  /// re-verification of a still-fresh verified IP and avoid needless probes.
+  Future<DateTime?> cachedVerifiedAt(String deviceId);
 
   /// Persists a verified IP. The repository only calls this AFTER the Tasmota
   /// reported a matching canonical MAC — the cache never bypasses verification.
@@ -47,16 +52,32 @@ class LocalDeviceDiscovery implements DeviceLocator {
 
   String _key(String deviceId) => '$kLocalVerifiedIpPrefix$deviceId';
 
+  // The cache value is either a JSON envelope {ip, verifiedAt} written by this
+  // version, or a legacy bare IP string from before — both must resolve.
   @override
   Future<String?> cachedAddress(String deviceId) async {
     final prefs = await _prefs();
-    return prefs.getString(_key(deviceId));
+    final raw = prefs.getString(_key(deviceId));
+    if (raw == null || raw.isEmpty) return null;
+    final decoded = _decodeEntry(raw);
+    return decoded?.ip ?? (raw.contains('{') ? null : raw);
+  }
+
+  @override
+  Future<DateTime?> cachedVerifiedAt(String deviceId) async {
+    final prefs = await _prefs();
+    final raw = prefs.getString(_key(deviceId));
+    if (raw == null || raw.isEmpty) return null;
+    return _decodeEntry(raw)?.verifiedAt;
   }
 
   @override
   Future<void> storeVerifiedAddress(String deviceId, String ip) async {
     final prefs = await _prefs();
-    await prefs.setString(_key(deviceId), ip);
+    await prefs.setString(
+      _key(deviceId),
+      '{"ip":${_json(ip)},"verifiedAt":${_json(DateTime.now().toIso8601String())}}',
+    );
   }
 
   @override
@@ -69,6 +90,32 @@ class LocalDeviceDiscovery implements DeviceLocator {
   Future<List<String>> mDnsCandidates(Duration timeout) {
     return _browseTasmota(timeout);
   }
+}
+
+class _CachedEntry {
+  final String ip;
+  final DateTime? verifiedAt;
+  const _CachedEntry(this.ip, {this.verifiedAt});
+}
+
+_CachedEntry? _decodeEntry(String raw) {
+  if (!raw.contains('{')) return null;
+  try {
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    final ip = map['ip'];
+    if (ip is! String || ip.isEmpty) return null;
+    final v = map['verifiedAt'];
+    final verifiedAt = v is String ? DateTime.tryParse(v) : null;
+    return _CachedEntry(ip, verifiedAt: verifiedAt);
+  } catch (_) {
+    return null;
+  }
+}
+
+String _json(String value) {
+  // Minimal JSON string escaping for the envelope; IPs/ISO timestamps are
+  // safe in practice.
+  return '"${value.replaceAll('"', '\\"')}"';
 }
 
 /// Bounded mDNS browse for Tasmota services (`_tasmota._tcp`). Collects
