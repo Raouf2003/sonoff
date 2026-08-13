@@ -397,13 +397,25 @@ class _DevicesPageState extends State<DevicesPage>
       if (mounted) setState(() {});
     });
     _socket?.onDisconnect((_) {
+      final cloudWasUp = _socketConnected;
       _socketConnected = false;
       _socketDown();
+      if (cloudWasUp) {
+        // First confirmed cloud outage of this drop: probe the verified LAN IP
+        // immediately so the badge can flip to LAN without waiting for the next
+        // 15s poll. Repeated events are skipped (already down) and _fetchStatus
+        // has its own single-flight guard, so no duplicate probes are spawned.
+        _probeLocalAfterCloudDown();
+      }
       if (mounted) setState(() {});
     });
     _socket?.onConnectError((_) {
+      final cloudWasUp = _socketConnected;
       _socketConnected = false;
       _socketDown();
+      if (cloudWasUp) {
+        _probeLocalAfterCloudDown();
+      }
       if (mounted) setState(() {});
     });
 
@@ -484,6 +496,17 @@ class _DevicesPageState extends State<DevicesPage>
     _pollFailures = 0;
     _fetchStatus(silent: true);
     unawaited(_repository.warmUp(_devices));
+  }
+
+  // On a confirmed cloud outage, immediately re-read status through the normal
+  // local-first path. This is fast (a verified cached IP skips mDNS) and
+  // non-blocking: when the LAN answers, fresh local evidence is established so
+  // the pill can show LAN right away. Failures simply fall back to the existing
+  // poll / repeated-failure-threshold behavior; the socket reconnect restores
+  // cloud priority as usual.
+  void _probeLocalAfterCloudDown() {
+    if (!mounted || _selectedDeviceId == null) return;
+    _fetchStatus(silent: true);
   }
 
   Future<void> _fetchStatus({bool silent = false}) async {

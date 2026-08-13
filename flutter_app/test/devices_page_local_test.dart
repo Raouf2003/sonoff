@@ -108,6 +108,7 @@ class _FakeRepo extends DeviceRepositoryService {
   final List<Map<String, dynamic>> devices;
   final Completer<void> releaseControl = Completer<void>();
   int controlCalls = 0;
+  int statusCalls = 0;
   bool? lastCloudDown;
 
   @override
@@ -144,6 +145,7 @@ class _FakeRepo extends DeviceRepositoryService {
 
   @override
   Future<RelayStatusResult> getStatus(String deviceId) async {
+    statusCalls++;
     return RelayStatusResult(
       online: true,
       channels: {
@@ -236,6 +238,43 @@ class _FailOnceRepo extends _FakeRepo {
       failNext = false;
       throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
     }
+    return super.getStatus(deviceId);
+  }
+}
+
+/// Repository whose FIRST status read runs over the CLOUD (so no fresh local
+/// evidence exists) and whose later reads return verified LOCAL evidence —
+/// models the "UI stays ONLINE after a cloud drop until a LAN read happens"
+/// delay that the disconnect probe eliminates.
+class _CloudThenLocalRepo extends _FakeRepo {
+  @override
+  Future<RelayStatusResult> getStatus(String deviceId) async {
+    statusCalls++;
+    final viaLocal = statusCalls > 1;
+    return RelayStatusResult(
+      online: true,
+      channels: {
+        for (var i = 1; i <= 4; i++) i: const ChannelReport('OFF'),
+      },
+      source: viaLocal
+          ? DeviceTransportSource.local
+          : DeviceTransportSource.cloud,
+      seq: 2,
+    );
+  }
+}
+
+/// Repository whose status reads can be held in flight (and are counted), so a
+/// test can prove the disconnect probe reuses an in-flight status read instead
+/// of spawning a duplicate.
+class _GatedStatusRepo extends _FakeRepo {
+  _GatedStatusRepo({super.source});
+  final Completer<void> releaseStatus = Completer<void>();
+
+  @override
+  Future<RelayStatusResult> getStatus(String deviceId) async {
+    statusCalls++;
+    await releaseStatus.future;
     return super.getStatus(deviceId);
   }
 }
@@ -875,6 +914,164 @@ void main() {
       expect(find.text('Online'), findsOneWidget,
           reason: 'one transient failure must not mark the device OFFLINE');
       expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+  });
+
+  group('disconnect probe: instant LAN when the LAN device answers', () {
+    testWidgets('cloud drop probes the verified LAN IP immediately → LAN',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // The device was last seen over the CLOUD: no fresh local evidence yet.
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
+
+      // Cloud drops: the disconnect probe must re-read the LAN at once and
+      // flip the badge to LAN without waiting for the next 15s poll.
+      socket.fireDisconnect();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsOneWidget,
+          reason: 'disconnect probe re-establishes local evidence immediately');
+      expect(find.text('Online'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('connect error probes the LAN too → LAN', (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      socket.fireConnectError();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsOneWidget,
+          reason: 'a connect error is a confirmed cloud outage too');
+      expect(find.text('Online'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('unreachable LAN device → no false LAN, stays SYNCING',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _StatusFailingRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // Cloud drops and the LAN cannot be reached: the probe fails (silently)
+      // and a single failure is NOT offline evidence.
+      socket.fireConnectError();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsNothing,
+          reason: 'no local evidence must never fabricate LAN');
+      expect(find.text('Offline'), findsNothing,
+          reason: 'one probe failure is not the repeated-failure threshold');
+      expect(find.text('SYNCING'), findsWidgets);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('repeated cloud-down events do not spawn duplicate probes',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+      final base = repo.statusCalls;
+
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(repo.statusCalls, base + 1,
+          reason: 'the first cloud-down event triggers exactly one probe');
+
+      socket.fireConnectError();
+      await tester.pump();
+      expect(repo.statusCalls, base + 1,
+          reason: 'a repeated cloud-down event while already down must not probe again');
+
+      // A real reconnect resets the gate: a later drop probes again.
+      socket.fireConnect();
+      await tester.pump();
+      expect(repo.statusCalls, base + 2,
+          reason: 'reconnect refetches status (existing reconcile behavior)');
+
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(repo.statusCalls, base + 3,
+          reason: 'a new outage after reconnect probes again');
+
+      await _unmount(tester);
+    });
+
+    testWidgets('probe reuses a status read already in flight',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _GatedStatusRepo(source: DeviceTransportSource.local);
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // The initial status read is still held in flight.
+      expect(repo.statusCalls, 1);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(repo.statusCalls, 1,
+          reason: 'the probe must reuse the in-flight status read, not duplicate it');
+
+      socket.fireConnectError();
+      await tester.pump();
+      expect(repo.statusCalls, 1,
+          reason: 'repeated events while down never add a second probe');
+
+      // Once the in-flight read resolves, the verified local evidence shows LAN.
+      repo.releaseStatus.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('LAN'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('reconnect restores ONLINE; a LAN badge never sticks',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget);
+
+      socket.fireConnect();
+      await tester.pump();
+      expect(find.text('Online'), findsOneWidget,
+          reason: 'cloud reachability restores ONLINE priority immediately');
+      expect(find.text('LAN'), findsNothing);
+
+      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+      await tester.pump();
+      expect(find.text('Online'), findsOneWidget,
+          reason: 'fresh cloud device evidence keeps ONLINE');
+
+      await _unmount(tester);
+    });
+
+    testWidgets('healthy-cloud local polls stay ONLINE (probe never downgrades)',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      expect(find.text('Online'), findsOneWidget);
+
+      // A background local poll while the cloud is still up must keep ONLINE.
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
     });
