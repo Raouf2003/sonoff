@@ -427,13 +427,20 @@ class DeviceRepositoryService {
   }
 
   /// Short, non-sensitive description of a failure for the debug trace. Never
-  /// includes messages/bodies that could carry credentials.
+  /// includes messages/bodies that could carry credentials. For local
+  /// transport failures the original error's runtimeType is surfaced via the
+  /// preserved `cause`, so logcat shows e.g. a SocketException instead of only
+  /// the generic availability wrapper.
   String _describe(Object error) {
     if (error is ApiException) {
       return 'ApiException(status=${error.statusCode}, code=${error.code})';
     }
     if (error is DeviceTransportException) {
-      return 'DeviceTransportException(kind=${error.kind}, code=${error.code})';
+      final cause = error.cause;
+      final message = error.message.isNotEmpty ? '"${error.message}"' : '-';
+      return 'DeviceTransportException(kind=${error.kind}, code=${error.code}, '
+          'message=$message'
+          '${cause != null ? ', cause=${cause.runtimeType}' : ''})';
     }
     return error.runtimeType.toString();
   }

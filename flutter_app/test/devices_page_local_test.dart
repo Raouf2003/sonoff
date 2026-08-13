@@ -52,7 +52,12 @@ class _CmFake {
   _CmFake({this.responses = const {}});
   final Map<String, String> responses;
 
-  Future<String> call(String address, String command, {String? password}) async {
+  Future<String> call(
+    String address,
+    String command, {
+    String? password,
+    String? deviceId,
+  }) async {
     final body = responses[command];
     if (body == null) throw const DeviceTransportException('HTTP 404');
     return body;

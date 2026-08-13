@@ -76,7 +76,12 @@ class _CmFake {
   final List<String> called = [];
   Object? error;
 
-  Future<String> call(String address, String command, {String? password}) async {
+  Future<String> call(
+    String address,
+    String command, {
+    String? password,
+    String? deviceId,
+  }) async {
     called.add(command);
     final err = error;
     if (err != null) throw err;

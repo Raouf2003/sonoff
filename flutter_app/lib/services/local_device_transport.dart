@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'device_transport.dart';
 import 'provisioning_service.dart';
 
@@ -14,23 +14,97 @@ const Duration kLocalReadTimeout = Duration(seconds: 2);
 /// Sends a single `cm?cmnd=<command>` GET to [address] and returns the raw
 /// response body. Injectable so unit tests never need hardware or a real
 /// network. All low-level failures are converted into availability
-/// [DeviceTransportException]s, never raw socket exceptions.
+/// [DeviceTransportException]s (with the ORIGINAL error preserved as
+/// `cause`), never raw socket exceptions.
 typedef TasmotaCmFetcher = Future<String> Function(
   String address,
   String command, {
   String? password,
+  String? deviceId,
 });
 
+/// Structured DEBUG-ONLY diagnostic for a local HTTP attempt. Logs only
+/// non-sensitive data: deviceId, endpoint, command, status, elapsed time and
+/// the original error's type/message/OS error. Credentials, Authorization
+/// headers, JWTs and passwords are never passed in or logged.
+void _logLocalHttp({
+  required String deviceId,
+  required String endpoint,
+  required String operation,
+  int? statusCode,
+  Duration? elapsed,
+  Object? error,
+}) {
+  if (!kDebugMode) return;
+  final cause = error is DeviceTransportException ? error.cause ?? error : error;
+  final osError = cause is SocketException ? cause.osError : null;
+  final buffer = StringBuffer('[LOCAL][HTTP]')
+    ..write(' device=$deviceId')
+    ..write(' endpoint=$endpoint')
+    ..write(' operation=$operation')
+    ..write(' status=${statusCode ?? '-'}')
+    ..write(
+      ' elapsed=${elapsed != null ? '${elapsed.inMilliseconds}ms' : '-'}',
+    )
+    ..write(
+      ' type=${cause?.runtimeType ?? error?.runtimeType ?? '-'}',
+    )
+    ..write(
+      ' message=${_logSafe(cause?.toString() ?? error?.toString() ?? '-')}',
+    );
+  if (osError != null) {
+    buffer
+      ..write(' osError=${osError.errorCode}')
+      ..write(' osMessage=${_logSafe(osError.message)}');
+  }
+  debugPrint(buffer.toString());
+}
+
+/// Keeps log lines free of anything that could carry credentials. Currently a
+/// passthrough guard: callers must never pass headers/credentials; this exists
+/// as the single choke point if a future caller is tempted to.
+String _logSafe(String value) => value;
+
+/// Normalizes a raw address (from the cache, mDNS, or telemetry) into an
+/// `host[:port]` form safe for `http://$address/...`. Strips any scheme that
+/// slipped in, removes trailing slashes, and brackets IPv6 (encoding a zone
+/// `%`). An IPv4:port is left untouched.
+String _normalizeEndpoint(String raw) {
+  var s = raw.trim();
+  final scheme = s.indexOf('://');
+  if (scheme >= 0) s = s.substring(scheme + 3);
+  while (s.endsWith('/')) {
+    s = s.substring(0, s.length - 1);
+  }
+  if (s.isEmpty) return s;
+  final colonCount = ':'.allMatches(s).length;
+  if (colonCount > 1 && !s.startsWith('[')) {
+    s = '[${s.replaceAll('%', '%25')}]';
+  }
+  return s;
+}
+
 /// Production fetcher: dart:io HttpClient with a bounded connect timeout and
-/// read timeouts on both the response headers and the body.
+/// read timeouts on both the response headers and the body. Every failure is
+/// wrapped in a [DeviceTransportException] whose `cause` keeps the original
+/// error (SocketException / TimeoutException / HttpException / FormatException)
+/// so debug logs can reveal the exact underlying fault.
 Future<String> defaultTasmotaCmFetcher(
   String address,
   String command, {
   String? password,
+  String? deviceId,
+  Duration? connectTimeout,
+  Duration? readTimeout,
 }) async {
+  final connectBudget = connectTimeout ?? kLocalConnectTimeout;
+  final readBudget = readTimeout ?? kLocalReadTimeout;
   final client = HttpClient()
-    ..connectionTimeout = kLocalConnectTimeout
+    ..connectionTimeout = connectBudget
     ..autoUncompress = true;
+  final stopwatch = Stopwatch()..start();
+  final endpoint = address;
+  final who = deviceId ?? '-';
   try {
     final request = await client.getUrl(
       Uri.parse('http://$address/cm?cmnd=$command'),
@@ -40,23 +114,69 @@ Future<String> defaultTasmotaCmFetcher(
       final cred = base64Encode(utf8.encode('admin:$password'));
       request.headers.set(HttpHeaders.authorizationHeader, 'Basic $cred');
     }
-    final response = await request.close().timeout(kLocalReadTimeout);
+    final response = await request.close().timeout(readBudget);
     if (response.statusCode != 200) {
+      final status = response.statusCode;
+      _logLocalHttp(
+        deviceId: who,
+        endpoint: endpoint,
+        operation: command,
+        statusCode: status,
+        elapsed: stopwatch.elapsed,
+      );
       throw DeviceTransportException(
-        'The local device returned HTTP ${response.statusCode}.',
+        'The local device returned HTTP $status.',
+        cause: HttpException('HTTP $status'),
       );
     }
     final body =
-        await response.transform(utf8.decoder).join().timeout(kLocalReadTimeout);
+        await response.transform(utf8.decoder).join().timeout(readBudget);
+    _logLocalHttp(
+      deviceId: who,
+      endpoint: endpoint,
+      operation: command,
+      statusCode: 200,
+      elapsed: stopwatch.elapsed,
+    );
     return body;
   } on TimeoutException catch (e) {
+    _logLocalHttp(
+      deviceId: who,
+      endpoint: endpoint,
+      operation: command,
+      elapsed: stopwatch.elapsed,
+      error: e,
+    );
     throw DeviceTransportException(
       'The device did not respond in time.',
       cause: e,
     );
   } on SocketException catch (e) {
+    _logLocalHttp(
+      deviceId: who,
+      endpoint: endpoint,
+      operation: command,
+      elapsed: stopwatch.elapsed,
+      error: e,
+    );
     throw DeviceTransportException(
       'Could not reach the device on the local network.',
+      cause: e,
+    );
+  } on DeviceTransportException {
+    rethrow; // already logged by the status branch above
+  } on Object catch (e) {
+    // e.g. a FormatException from a malformed URL or an HttpException from the
+    // socket layer: wrap with the original preserved for diagnostics.
+    _logLocalHttp(
+      deviceId: who,
+      endpoint: endpoint,
+      operation: command,
+      elapsed: stopwatch.elapsed,
+      error: e,
+    );
+    throw DeviceTransportException(
+      'The local request failed.',
       cause: e,
     );
   } finally {
@@ -73,13 +193,14 @@ Future<String> defaultTasmotaCmFetcher(
 /// comparison and rejected before any command is sent.
 class LocalDeviceTransport implements DeviceTransport {
   LocalDeviceTransport({
-    required this.address,
+    required String address,
     required this.deviceId,
     this.password,
     TasmotaCmFetcher? fetcher,
     this.connectTimeout = kLocalConnectTimeout,
     this.readTimeout = kLocalReadTimeout,
-  }) : _fetcher = fetcher ?? defaultTasmotaCmFetcher;
+  })  : address = _normalizeEndpoint(address),
+        _fetcher = fetcher ?? defaultTasmotaCmFetcher;
 
   final String address;
   final String deviceId;
@@ -95,12 +216,41 @@ class LocalDeviceTransport implements DeviceTransport {
   DeviceTransportSource get source => DeviceTransportSource.local;
 
   Future<String> _cm(String command) async {
+    final stopwatch = Stopwatch()..start();
     try {
-      return await _fetcher(address, command, password: password)
-          .timeout(readTimeout);
+      return await _fetcher(
+        address,
+        command,
+        password: password,
+        deviceId: deviceId,
+      ).timeout(readTimeout);
     } on TimeoutException catch (e) {
+      // The whole local attempt (connect + headers + body) exceeded the budget.
+      _logLocalHttp(
+        deviceId: deviceId,
+        endpoint: address,
+        operation: command,
+        elapsed: stopwatch.elapsed,
+        error: e,
+      );
       throw DeviceTransportException(
         'The device did not respond in time.',
+        cause: e,
+      );
+    } on DeviceTransportException {
+      rethrow; // the fetcher has already logged its classified failure
+    } on Object catch (e) {
+      // A raw escape from a custom/injected fetcher (e.g. a test fake that
+      // throws a bare SocketException) must keep the original error as cause.
+      _logLocalHttp(
+        deviceId: deviceId,
+        endpoint: address,
+        operation: command,
+        elapsed: stopwatch.elapsed,
+        error: e,
+      );
+      throw DeviceTransportException(
+        'Local HTTP request failed.',
         cause: e,
       );
     }

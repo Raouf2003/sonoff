@@ -22,7 +22,12 @@ class _CmFake {
   Object? error;
   Duration delay = Duration.zero;
 
-  Future<String> call(String address, String command, {String? password}) async {
+  Future<String> call(
+    String address,
+    String command, {
+    String? password,
+    String? deviceId,
+  }) async {
     called.add(command);
     if (delay != Duration.zero) {
       await Future<void>.delayed(delay);
@@ -506,6 +511,314 @@ void main() {
               .having((e) => e.code, 'code', 'DEVICE_OFFLINE'),
         ),
       );
+    });
+  });
+
+  group('defaultTasmotaCmFetcher (real local HTTP)', () {
+    Future<HttpServer> startServer(
+      Future<void> Function(HttpRequest req) handler,
+    ) async {
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      server.listen((req) async {
+        try {
+          await handler(req);
+        } catch (_) {}
+      });
+      return server;
+    }
+
+    test('HTTP 200 returns the raw body', () async {
+      final server = await startServer((req) async {
+        expect(req.uri.path, '/cm');
+        expect(req.uri.queryParameters['cmnd'], 'State');
+        req.response.write('{"POWER1":"ON"}');
+        await req.response.close();
+      });
+      try {
+        final body = await defaultTasmotaCmFetcher(
+          '127.0.0.1:${server.port}',
+          'State',
+          deviceId: _deviceId,
+        );
+        expect(body, '{"POWER1":"ON"}');
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('HTTP 401 wraps with the status in the message and an HttpException cause',
+        () async {
+      final server = await startServer((req) async {
+        req.response.statusCode = HttpStatus.unauthorized;
+        req.response.write('Unauthorized');
+        await req.response.close();
+      });
+      try {
+        await expectLater(
+          defaultTasmotaCmFetcher(
+            '127.0.0.1:${server.port}',
+            'Status%205',
+            deviceId: _deviceId,
+          ),
+          throwsA(
+            isA<DeviceTransportException>()
+                .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('401'),
+                )
+                .having(
+                  (e) => e.cause,
+                  'cause',
+                  isA<HttpException>(),
+                ),
+          ),
+        );
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('HTTP 500 wraps with the status preserved', () async {
+      final server = await startServer((req) async {
+        req.response.statusCode = HttpStatus.internalServerError;
+        req.response.write('boom');
+        await req.response.close();
+      });
+      try {
+        await expectLater(
+          defaultTasmotaCmFetcher(
+            '127.0.0.1:${server.port}',
+            'State',
+            deviceId: _deviceId,
+          ),
+          throwsA(
+            isA<DeviceTransportException>()
+                .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+                .having((e) => e.message, 'message', contains('500')),
+          ),
+        );
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('read timeout wraps a TimeoutException as the cause', () async {
+      final server = await startServer((req) async {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        req.response.write('late');
+        await req.response.close();
+      });
+      try {
+        await expectLater(
+          defaultTasmotaCmFetcher(
+            '127.0.0.1:${server.port}',
+            'State',
+            deviceId: _deviceId,
+            readTimeout: const Duration(milliseconds: 50),
+          ),
+          throwsA(
+            isA<DeviceTransportException>()
+                .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+                .having(
+                  (e) => e.cause,
+                  'cause',
+                  isA<TimeoutException>(),
+                ),
+          ),
+        );
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('connection refused wraps the SocketException as the cause', () async {
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      final port = server.port;
+      await server.close(force: true);
+      // The port is now closed: connecting must surface a SocketException
+      // (connection refused) wrapped as availability with the original cause.
+      await expectLater(
+        defaultTasmotaCmFetcher(
+          '127.0.0.1:$port',
+          'State',
+          deviceId: _deviceId,
+        ),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+              .having(
+                (e) => e.cause,
+                'cause',
+                isA<SocketException>(),
+              ),
+        ),
+      );
+    });
+
+    test('a malformed URL wraps the FormatException as the cause', () async {
+      await expectLater(
+        defaultTasmotaCmFetcher(
+          'bad host', // a space is invalid in a URL host — Uri.parse throws
+          'State',
+          deviceId: _deviceId,
+        ),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+              .having(
+                (e) => e.cause,
+                'cause',
+                isA<FormatException>(),
+              ),
+        ),
+      );
+    });
+  });
+
+  group('LocalDeviceTransport diagnostics', () {
+    test('a bare SocketException escape keeps the original as cause', () async {
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async {
+          throw const SocketException(
+            'Connection refused',
+            osError: OSError('refused', 111),
+          );
+        },
+      );
+      await expectLater(
+        t.getStatus(_deviceId),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+              .having(
+                (e) => e.cause,
+                'cause',
+                isA<SocketException>().having(
+                  (e) => e.osError?.errorCode,
+                  'osErrorCode',
+                  111,
+                ),
+              ),
+        ),
+      );
+    });
+
+    test('a connect-timeout SocketException (OSError 110) is preserved', () async {
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async {
+          throw const SocketException(
+            'Connection timed out',
+            osError: OSError('timed out', 110),
+          );
+        },
+      );
+      await expectLater(
+        t.getStatus(_deviceId),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => (e.cause as SocketException).osError?.errorCode,
+            'osErrorCode',
+            110,
+          ),
+        ),
+      );
+    });
+
+    test('an outer read timeout wraps the TimeoutException as cause', () async {
+      final cm = _CmFake({'Status%205': _macBody})
+        ..delay = const Duration(milliseconds: 200);
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+        readTimeout: const Duration(milliseconds: 30),
+      );
+      await expectLater(
+        t.getStatus(_deviceId),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.availability)
+              .having(
+                (e) => e.cause,
+                'cause',
+                isA<TimeoutException>(),
+              ),
+        ),
+      );
+    });
+
+    test('a classified DeviceTransportException passes through with its cause',
+        () async {
+      final original = DeviceTransportException(
+        'The local device returned HTTP 401.',
+        cause: HttpException('HTTP 401'),
+      );
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async {
+          throw original;
+        },
+      );
+      await expectLater(
+        t.getStatus(_deviceId),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => identical(e, original),
+            'same instance',
+            isTrue,
+          ),
+        ),
+      );
+    });
+
+    test('scheme + trailing slash are normalized before HTTP (same endpoint)',
+        () async {
+      final cm = _CmFake({
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final t = LocalDeviceTransport(
+        address: 'http://192.168.1.5/',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      expect(t.address, '192.168.1.5',
+          reason: 'the endpoint is normalized to host[:port] form');
+      final result = await t.control(_deviceId, 1, 'ON');
+      expect(cm.called, ['Status%205', 'Power1%20ON', 'State']);
+      expect(result['POWER1'], 'ON');
+    });
+
+    test('IPv6 addresses are bracketed (with zone encoding)', () async {
+      final t = LocalDeviceTransport(
+        address: 'fe80::1',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async => '',
+      );
+      expect(t.address, '[fe80::1]');
+      final withZone = LocalDeviceTransport(
+        address: 'fe80::1%wlan0',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async => '',
+      );
+      expect(withZone.address, '[fe80::1%25wlan0]');
+    });
+
+    test('IPv4:port stays untouched', () async {
+      final t = LocalDeviceTransport(
+        address: '192.168.1.20:8080',
+        deviceId: _deviceId,
+        fetcher: (address, command, {password, deviceId}) async => '',
+      );
+      expect(t.address, '192.168.1.20:8080');
     });
   });
 }
