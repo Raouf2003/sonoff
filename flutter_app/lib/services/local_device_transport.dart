@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'device_transport.dart';
+import 'local_ip.dart';
 import 'provisioning_service.dart';
 
 /// Bounded HTTP budgets for direct Tasmota calls. A LAN device must never hold
@@ -216,6 +217,21 @@ class LocalDeviceTransport implements DeviceTransport {
   DeviceTransportSource get source => DeviceTransportSource.local;
 
   Future<String> _cm(String command) async {
+    // Last-line guard: an unusable address (e.g. `0.0.0.0`, multicast) can
+    // never reach HttpClient, even if one was somehow cached before validation.
+    if (!isUsableHttpHost(address)) {
+      const failure = DeviceTransportException(
+        'The local device address is invalid.',
+        cause: FormatException('Invalid local endpoint'),
+      );
+      _logLocalHttp(
+        deviceId: deviceId,
+        endpoint: address,
+        operation: command,
+        error: failure,
+      );
+      throw failure;
+    }
     final stopwatch = Stopwatch()..start();
     try {
       return await _fetcher(

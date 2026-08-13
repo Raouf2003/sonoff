@@ -1,6 +1,7 @@
 const mqtt = require('mqtt');
 const Device = require('../models/Device');
 const Sensor = require('../models/Sensor');
+const { classifyIp } = require('./ipValidation');
 
 const ACK_TIMEOUT_MS = 5000;
 // How long a device stays visible in recentDevices after its last MQTT packet.
@@ -325,12 +326,21 @@ class MqttGateway {
   // touched when the value actually changes, so a device announcing every
   // TelePeriod does not hammer the DB. The IP is just a hint: the app
   // re-verifies identity via `Status 5` before ever using it.
+  //
+  // Tasmota transiently reports "0.0.0.0" during boot / STA reconnect /
+  // pre-DHCP, which is syntactically valid but never a reachable device
+  // address. Such values (and loopback/multicast/malformed) are REJECTED: the
+  // previous valid lastIp is preserved and nothing is written.
   _recordDeviceIp(deviceId, ip) {
     if (!ip || typeof ip !== 'string') return;
     ip = ip.trim();
     if (!ip) return;
     const current = this.deviceRegistry.get(deviceId);
     if (!current) return; // not a claimed device — nothing to record
+    if (classifyIp(ip) !== 'valid') {
+      console.log(`[mqtt] rejected invalid telemetry IP for ${deviceId}: ${ip}`);
+      return;
+    }
     if (current.lastIp === ip) return;
     this.deviceRegistry.updateIp(deviceId, ip);
     this.deviceModel

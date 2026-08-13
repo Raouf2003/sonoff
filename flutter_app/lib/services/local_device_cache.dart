@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_device_discovery.dart' show kLocalVerifiedIpPrefix;
+import 'local_ip.dart';
 
 /// SharedPreferences key holding the cached, already-provisioned device list.
 const String kLocalDevicesKey = 'stees.local.devices';
@@ -97,7 +98,9 @@ class LocalDeviceCache {
           : 4,
       // Last known LAN IP (learned by the backend via MQTT telemetry). Kept so
       // an offline load can still seed the local discovery candidate list.
-      if (raw['lastIp'] is String && (raw['lastIp'] as String).isNotEmpty)
+      // Only a VALID address is kept: a transient `0.0.0.0` (or any other
+      // unusable address) is dropped here, self-healing legacy cached lists.
+      if (raw['lastIp'] is String && isValidLocalIp(raw['lastIp'] as String))
         'lastIp': raw['lastIp'] as String,
     };
   }

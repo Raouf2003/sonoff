@@ -164,3 +164,67 @@ test('tele/STATE with no IPAddress leaves lastIp untouched', () => {
 
   assert.strictEqual(writes, 0);
 });
+
+// A rejected telemetry IP must neither touch the in-memory registry nor write
+// to the DB: the previous valid lastIp survives untouched.
+function assertTelemetryIpRejected(ip, { lastIp = '192.168.1.8' } = {}) {
+  const gw = ipStateGateway({ lastIp });
+  let ipUpdates = 0;
+  gw.deviceRegistry.updateIp = () => {
+    ipUpdates++;
+  };
+  let writes = 0;
+  gw.deviceModel = {
+    updateOne() {
+      writes++;
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-a/STATE', JSON.stringify({ IPAddress: ip, POWER1: 'ON' }));
+
+  assert.strictEqual(ipUpdates, 0, `updateIp must not run for ${ip}`);
+  assert.strictEqual(writes, 0, `deviceModel.updateOne must not run for ${ip}`);
+  assert.strictEqual(gw.deviceRegistry.get('dev-a').lastIp, lastIp,
+    `a valid lastIp must survive a later invalid payload (${ip})`);
+}
+
+test('tele/STATE with IPAddress 0.0.0.0 is rejected and lastIp is preserved', () => {
+  assertTelemetryIpRejected('0.0.0.0');
+});
+
+test('tele/STATE with unspecified IPv6 :: is rejected and lastIp is preserved', () => {
+  assertTelemetryIpRejected('::');
+});
+
+test('tele/STATE with loopback is rejected and lastIp is preserved', () => {
+  assertTelemetryIpRejected('127.0.0.1');
+});
+
+test('tele/STATE with a multicast address is rejected and lastIp is preserved', () => {
+  assertTelemetryIpRejected('239.255.255.250');
+});
+
+test('tele/STATE with a malformed IP is rejected and lastIp is preserved', () => {
+  assertTelemetryIpRejected('not-an-ip');
+});
+
+test('a valid IP overrides a previous invalid lastIp', () => {
+  const gw = ipStateGateway({ lastIp: '0.0.0.0' });
+  const ipUpdates = [];
+  gw.deviceRegistry.updateIp = (deviceId, ip) => ipUpdates.push({ deviceId, ip });
+  const saved = [];
+  gw.deviceModel = {
+    updateOne(filter, update) {
+      saved.push({ filter, update });
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-a/STATE', JSON.stringify({ IPAddress: '192.168.1.42' }));
+
+  assert.deepStrictEqual(ipUpdates, [{ deviceId: 'dev-a', ip: '192.168.1.42' }]);
+  assert.deepStrictEqual(saved, [
+    { filter: { deviceId: 'dev-a' }, update: { $set: { lastIp: '192.168.1.42' } } },
+  ]);
+});

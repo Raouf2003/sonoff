@@ -80,4 +80,58 @@ void main() {
     expect(await locator.cachedAddress(_id), '192.168.1.20');
     expect(await locator.cachedVerifiedAt(_id), isNull);
   });
+
+  test('storeVerifiedAddress never persists an invalid address (0.0.0.0)',
+      () async {
+    final locator = LocalDeviceDiscovery();
+    await locator.storeVerifiedAddress(_id, '0.0.0.0');
+    await locator.storeVerifiedAddress(_id, '127.0.0.1');
+
+    expect(await locator.cachedAddress(_id), isNull);
+    expect(await locator.cachedVerifiedAt(_id), isNull);
+  });
+
+  test('storeCandidateAddress never persists an invalid address (0.0.0.0)',
+      () async {
+    final locator = LocalDeviceDiscovery();
+    await locator.storeCandidateAddress(_id, '0.0.0.0');
+    await locator.storeCandidateAddress(_id, 'not-an-ip');
+
+    expect(await locator.cachedAddress(_id), isNull);
+  });
+
+  test('a cached envelope holding 0.0.0.0 is auto-removed at read (self-heal)',
+      () async {
+    SharedPreferences.setMockInitialValues({
+      _key: '{"ip":"0.0.0.0","verifiedAt":"2026-01-01T00:00:00.000"}',
+    });
+    final locator = LocalDeviceDiscovery();
+
+    expect(await locator.cachedAddress(_id), isNull);
+    expect(await locator.cachedVerifiedAt(_id), isNull);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(_key), isNull,
+        reason: 'the invalid cached entry is deleted, not just hidden');
+  });
+
+  test('a legacy bare 0.0.0.0 value is auto-removed at read (self-heal)',
+      () async {
+    SharedPreferences.setMockInitialValues({_key: '0.0.0.0'});
+    final locator = LocalDeviceDiscovery();
+
+    expect(await locator.cachedAddress(_id), isNull);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(_key), isNull);
+  });
+
+  test('a valid cached IPv4 still resolves after self-heal validation',
+      () async {
+    SharedPreferences.setMockInitialValues({
+      _key: '{"ip":"192.168.1.5","verifiedAt":"2026-01-01T00:00:00.000"}',
+    });
+    final locator = LocalDeviceDiscovery();
+
+    expect(await locator.cachedAddress(_id), '192.168.1.5');
+    expect(await locator.cachedVerifiedAt(_id), isNotNull);
+  });
 }

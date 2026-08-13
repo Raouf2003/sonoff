@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'api_service.dart';
 import 'cloud_device_transport.dart';
@@ -7,6 +6,7 @@ import 'device_transport.dart';
 import 'local_device_cache.dart';
 import 'local_device_discovery.dart';
 import 'local_device_transport.dart';
+import 'local_ip.dart';
 
 /// How long a single LOCAL attempt (cached-IP probe + possible quick mDNS
 /// window + identity verify + command + read-back) may take before the
@@ -141,7 +141,10 @@ class DeviceRepositoryService {
 
   Future<void> _seedOneCandidate(Object? id, Object? ip) async {
     if (id is! String || id.isEmpty || ip is! String || ip.isEmpty) return;
-    if (InternetAddress.tryParse(ip) == null) return;
+    if (!isValidLocalIp(ip)) {
+      _log('rejected invalid candidate IP for $id: $ip');
+      return;
+    }
     try {
       await _locator
           .storeCandidateAddress(id, ip)
@@ -311,11 +314,18 @@ class DeviceRepositoryService {
   ) {
     final ip = result['ipAddress'];
     if (ip is! String || ip.isEmpty || ip == currentAddress) return;
-    if (InternetAddress.tryParse(ip) == null) return;
+    if (!isValidLocalIp(ip)) {
+      _log('rejected invalid candidate IP for $deviceId: $ip');
+      return;
+    }
     unawaited(_learnIp(deviceId, ip));
   }
 
   Future<void> _learnIp(String deviceId, String ip) async {
+    if (!isValidLocalIp(ip)) {
+      _log('rejected invalid candidate IP for $deviceId: $ip');
+      return;
+    }
     try {
       await _locator
           .storeVerifiedAddress(deviceId, ip)
@@ -360,49 +370,67 @@ class DeviceRepositoryService {
     if (warm != null &&
         warmAt != null &&
         DateTime.now().difference(warmAt) < kVerifiedIpTtl) {
-      _log('using warm verified endpoint for $deviceId');
-      return warm;
+      // Defense in depth: never return (or even log "using warm verified
+      // endpoint" for) an unusable address, even one cached before validation.
+      if (!isUsableHttpHost(warm.address)) {
+        _warmCache.remove(deviceId);
+        _warmVerifiedAt.remove(deviceId);
+        _log(
+          'removed invalid cached endpoint (warm) for $deviceId: '
+          '${warm.address}',
+        );
+      } else {
+        _log('using warm verified endpoint for $deviceId');
+        return warm;
+      }
     }
 
     final cached = await _locator.cachedAddress(deviceId);
     if (cached != null && cached.isNotEmpty) {
-      final verifiedAt = await _locator.cachedVerifiedAt(deviceId);
-      final isVerified = verifiedAt != null;
-      final fresh = isVerified &&
-          DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
-      if (fresh) {
-        final transport = _buildLocal(cached, deviceId);
-        _warmCache[deviceId] = transport;
-        _warmVerifiedAt[deviceId] = verifiedAt;
-        _log('using fresh verified cached IP: $cached');
-        return transport;
-      }
-      final transport = _buildLocal(cached, deviceId);
-      switch (await transport.checkIdentity()) {
-        case LocalIdentityCheck.verified:
+      // The locator self-heals invalid entries on read, but never trust any
+      // locator blindly: an unusable address must not reach a transport.
+      if (!isUsableHttpHost(cached)) {
+        _log('removed invalid cached endpoint for $deviceId: $cached');
+        await _locator.discardAddress(deviceId);
+      } else {
+        final verifiedAt = await _locator.cachedVerifiedAt(deviceId);
+        final isVerified = verifiedAt != null;
+        final fresh = isVerified &&
+            DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
+        if (fresh) {
+          final transport = _buildLocal(cached, deviceId);
           _warmCache[deviceId] = transport;
-          _warmVerifiedAt[deviceId] = DateTime.now();
-          await _locator.storeVerifiedAddress(deviceId, cached);
-          _log('verified cached IP: $cached');
+          _warmVerifiedAt[deviceId] = verifiedAt;
+          _log('using fresh verified cached IP: $cached');
           return transport;
-        case LocalIdentityCheck.mismatch:
-          // The box at this address is NOT our device — the IP was repurposed.
-          // Drop it so we never probe a stranger's box again.
-          await _locator.discardAddress(deviceId);
-          _log('cached IP identity mismatch — discarding $cached');
-          break;
-        case LocalIdentityCheck.unavailable:
-          if (isVerified) {
-            // A previously-confirmed address that no longer answers (box off /
-            // network change): drop it rather than probe it forever.
+        }
+        final transport = _buildLocal(cached, deviceId);
+        switch (await transport.checkIdentity()) {
+          case LocalIdentityCheck.verified:
+            _warmCache[deviceId] = transport;
+            _warmVerifiedAt[deviceId] = DateTime.now();
+            await _locator.storeVerifiedAddress(deviceId, cached);
+            _log('verified cached IP: $cached');
+            return transport;
+          case LocalIdentityCheck.mismatch:
+            // The box at this address is NOT our device — the IP was repurposed.
+            // Drop it so we never probe a stranger's box again.
             await _locator.discardAddress(deviceId);
-            _log('verified cached IP unreachable — discarding $cached');
-          } else {
-            // A cloud-learned hint that is not reachable RIGHT NOW: keep it —
-            // the box may be powered off or waking. mDNS still runs below.
-            _log('candidate IP unreachable — keeping $cached as a hint');
-          }
-          break;
+            _log('cached IP identity mismatch — discarding $cached');
+            break;
+          case LocalIdentityCheck.unavailable:
+            if (isVerified) {
+              // A previously-confirmed address that no longer answers (box off /
+              // network change): drop it rather than probe it forever.
+              await _locator.discardAddress(deviceId);
+              _log('verified cached IP unreachable — discarding $cached');
+            } else {
+              // A cloud-learned hint that is not reachable RIGHT NOW: keep it —
+              // the box may be powered off or waking. mDNS still runs below.
+              _log('candidate IP unreachable — keeping $cached as a hint');
+            }
+            break;
+        }
       }
     }
 

@@ -895,4 +895,89 @@ void main() {
       expect(locator.lastStored, '192.168.1.5');
     });
   });
+
+  group('invalid addresses are rejected everywhere', () {
+    test('getDevices never seeds a candidate from a lastIp of 0.0.0.0',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..devices = [
+          {
+            'deviceId': _deviceId,
+            'name': 'Controller',
+            'channels': 4,
+            'lastIp': '0.0.0.0',
+          },
+        ];
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      await repo.getDevices();
+
+      expect(locator.candidateStores, 0,
+          reason: 'a transient 0.0.0.0 must never seed a discovery candidate');
+    });
+
+    test('getDevices never seeds a candidate from loopback or multicast',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..devices = [
+          {
+            'deviceId': _deviceId,
+            'name': 'Controller',
+            'channels': 4,
+            'lastIp': '127.0.0.1',
+          },
+          {
+            'deviceId': '222222222222',
+            'name': 'NoIP',
+            'channels': 1,
+            'lastIp': '239.255.255.250',
+          },
+        ];
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      await repo.getDevices();
+
+      expect(locator.candidateStores, 0);
+    });
+
+    test('an invalid cached address is discarded and never reaches the fetcher',
+        () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake();
+      final locator = _FakeLocator(cached: '0.0.0.0');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(result.source, DeviceTransportSource.cloud,
+          reason: 'no usable local endpoint — cloud fallback');
+      expect(locator.discards, 1,
+          reason: 'the invalid cached endpoint is dropped, never retried');
+      expect(cm.called, isEmpty,
+          reason: 'no HTTP may ever target 0.0.0.0');
+    });
+
+    test('a local report carrying IPAddress 0.0.0.0 is never learned',
+        () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON","IPAddress":"0.0.0.0"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await repo.control(_deviceId, 1, 'ON');
+      await pumpEventQueue();
+
+      expect(locator.stores, 1,
+          reason: 'only the candidate-promotion write happens; the invalid '
+              'reported IP adds no write');
+      expect(locator.lastStored, '192.168.1.5',
+          reason: '0.0.0.0 must never be stored as this device IP');
+    });
+  });
 }

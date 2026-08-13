@@ -821,6 +821,77 @@ void main() {
       expect(t.address, '192.168.1.20:8080');
     });
   });
+
+  group('LocalDeviceTransport invalid-address guard', () {
+    test('0.0.0.0 never reaches the HTTP fetcher (status)', () async {
+      final cm = _CmFake({'Status%205': _macBody});
+      final t = LocalDeviceTransport(
+        address: '0.0.0.0',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+
+      await expectLater(
+        t.getStatus(_deviceId),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.kind,
+            'kind',
+            TransportFailureKind.availability,
+          ),
+        ),
+      );
+      expect(cm.called, isEmpty,
+          reason: 'no socket may ever be opened against 0.0.0.0');
+    });
+
+    test('0.0.0.0 fails identity verification without any HTTP call',
+        () async {
+      final cm = _CmFake({'Status%205': _macBody});
+      final t = LocalDeviceTransport(
+        address: '0.0.0.0',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+
+      expect(await t.verifyIdentity(), isFalse);
+      expect(await t.checkIdentity(), LocalIdentityCheck.unavailable);
+      expect(cm.called, isEmpty);
+    });
+
+    test('0.0.0.0 never reaches the HTTP fetcher (control)', () async {
+      final cm = _CmFake({'Status%205': _macBody});
+      final t = LocalDeviceTransport(
+        address: '0.0.0.0',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+
+      await expectLater(
+        t.control(_deviceId, 1, 'ON'),
+        throwsA(isA<DeviceTransportException>()),
+      );
+      expect(cm.called, isEmpty,
+          reason: 'a Power command must never target 0.0.0.0');
+    });
+
+    test('a valid LAN IPv4 still reaches the fetcher normally', () async {
+      final cm = _CmFake({
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+
+      final result = await t.control(_deviceId, 1, 'ON');
+      expect(cm.called, ['Status%205', 'Power1%20ON', 'State']);
+      expect(result['POWER1'], 'ON');
+    });
+  });
 }
 
 const _moreOtherMacBody = '{"StatusNET":{"Mac":"AA:BB:CC:DD:EE:FF"}}';

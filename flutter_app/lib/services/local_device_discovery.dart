@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:bonsoir/bonsoir.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'local_ip.dart';
 
 /// SharedPreferences key prefix for the verified-IP cache. Public so the
 /// [LocalDeviceCache] can also clear a removed device's IP locator.
@@ -64,23 +66,19 @@ class LocalDeviceDiscovery implements DeviceLocator {
   // version, or a legacy bare IP string from before — both must resolve.
   @override
   Future<String?> cachedAddress(String deviceId) async {
-    final prefs = await _prefs();
-    final raw = prefs.getString(_key(deviceId));
-    if (raw == null || raw.isEmpty) return null;
-    final decoded = _decodeEntry(raw);
-    return decoded?.ip ?? (raw.contains('{') ? null : raw);
+    final entry = await _readEntry(deviceId);
+    return entry?.ip;
   }
 
   @override
   Future<DateTime?> cachedVerifiedAt(String deviceId) async {
-    final prefs = await _prefs();
-    final raw = prefs.getString(_key(deviceId));
-    if (raw == null || raw.isEmpty) return null;
-    return _decodeEntry(raw)?.verifiedAt;
+    final entry = await _readEntry(deviceId);
+    return entry?.verifiedAt;
   }
 
   @override
   Future<void> storeVerifiedAddress(String deviceId, String ip) async {
+    if (!isValidLocalIp(ip)) return; // never persist an unusable address
     final prefs = await _prefs();
     await prefs.setString(
       _key(deviceId),
@@ -90,7 +88,7 @@ class LocalDeviceDiscovery implements DeviceLocator {
 
   @override
   Future<void> storeCandidateAddress(String deviceId, String ip) async {
-    if (ip.isEmpty) return;
+    if (!isValidLocalIp(ip)) return; // never persist an unusable address
     final prefs = await _prefs();
     final key = _key(deviceId);
     final raw = prefs.getString(key);
@@ -107,6 +105,27 @@ class LocalDeviceDiscovery implements DeviceLocator {
   Future<void> discardAddress(String deviceId) async {
     final prefs = await _prefs();
     await prefs.remove(_key(deviceId));
+  }
+
+  // Reads and validates a cached entry. Invalid addresses (e.g. a transient
+  // `0.0.0.0` learned before validation existed) are AUTO-REMOVED so existing
+  // users self-heal without clearing app storage; they never reach discovery.
+  Future<_CachedEntry?> _readEntry(String deviceId) async {
+    final prefs = await _prefs();
+    final key = _key(deviceId);
+    final raw = prefs.getString(key);
+    if (raw == null || raw.isEmpty) return null;
+    final decoded = _decodeEntry(raw);
+    if (decoded == null && raw.contains('{')) return null; // corrupt envelope
+    final entry = decoded ?? _CachedEntry(raw, verifiedAt: null);
+    if (!isValidLocalIp(entry.ip)) {
+      await prefs.remove(key);
+      debugPrint(
+        '[LOCAL] removed invalid cached endpoint for $deviceId: ${entry.ip}',
+      );
+      return null;
+    }
+    return entry;
   }
 
   @override
