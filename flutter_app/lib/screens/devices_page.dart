@@ -563,14 +563,18 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   // On a confirmed cloud outage, immediately re-read status through the normal
-  // local-first path. This is fast (a verified cached IP skips mDNS) and
-  // non-blocking: when the LAN answers, fresh local evidence is established so
-  // the pill can show LAN right away. Failures simply fall back to the existing
-  // poll / repeated-failure-threshold behavior; the socket reconnect restores
-  // cloud priority as usual.
+  // LOCAL-ONLY known-endpoint path. The repository ladder runs first and
+  // unchanged — warm in-memory endpoint, then the persisted verified IP, then a
+  // cloud-learned candidate (identity-verified with `Status 5`), then mDNS —
+  // so an already-known, verified IP is probed directly with NO discovery
+  // window. `cloudDown` also stops the read from falling through to the cloud,
+  // which is confirmed unreachable and would otherwise burn up to the 15s API
+  // timeout before the LAN fallback could resolve. Failures simply fall back to
+  // the existing poll / repeated-failure-threshold behavior; the socket
+  // reconnect restores cloud priority as usual.
   void _probeLocalAfterCloudDown() {
     if (!mounted || _selectedDeviceId == null) return;
-    _fetchStatus(silent: true);
+    _fetchStatus(silent: true, cloudDown: true);
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -628,12 +632,15 @@ class _DevicesPageState extends State<DevicesPage>
     if (mounted) setState(() {});
   }
 
-  Future<void> _fetchStatus({bool silent = false}) async {
+  Future<void> _fetchStatus({bool silent = false, bool cloudDown = false}) async {
     if (_selectedDeviceId == null) return;
     if (_statusInFlight) return; // overlapping-poll guard
     _statusInFlight = true;
     try {
-      final result = await _repository.getStatus(_selectedDeviceId!);
+      final result = await _repository.getStatus(
+        _selectedDeviceId!,
+        cloudDown: cloudDown,
+      );
       if (!mounted) return;
       _pollFailures = 0;
       _applyResult(result);

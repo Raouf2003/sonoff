@@ -114,27 +114,70 @@ class _CmFake {
 }
 
 /// Discovery stub for widget-level Local Mode tests: a verified cached IP, no.
+/// Records mDNS / discard / store calls and can serve mDNS candidates so tests
+/// can prove the fast known-IP path avoids mDNS and the fallback uses it.
 class _LocatorStub implements DeviceLocator {
-  _LocatorStub({this.cached});
-  final String? cached;
+  _LocatorStub({this.cached, this.verifiedAt, this.mDnsAddresses = const []});
+  String? cached;
+  DateTime? verifiedAt;
+  final List<String> mDnsAddresses;
+  int mDnsCalls = 0;
+  final List<String> discarded = [];
+  final List<String> storedVerified = [];
 
   @override
   Future<String?> cachedAddress(String deviceId) async => cached;
 
   @override
-  Future<DateTime?> cachedVerifiedAt(String deviceId) async => null;
+  Future<DateTime?> cachedVerifiedAt(String deviceId) async => verifiedAt;
 
   @override
-  Future<void> storeVerifiedAddress(String deviceId, String ip) async {}
+  Future<void> storeVerifiedAddress(String deviceId, String ip) async {
+    storedVerified.add(ip);
+  }
 
   @override
   Future<void> storeCandidateAddress(String deviceId, String ip) async {}
 
   @override
-  Future<void> discardAddress(String deviceId) async {}
+  Future<void> discardAddress(String deviceId) async {
+    discarded.add(deviceId);
+    cached = null;
+    verifiedAt = null;
+  }
 
   @override
-  Future<List<String>> mDnsCandidates(Duration timeout) async => const [];
+  Future<List<String>> mDnsCandidates(Duration timeout) async {
+    mDnsCalls++;
+    return mDnsAddresses;
+  }
+}
+
+/// Tasmota fetcher that records every command (so tests can count `Status 5`
+/// calls and prove no duplicate identity verification, no mDNS, and that a
+/// foreign device is never controlled) and dispatches per-address responses.
+class _RecordingCmFake {
+  _RecordingCmFake(this.responsesByAddress);
+  final Map<String, Map<String, String>> responsesByAddress;
+  final List<String> log = [];
+
+  bool get hasControlCommand =>
+      log.any((entry) => entry.contains('Power'));
+
+  int get status5Count =>
+      log.where((entry) => entry.contains('Status%205')).length;
+
+  Future<String> call(
+    String address,
+    String command, {
+    String? password,
+    String? deviceId,
+  }) async {
+    log.add('$address $command');
+    final body = responsesByAddress[address]?[command];
+    if (body == null) throw const DeviceTransportException('HTTP 404');
+    return body;
+  }
 }
 
 /// Scriptable repository: records relay calls, can hold them in flight, and
@@ -192,7 +235,10 @@ class _FakeRepo extends DeviceRepositoryService {
   }
 
   @override
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     statusCalls++;
     return RelayStatusResult(
       online: true,
@@ -269,7 +315,10 @@ class _ScriptableSocket implements io.Socket {
 /// repeated-failure threshold may.
 class _StatusFailingRepo extends _FakeRepo {
   @override
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
   }
 }
@@ -281,7 +330,10 @@ class _FailOnceRepo extends _FakeRepo {
   bool failNext = false;
 
   @override
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     if (failNext) {
       failNext = false;
       throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
@@ -296,7 +348,10 @@ class _FailOnceRepo extends _FakeRepo {
 /// delay that the disconnect probe eliminates.
 class _CloudThenLocalRepo extends _FakeRepo {
   @override
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     statusCalls++;
     final viaLocal = statusCalls > 1;
     return RelayStatusResult(
@@ -320,7 +375,10 @@ class _GatedStatusRepo extends _FakeRepo {
   final Completer<void> releaseStatus = Completer<void>();
 
   @override
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     statusCalls++;
     await releaseStatus.future;
     return super.getStatus(deviceId);
@@ -1606,6 +1664,284 @@ void main() {
       await tester.pump();
       expect(repo.statusCalls, base + 1,
           reason: 'repeated cloud-down signals while already down never re-probe');
+
+      await _unmount(tester);
+    });
+  });
+
+  group('fast LAN probe after cloud-down uses the known IP fast path', () {
+    const foreignMac = '{"StatusNET":{"Mac":"00:11:22:33:44:55"}}';
+
+    testWidgets(
+        'cloud down + warm verified endpoint → direct probe, no mDNS, no '
+        're-verification', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cm = _RecordingCmFake({
+        '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
+      });
+      final locator = _LocatorStub(cached: '192.168.1.5');
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudApi(devices: const [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ])),
+        locator: locator,
+        fetch: cm.call,
+        cache: LocalDeviceCache(),
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // First contact discovered the candidate and identity-verified it once.
+      expect(cm.status5Count, 1,
+          reason: 'one identity verification on first contact');
+      expect(find.text('Online'), findsOneWidget);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      // LAN resolves through the warm verified endpoint: no second Status 5,
+      // no mDNS, no cloud re-probe.
+      expect(find.text('LAN'), findsOneWidget);
+      expect(cm.status5Count, 1,
+          reason: 'warm verified endpoint skips re-verification');
+      expect(locator.mDnsCalls, 0,
+          reason: 'the fast path never falls back to mDNS');
+      expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2,
+          reason: 'both reads went straight to the known verified IP');
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cloud down + freshly persisted verified IP → fast probe',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _RecordingCmFake({
+        '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
+      });
+      final locator = _LocatorStub(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now().subtract(const Duration(seconds: 5)),
+      );
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: locator,
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // Fresh persisted verified IP short-circuits discovery; the transport
+      // still re-verifies (Status 5) before reading, but no mDNS runs.
+      expect(locator.mDnsCalls, 0);
+      expect(cm.log.first, '192.168.1.5 Status%205');
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsOneWidget);
+      expect(locator.mDnsCalls, 0,
+          reason: 'the persisted verified IP kept discovery off the mDNS path');
+      expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'cloud-learned lastIp is never trusted blindly — Status 5 identity '
+        'verification still runs before reading', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cm = _RecordingCmFake({
+        '192.168.1.5': {'Status%205': _macBody, 'State': _stateBody},
+      });
+      final locator = _LocatorStub(cached: '192.168.1.5');
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudApi(devices: const [
+          {
+            'deviceId': _deviceId,
+            'name': 'Controller',
+            'channels': 4,
+            'lastIp': '192.168.1.5',
+          },
+        ])),
+        locator: locator,
+        fetch: cm.call,
+        cache: LocalDeviceCache(),
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // The cloud-learned IP was not trusted as-is: the first contact is the
+      // identity check, never a raw status read.
+      expect(cm.log.first, '192.168.1.5 Status%205');
+      expect(cm.status5Count, 1);
+      expect(find.text('Online'), findsOneWidget);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsOneWidget);
+      expect(cm.log.where((e) => e == '192.168.1.5 State').length, 2);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'repurposed IP (foreign MAC) is rejected, never controlled, and '
+        're-discovered', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _RecordingCmFake({
+        '192.168.1.5': {'Status%205': foreignMac},
+      });
+      final locator = _LocatorStub(cached: '192.168.1.5');
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: locator,
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // The known IP holds a different device → identity mismatch → discarded,
+      // mDNS searched (nothing found) → SYNCING, never OFFLINE.
+      expect(find.text('Controller'), findsOneWidget);
+      expect(locator.discarded, contains(_deviceId));
+      expect(locator.mDnsCalls, greaterThanOrEqualTo(1));
+      expect(cm.hasControlCommand, isFalse);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      // Even after cloud-down the foreign box is never read or controlled.
+      expect(cm.hasControlCommand, isFalse);
+      expect(cm.log.where((e) => e.contains('State')), isEmpty,
+          reason: 'a mismatched identity must never be status-read');
+      expect(find.text('LAN'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('known IP unreachable → mDNS discovery fallback still runs',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _RecordingCmFake({});
+      final locator = _LocatorStub(cached: '192.168.1.5');
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: locator,
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // HTTP 404 on Status 5 = unreachable → identity unavailable → candidate
+      // kept, then mDNS searched; nothing found → SYNCING (not OFFLINE).
+      expect(locator.mDnsCalls, greaterThanOrEqualTo(1));
+      expect(find.text('SYNCING'), findsWidgets);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('LAN'), findsNothing);
+      expect(locator.mDnsCalls, greaterThanOrEqualTo(2),
+          reason: 'the fallback ladder runs again on the cloud-down probe');
+      expect(cm.hasControlCommand, isFalse);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'device changed IP → repurposed old IP is discarded and mDNS finds the '
+        'new address, which is re-verified and cached', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _RecordingCmFake({
+        '192.168.1.5': {'Status%205': foreignMac},
+        '192.168.1.50': {'Status%205': _macBody, 'State': _stateBody},
+      });
+      final locator = _LocatorStub(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now().subtract(const Duration(seconds: 5)),
+        mDnsAddresses: const ['192.168.1.50'],
+      );
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: locator,
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // Fresh verified old IP → transport re-verifies → foreign MAC → identity
+      // mismatch → endpoint invalidated → mDNS finds 192.168.1.50 → verified.
+      expect(cm.log, contains('192.168.1.5 Status%205'));
+      expect(cm.log, isNot(contains('192.168.1.5 State')),
+          reason: 'the repurposed old IP is never status-read');
+      expect(locator.discarded, contains(_deviceId));
+      expect(locator.storedVerified, contains('192.168.1.50'));
+      expect(locator.mDnsCalls, greaterThanOrEqualTo(1));
+      expect(cm.log.where((e) => e == '192.168.1.50 State').length, 1,
+          reason: 'the status read happened at the freshly discovered IP');
+
+      socket.fireDisconnect();
+      await tester.pump();
+      await tester.pump();
+
+      // The newly learned verified IP now serves the cloud-down probe directly.
+      expect(find.text('LAN'), findsOneWidget);
+      expect(cm.log.where((e) => e == '192.168.1.50 State').length, 2);
+      expect(cm.log, isNot(contains('192.168.1.5 State')));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'cloud-down probe reuses a status read already in flight — no second '
+        'probe', (tester) async {
+      final repo = _GatedStatusRepo(source: DeviceTransportSource.local);
+      final socket = _ScriptableSocket();
+
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // Initial load holds one status read in flight.
+      expect(repo.statusCalls, 1);
+
+      // Every cloud-down signal while that read is still pending reuses it.
+      socket.fireDisconnect();
+      await tester.pump();
+      socket.fireConnectError();
+      await tester.pump();
+      expect(repo.statusCalls, 1,
+          reason: 'the single-flight status read is not duplicated');
+
+      repo.releaseStatus.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('LAN'), findsOneWidget);
 
       await _unmount(tester);
     });

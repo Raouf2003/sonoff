@@ -188,7 +188,18 @@ class DeviceRepositoryService {
   /// whenever the device is reachable. When the LAN cannot be reached the
   /// cloud's status is used. A cloud report that says ONLINE is only accepted
   /// if it is fresh; a stale cloud answer never overwrites a fresh LAN read.
-  Future<RelayStatusResult> getStatus(String deviceId) async {
+  ///
+  /// When [cloudDown] is true the status read is LOCAL-ONLY: the caller already
+  /// knows the cloud is unreachable (Socket.IO / health monitor confirmed it),
+  /// so a local miss rethrows immediately instead of blocking on a doomed cloud
+  /// attempt that could sit on the 15s API timeout — the known-endpoint ladder
+  /// (warm memory → persisted verified IP → candidate/verify → mDNS) runs first
+  /// and unchanged, and the poll / repeated-failure threshold reconciles a
+  /// total local miss. Mirrors the [control] `cloudDown` convention.
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
     final seq = ++_seq;
     // LOCAL first.
     try {
@@ -206,6 +217,10 @@ class DeviceRepositoryService {
         rethrow; // identity violation — never fall back to the cloud for it.
       }
       _log('local status failed for $deviceId (${_describe(e)})');
+      if (cloudDown) {
+        // Cloud is confirmed unreachable: never spend the API timeout on it.
+        rethrow;
+      }
     }
 
     // CLOUD fallback.
@@ -386,12 +401,33 @@ class DeviceRepositoryService {
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    final result = await local.getStatus(
-      deviceId,
-      identityVerified: _canSkipIdentityVerify(deviceId),
-    );
-    _maybeLearnIp(deviceId, local.address, result);
-    return result;
+    try {
+      final result = await local.getStatus(
+        deviceId,
+        identityVerified: _canSkipIdentityVerify(deviceId),
+      );
+      _maybeLearnIp(deviceId, local.address, result);
+      return result;
+    } on DeviceTransportException catch (e) {
+      if (e.kind != TransportFailureKind.logical) rethrow;
+      // The endpoint's identity changed under us (repurposed IP): the box at
+      // this address is NOT our device. Drop it and re-discover so mDNS can
+      // find the real device; the foreign box is never read. One bounded retry,
+      // then the original identity violation is surfaced unchanged.
+      _log(
+        'local endpoint identity violation for $deviceId — '
+        'discarding and re-discovering',
+      );
+      await _invalidateEndpoint(deviceId);
+      final rediscovered = await _findLocal(deviceId, urgent: true);
+      if (rediscovered == null) rethrow;
+      final result = await rediscovered.getStatus(
+        deviceId,
+        identityVerified: _canSkipIdentityVerify(deviceId),
+      );
+      _maybeLearnIp(deviceId, rediscovered.address, result);
+      return result;
+    }
   }
 
   Future<Map<String, dynamic>> _localControl(
@@ -451,6 +487,26 @@ class DeviceRepositoryService {
     }
   }
 
+  /// Drops every trace of a repurposed/invalid local endpoint so the next
+  /// discovery can never hand out the foreign box at the old address again:
+  /// the warm in-memory endpoint, the probe-trust window, the persisted
+  /// verified-IP cache, and any in-flight discovery are all cleared.
+  /// Best-effort; never blocks discovery.
+  Future<void> _invalidateEndpoint(String deviceId) async {
+    _warmCache.remove(deviceId);
+    _warmVerifiedAt.remove(deviceId);
+    _identityTrustedAt.remove(deviceId);
+    _discoveryInFlight.remove(deviceId);
+    try {
+      await _locator
+          .discardAddress(deviceId)
+          .timeout(const Duration(seconds: 2));
+      _log('invalidated endpoint for $deviceId');
+    } on Object catch (e) {
+      _log('endpoint invalidation failed for $deviceId (${_describe(e)})');
+    }
+  }
+
   /// Single-flight discovery per deviceId: concurrent callers (a status poll
   /// and a relay tap, or two status refreshes) await the SAME bounded
   /// discovery instead of each opening their own mDNS browser.
@@ -465,10 +521,19 @@ class DeviceRepositoryService {
       _log('reusing in-flight discovery for $deviceId');
       return existing;
     }
-    final future =
-        _discoverLocal(deviceId, urgent: urgent, opId: opId, channel: channel)
-            .whenComplete(() {
-      _discoveryInFlight.remove(deviceId);
+    late final Future<LocalDeviceTransport?> future;
+    final discovery = _discoverLocal(
+      deviceId,
+      urgent: urgent,
+      opId: opId,
+      channel: channel,
+    );
+    future = discovery.whenComplete(() {
+      // Only clear the entry we created: a concurrent identity invalidation
+      // may have already dropped it or replaced it with a fresh discovery.
+      if (identical(_discoveryInFlight[deviceId], future)) {
+        _discoveryInFlight.remove(deviceId);
+      }
     });
     _discoveryInFlight[deviceId] = future;
     return future;
