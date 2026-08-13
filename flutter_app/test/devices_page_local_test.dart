@@ -108,6 +108,7 @@ class _FakeRepo extends DeviceRepositoryService {
   final List<Map<String, dynamic>> devices;
   final Completer<void> releaseControl = Completer<void>();
   int controlCalls = 0;
+  bool? lastCloudDown;
 
   @override
   Future<void> warmUp(List<Map<String, dynamic>> devices) async {
@@ -124,8 +125,10 @@ class _FakeRepo extends DeviceRepositoryService {
     int channel,
     String state, {
     String? opId,
+    bool cloudDown = false,
   }) async {
     controlCalls++;
+    lastCloudDown = cloudDown;
     if (gateControl) {
       // Hold in flight so the busy state and the double-tap guard can be
       // exercised. The test releases the gate explicitly.
@@ -176,9 +179,6 @@ class _FakeSocket implements io.Socket {
 /// `device_status`/`device_update` events and fire connect/disconnect at will.
 class _ScriptableSocket implements io.Socket {
   final Map<String, Function> _handlers = {};
-  Function? _onConnect;
-  Function? _onDisconnect;
-  Function? _onConnectError;
   final List<String> log = [];
 
   @override
@@ -203,20 +203,11 @@ class _ScriptableSocket implements io.Socket {
   void dispose() {}
 
   @override
-  void noSuchMethod(Invocation invocation) {
-    final arg = invocation.positionalArguments.isNotEmpty
-        ? invocation.positionalArguments.first
-        : null;
-    if (arg is Function) {
-      if (invocation.memberName == #onConnect) _onConnect = arg;
-      if (invocation.memberName == #onDisconnect) _onDisconnect = arg;
-      if (invocation.memberName == #onConnectError) _onConnectError = arg;
-    }
-  }
+  void noSuchMethod(Invocation invocation) {}
 
-  void fireConnect() => _onConnect?.call(null);
-  void fireDisconnect() => _onDisconnect?.call(null);
-  void fireConnectError() => _onConnectError?.call(null);
+  void fireConnect() => _handlers['connect']?.call(null);
+  void fireDisconnect() => _handlers['disconnect']?.call(null);
+  void fireConnectError() => _handlers['connect_error']?.call(null);
   void push(String event, dynamic data) {
     final h = _handlers[event];
     if (h != null) h(data);
@@ -248,6 +239,7 @@ class _StaleControlRepo extends _FakeRepo {
     int channel,
     String state, {
     String? opId,
+    bool cloudDown = false,
   }) async {
     controlCalls++;
     if (gateControl) await releaseControl.future;
@@ -426,6 +418,45 @@ void main() {
     await tester.pump();
     expect(repo.controlCalls, 1);
     expect(find.text('FLOWING'), findsOneWidget);
+
+    await _unmount(tester);
+  });
+
+  testWidgets('cloudDown passed to control tracks the socket cloud monitor',
+      (tester) async {
+    final repo = _FakeRepo();
+    final socket = _ScriptableSocket();
+    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+    // Unknown (no socket event yet): the safe cloud-first default.
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(repo.lastCloudDown, isFalse,
+        reason: 'unknown connectivity must keep cloud-first');
+
+    // Confirmed disconnect → cloud known unreachable → local immediately.
+    socket.fireDisconnect();
+    await tester.pump();
+    await tester.tap(find.text('CHANNEL 2'));
+    await tester.pump();
+    expect(repo.lastCloudDown, isTrue,
+        reason: 'a confirmed disconnect must route local immediately');
+
+    // Reconnect → cloud reachable again → cloud first.
+    socket.fireConnect();
+    await tester.pump();
+    await tester.tap(find.text('CHANNEL 3'));
+    await tester.pump();
+    expect(repo.lastCloudDown, isFalse,
+        reason: 'a connect must restore cloud-first');
+
+    // Connect error → cloud unreachable → local immediately.
+    socket.fireConnectError();
+    await tester.pump();
+    await tester.tap(find.text('CHANNEL 4'));
+    await tester.pump();
+    expect(repo.lastCloudDown, isTrue,
+        reason: 'a connect error must route local immediately');
 
     await _unmount(tester);
   });

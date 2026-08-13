@@ -68,6 +68,12 @@ class _DevicesPageState extends State<DevicesPage>
   int _deviceChannels = 4;
 
   io.Socket? _socket;
+
+  // CLOUD reachability, driven by the Socket.IO cloud monitor (the socket is
+  // the app's live signal that the backend is reachable). Initialized `true` so
+  // an unknown, still-connecting state keeps the safe cloud-first default; it
+  // is only flipped `false` on a confirmed disconnect / connect error.
+  bool _socketConnected = true;
   _DeviceConnectivity _connectivity = _DeviceConnectivity.unknown;
 
   // When the DEVICE last produced positive evidence (confirmed channel report,
@@ -387,11 +393,18 @@ class _DevicesPageState extends State<DevicesPage>
     });
 
     _socket?.onConnect((_) {
+      _socketConnected = true;
       // Reconnect: reconcile instead of waiting for the next 15s poll.
       _syncAfterReconnect();
     });
-    _socket?.onDisconnect((_) => _socketDown());
-    _socket?.onConnectError((_) => _socketDown());
+    _socket?.onDisconnect((_) {
+      _socketConnected = false;
+      _socketDown();
+    });
+    _socket?.onConnectError((_) {
+      _socketConnected = false;
+      _socketDown();
+    });
 
     // Live events are fire-and-forget wake-ups, never the sole source of
     // truth. Casts are guarded so a malformed payload can't crash the handler.
@@ -530,6 +543,9 @@ class _DevicesPageState extends State<DevicesPage>
         channel,
         targetState ? 'ON' : 'OFF',
         opId: opId,
+        // Route the tap immediately: when the Socket.IO cloud monitor has
+        // confirmed the cloud is unreachable, the LAN gets the command first.
+        cloudDown: !_socketConnected,
       );
       if (!mounted) {
         ControlTimeline.end(opId);

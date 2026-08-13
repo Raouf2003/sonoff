@@ -433,6 +433,75 @@ void main() {
 
       expect(cloud.lastControlOpId, 'tap-42');
     });
+
+    test('cloudDown=true + LAN success returns locally; cloud never called',
+        () async {
+      final cloud = _FakeCloudApi();
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON', cloudDown: true);
+
+      expect(cloud.controlCalls, 0,
+          reason: 'a known-unreachable cloud must not be waited on');
+      expect(result.source, DeviceTransportSource.local);
+      expect(result.channels[1]!.state, 'ON');
+      expect(cm.called, containsAll(['Status%205', 'Power1%20ON', 'State']));
+    });
+
+    test('cloudDown=true + LAN availability failure falls back to the cloud',
+        () async {
+      final cloud = _FakeCloudApi();
+      final repo = _repo(cloud, locator: _FakeLocator()); // no local device
+
+      final result = await repo.control(_deviceId, 1, 'ON', cloudDown: true);
+
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud is the safety fallback when the LAN is unavailable');
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(result.channels[1]!.state, 'ON');
+    });
+
+    test('cloudDown=true + LAN logical rejection is surfaced; cloud untouched',
+        () async {
+      final cloud = _FakeCloudApi();
+      final cm = _CmFake(macByAddress: {
+        '192.168.1.5': [_foreignMacBody],
+      });
+      final locator = _FakeLocator(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now(),
+      );
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON', cloudDown: true),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.kind,
+            'kind',
+            TransportFailureKind.logical,
+          ),
+        ),
+      );
+      expect(cloud.controlCalls, 0,
+          reason: 'a logical LAN rejection must never reach the cloud');
+    });
+
+    test('cloudDown=false keeps the cloud-first default unchanged', () async {
+      final cloud = _FakeCloudApi();
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(cloud.controlCalls, 1);
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(cm.called, isEmpty,
+          reason: 'no local discovery runs before the cloud when it is reachable');
+    });
   });
 
   group('status: local-first with cloud fallback', () {

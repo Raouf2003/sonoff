@@ -222,6 +222,12 @@ class DeviceRepositoryService {
   /// validation, command conflicts, coded 409, MAC identity mismatches — is
   /// surfaced to the user and NEVER rerouted to the LAN.
   ///
+  /// When [cloudDown] is true the order is inverted: the caller already knows
+  /// the cloud is unreachable (e.g. the Socket.IO cloud monitor has confirmed a
+  /// disconnect), so the LAN runs FIRST with the cloud as a safety fallback.
+  /// [cloudDown] is only ever set from confirmed cloud-unreachability evidence,
+  /// so normal cloud control is never delayed.
+  ///
   /// The command is never sent through both transports for one tap: the first
   /// transport that succeeds wins.
   ///
@@ -231,12 +237,43 @@ class DeviceRepositoryService {
     int channel,
     String state, {
     String? opId,
+    bool cloudDown = false,
   }) async {
     _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
     DeviceTransportException? localFailure;
 
-    // CLOUD first.
+    // LOCAL immediately when the cloud is already known unreachable. The
+    // caller does not wait for a cloud timeout before the LAN gets its chance.
+    if (cloudDown) {
+      try {
+        _tl(opId, deviceId, channel, 'Local attempt start');
+        final local = await _localControl(deviceId, channel, state, opId: opId)
+            .timeout(kLocalBudget);
+        _tl(opId, deviceId, channel, 'Local attempt done');
+        _lastSource = DeviceTransportSource.local;
+        _log('local control success for $deviceId channel $channel');
+        return parseRelayStatus(
+          local,
+          source: DeviceTransportSource.local,
+          seq: ++_seq,
+        );
+      } on Object catch (e) {
+        if (e is DeviceTransportException &&
+            e.kind == TransportFailureKind.logical) {
+          _tl(opId, deviceId, channel, 'Local attempt rejected');
+          _log('local control REJECTED for $deviceId (${_describe(e)})');
+          rethrow;
+        }
+        localFailure = e is DeviceTransportException
+            ? e
+            : DeviceTransportException('Local control failed: $e');
+        _tl(opId, deviceId, channel, 'Local attempt failed');
+        _log('local control failed for $deviceId (${_describe(localFailure)})');
+      }
+    }
+
+    // CLOUD first (normal), or the safety fallback after a cloudDown LAN miss.
     try {
       _tl(opId, deviceId, channel, 'Cloud request start');
       final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
@@ -268,30 +305,34 @@ class DeviceRepositoryService {
       _log('cloud control unavailable for $deviceId (${_describe(e)})');
     }
 
-    // LOCAL fallback (cloud/backend genuinely unavailable).
-    try {
-      final local = await _localControl(deviceId, channel, state, opId: opId)
-          .timeout(kLocalBudget);
-      _tl(opId, deviceId, channel, 'Local attempt done');
-      _lastSource = DeviceTransportSource.local;
-      _log('local control success for $deviceId channel $channel');
-      return parseRelayStatus(
-        local,
-        source: DeviceTransportSource.local,
-        seq: ++_seq,
-      );
-    } on Object catch (e) {
-      if (e is DeviceTransportException &&
-          e.kind == TransportFailureKind.logical) {
-        _tl(opId, deviceId, channel, 'Local attempt rejected');
-        _log('local control REJECTED for $deviceId (${_describe(e)})');
-        rethrow;
+    // LOCAL fallback (cloud/backend genuinely unavailable). Skipped when the
+    // LAN already had its chance above (cloudDown) so the cloud is not chased
+    // by a second redundant local attempt.
+    if (!cloudDown) {
+      try {
+        final local = await _localControl(deviceId, channel, state, opId: opId)
+            .timeout(kLocalBudget);
+        _tl(opId, deviceId, channel, 'Local attempt done');
+        _lastSource = DeviceTransportSource.local;
+        _log('local control success for $deviceId channel $channel');
+        return parseRelayStatus(
+          local,
+          source: DeviceTransportSource.local,
+          seq: ++_seq,
+        );
+      } on Object catch (e) {
+        if (e is DeviceTransportException &&
+            e.kind == TransportFailureKind.logical) {
+          _tl(opId, deviceId, channel, 'Local attempt rejected');
+          _log('local control REJECTED for $deviceId (${_describe(e)})');
+          rethrow;
+        }
+        localFailure = e is DeviceTransportException
+            ? e
+            : DeviceTransportException('Local control failed: $e');
+        _tl(opId, deviceId, channel, 'Local attempt failed');
+        _log('local control failed for $deviceId (${_describe(localFailure)})');
       }
-      localFailure = e is DeviceTransportException
-          ? e
-          : DeviceTransportException('Local control failed: $e');
-      _tl(opId, deviceId, channel, 'Local attempt failed');
-      _log('local control failed for $deviceId (${_describe(localFailure)})');
     }
 
     // Cloud and LAN both down: one human-readable availability error, keeping
