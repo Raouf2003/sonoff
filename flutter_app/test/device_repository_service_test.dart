@@ -843,6 +843,129 @@ void main() {
     });
   });
 
+  group('cold LAN: one identity probe, operations reuse it', () {
+    test('a just-probed discovery lets the first control skip the duplicate '
+        'Status 5 probe', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON","POWER2":"OFF"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5'); // verifiedAt == null
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(result.source, DeviceTransportSource.local);
+      expect(cm.called, ['Status%205', 'Power1%20ON', 'State'],
+          reason: 'discovery verified once; the control must not re-probe '
+              'Status 5 (the cold-start LAN cost)');
+    });
+
+    test('a status read right after discovery reuses the probe too',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..statusError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON","POWER2":"OFF"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5'); // verifiedAt == null
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.getStatus(_deviceId);
+
+      expect(result.source, DeviceTransportSource.local);
+      expect(cm.called, ['Status%205', 'State'],
+          reason: 'the discovery probe satisfies the identity check; no second '
+              'Status 5 before the status read');
+    });
+
+    test('subsequent local controls reuse the verified endpoint, no re-probe',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'Power2%20OFF': '{"POWER2":"OFF"}',
+        'State': '{"POWER1":"ON","POWER2":"OFF"}',
+      });
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await repo.control(_deviceId, 1, 'ON');
+      cm.called.clear();
+
+      final result = await repo.control(_deviceId, 2, 'OFF');
+
+      expect(result.source, DeviceTransportSource.local);
+      expect(cm.called, ['Power2%20OFF', 'State'],
+          reason: 'the warm verified endpoint is reused directly; no duplicate '
+              'identity probe on later controls');
+    });
+
+    test('multiple cold controls share ONE discovery and ONE identity probe',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'Power2%20OFF': '{"POWER2":"OFF"}',
+        'Power3%20ON': '{"POWER3":"ON"}',
+        'State': '{"POWER1":"ON","POWER2":"OFF","POWER3":"ON"}',
+      });
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final results = await Future.wait([
+        repo.control(_deviceId, 1, 'ON'),
+        repo.control(_deviceId, 2, 'OFF'),
+        repo.control(_deviceId, 3, 'ON'),
+      ]);
+
+      expect(locator.mDnsQueries, 1,
+          reason: 'all three controls share the single in-flight discovery');
+      expect(cm.called.where((c) => c == 'Status%205').length, 1,
+          reason: 'the shared discovery verifies once; every control reuses it');
+      expect(results.every((r) => r.source == DeviceTransportSource.local),
+          isTrue);
+    });
+
+    test('a fresh verified cached IP STILL re-verifies before command',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _CmFake(
+        responses: {'Power1%20ON': '{"POWER1":"ON"}', 'State': '{"POWER1":"ON"}'},
+        macByAddress: {'192.168.1.5': [_foreignMacBody]},
+      );
+      final locator = _FakeLocator(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now(),
+      );
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.kind,
+            'kind',
+            TransportFailureKind.logical,
+          ),
+        ),
+      );
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud is tried once (cloud-first); the command-time '
+              're-verify then catches the repurposed box as a logical rejection '
+              'that must surface — never retried on the cloud or the LAN');
+    });
+  });
+
   group('cloud-learned IP candidates seed local discovery', () {
     test('getDevices seeds a candidate for every device lastIp', () async {
       final cloud = _FakeCloudApi()

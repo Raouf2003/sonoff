@@ -31,6 +31,15 @@ const Duration kVerifiedIpTtl = Duration(minutes: 10);
 /// report) for this window after it was read.
 const Duration kLocalReportHold = Duration(seconds: 60);
 
+/// How long a freshly-PROBED identity is trusted before the transport
+/// re-verifies it with `Status 5`. Discovery always verifies a device before
+/// returning an endpoint; this window lets the immediately-following status
+/// read / relay command reuse that verification instead of paying a redundant
+/// probe — the cold-start LAN latency. Fresh verified CACHE hits and warm-cache
+/// reuses are NOT exempt: they re-verify, catching a box that was repurposed
+/// since it was cached.
+const Duration kLocalProbeTrustWindow = Duration(seconds: 30);
+
 /// The single service the devices page uses for relay control and status.
 ///
 /// Relay CONTROL is CLOUD-FIRST (the tap reaches MQTT immediately; the LAN is
@@ -75,6 +84,11 @@ class DeviceRepositoryService {
   /// In-flight discovery futures per deviceId: a background status poll and a
   /// relay tap targeting the same device share ONE bounded discovery window.
   final Map<String, Future<LocalDeviceTransport?>> _discoveryInFlight = {};
+
+  /// When discovery last PROBED (not merely reused a cache) and verified a
+  /// device's identity, keyed by deviceId. Lets the transport skip its own
+  /// duplicate `Status 5` on operations that immediately follow that probe.
+  final Map<String, DateTime> _identityTrustedAt = {};
 
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
@@ -126,6 +140,20 @@ class DeviceRepositoryService {
       await _seedCandidates(cached);
       _lastSource = DeviceTransportSource.local;
       return cached;
+    }
+  }
+
+  /// Fast, best-effort read of the persisted local device list (the last
+  /// cloud-authorised list). Used at cold start so the devices page can render
+  /// the known card structure immediately instead of blocking behind the cloud
+  /// list timeout; the cloud list remains the authoritative source and replaces
+  /// this render when it arrives. Display metadata only — never throws.
+  Future<List<Map<String, dynamic>>> cachedDevices() async {
+    try {
+      return await _cache.cachedDevices();
+    } on Object catch (e) {
+      _log('cached device list unavailable (${_describe(e)})');
+      return const [];
     }
   }
 
@@ -343,12 +371,25 @@ class DeviceRepositoryService {
     );
   }
 
+  /// True when discovery PROBED and verified this device's identity recently,
+  /// so the transport may skip its own redundant `Status 5`. Never true for a
+  /// fresh verified-cache / warm-cache reuse (those keep re-verifying to catch
+  /// a repurposed box), so the same signal that makes a cold LAN fast never
+  /// weakens the identity check for an already-cached endpoint.
+  bool _canSkipIdentityVerify(String deviceId) {
+    final at = _identityTrustedAt[deviceId];
+    return at != null && DateTime.now().difference(at) < kLocalProbeTrustWindow;
+  }
+
   Future<Map<String, dynamic>> _localStatus(String deviceId) async {
     final local = await _findLocal(deviceId, urgent: true);
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    final result = await local.getStatus(deviceId);
+    final result = await local.getStatus(
+      deviceId,
+      identityVerified: _canSkipIdentityVerify(deviceId),
+    );
     _maybeLearnIp(deviceId, local.address, result);
     return result;
   }
@@ -363,7 +404,13 @@ class DeviceRepositoryService {
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    final result = await local.control(deviceId, channel, state, opId: opId);
+    final result = await local.control(
+      deviceId,
+      channel,
+      state,
+      opId: opId,
+      identityVerified: _canSkipIdentityVerify(deviceId),
+    );
     _maybeLearnIp(deviceId, local.address, result);
     return result;
   }
@@ -397,6 +444,7 @@ class DeviceRepositoryService {
           .timeout(const Duration(seconds: 2));
       _warmCache[deviceId] = _buildLocal(ip, deviceId);
       _warmVerifiedAt[deviceId] = DateTime.now();
+      _identityTrustedAt[deviceId] = DateTime.now();
       _log('learned device IP from local report: $ip');
     } on Object catch (e) {
       _log('IP learn failed for $deviceId (${_describe(e)})');
@@ -486,6 +534,7 @@ class DeviceRepositoryService {
             _warmCache[deviceId] = transport;
             _warmVerifiedAt[deviceId] = DateTime.now();
             await _locator.storeVerifiedAddress(deviceId, cached);
+            _identityTrustedAt[deviceId] = DateTime.now();
             _log('verified cached IP: $cached');
             return transport;
           case LocalIdentityCheck.mismatch:
@@ -528,6 +577,7 @@ class DeviceRepositoryService {
         await _locator.storeVerifiedAddress(deviceId, ip);
         _warmCache[deviceId] = transport;
         _warmVerifiedAt[deviceId] = DateTime.now();
+        _identityTrustedAt[deviceId] = DateTime.now();
         _tl(opId, deviceId, channel, 'mDNS verified');
         return transport;
       }

@@ -303,6 +303,33 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   Future<void> _loadDevices() async {
+    // Cold-start progressive load: render the persisted local device list at
+    // once (bounded, best-effort) so the card structure and the local-first
+    // status probe are NEVER gated behind the cloud API timeout — the page must
+    // not wait for the full cloud timeout before attempting LAN. The cloud list
+    // remains the authoritative source and replaces this render when it
+    // arrives; an empty/failed cache simply falls through to the cloud path.
+    try {
+      final cached = await _repository
+          .cachedDevices()
+          .timeout(const Duration(seconds: 2));
+      if (mounted && cached.isNotEmpty && _devices.isEmpty) {
+        setState(() {
+          _devices = cached.cast<Map<String, dynamic>>();
+          _loading = false;
+          _loadError = false;
+        });
+        if (_selectedDeviceId == null) {
+          _selectDevice(_devices.first['deviceId'] as String);
+        }
+        // Warm up verified IPs so the LAN probe is fast; discovery stays
+        // single-flight per device and never blocks the UI.
+        unawaited(_repository.warmUp(_devices));
+      }
+    } catch (_) {
+      // Storage unavailable: fall through to the normal cloud path.
+    }
+
     try {
       // The repository serves the registered list cloud-first and falls back
       // to the local cache on availability failures, so a cloud outage never
@@ -315,6 +342,13 @@ class _DevicesPageState extends State<DevicesPage>
           _loadError = false;
         });
         if (_selectedDeviceId == null && _devices.isNotEmpty) {
+          _selectDevice(_devices.first['deviceId'] as String);
+        } else if (_selectedDeviceId != null &&
+            _devices.isNotEmpty &&
+            !_devices.any((d) => d['deviceId'] == _selectedDeviceId)) {
+          // The authoritative list no longer contains the device selected from
+          // the cached render (e.g. removed elsewhere): fall back to the first
+          // registered device instead of pointing at a phantom.
           _selectDevice(_devices.first['deviceId'] as String);
         }
       }

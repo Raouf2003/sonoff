@@ -325,9 +325,16 @@ class LocalDeviceTransport implements DeviceTransport {
   }
 
   @override
-  Future<Map<String, dynamic>> getStatus(String deviceId) async {
+  Future<Map<String, dynamic>> getStatus(
+    String deviceId, {
+    bool identityVerified = false,
+  }) async {
     _assertTarget(deviceId);
-    await _verifyIdentity();
+    // Identity is verified by discovery (or a fresh cached verification) before
+    // any endpoint is returned. [identityVerified] lets the repository reuse
+    // that just-completed probe so a cold LAN transition does not pay a second,
+    // redundant `Status 5` round trip before the very first local read.
+    if (!identityVerified) await _verifyIdentity();
     final body = await _cm('State');
     return parseLocalState(body);
   }
@@ -338,9 +345,10 @@ class LocalDeviceTransport implements DeviceTransport {
     int channel,
     String state, {
     String? opId,
+    bool identityVerified = false,
   }) async {
     _assertTarget(deviceId);
-    await _verifyIdentity();
+    if (!identityVerified) await _verifyIdentity();
     final expected = state.toUpperCase();
     // Send the command. If this itself fails the device was never reached
     // (availability) — the caller may fall back to cloud.

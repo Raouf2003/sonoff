@@ -49,6 +49,54 @@ class _CloudDownApi extends ApiService {
 }
 
 /// Local Tasmota fetcher stub for widget-level Local Mode tests.
+/// Cloud that is available and answers the device list + status normally —
+/// used to prove the cold-start progressive render also reconciles ONLINE when
+/// the backend is reachable.
+class _CloudApi extends ApiService {
+  _CloudApi({this.devices = const []});
+  final List<Map<String, dynamic>> devices;
+
+  @override
+  Future<List<dynamic>> getDevices() async => devices;
+
+  @override
+  Future<Map<String, dynamic>> getStatus(String deviceId) async => {
+        'online': true,
+        'channels': {'1': 'OFF', '2': 'OFF', '3': 'OFF', '4': 'OFF'},
+      };
+
+  @override
+  Future<Map<String, dynamic>> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async => {
+        'online': true,
+        'channels': {channel: state},
+      };
+}
+
+/// Cloud whose device list NEVER completes — models the slow/absent backend
+/// that used to hold the whole page on the loading spinner until the 15s API
+/// timeout. The cold-start fix must render from the local cache regardless.
+class _HangingCloudApi extends ApiService {
+  @override
+  Future<List<dynamic>> getDevices() => Completer<List<dynamic>>().future;
+
+  @override
+  Future<Map<String, dynamic>> getStatus(String deviceId) =>
+      Completer<Map<String, dynamic>>().future;
+
+  @override
+  Future<Map<String, dynamic>> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async => throw const ApiException('Cloud unavailable', code: 'NETWORK_ERROR');
+}
+
 class _CmFake {
   _CmFake({this.responses = const {}});
   final Map<String, String> responses;
@@ -1075,6 +1123,32 @@ void main() {
 
       await _unmount(tester);
     });
+
+    testWidgets('multiple taps during cold LAN reuse the one probe',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _CloudThenLocalRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget,
+          reason: 'the single disconnect probe already established local evidence');
+
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('CHANNEL 2'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(repo.statusCalls, 2,
+          reason: 'initial load + the ONE disconnect probe — taps add no probe');
+      expect(repo.controlCalls, 2,
+          reason: 'each tap sends its own command but never a duplicate probe');
+
+      await _unmount(tester);
+    });
   });
 
   group('Phase 3: socket-confirmed report resolves pending before REST', () {
@@ -1227,6 +1301,150 @@ void main() {
       repo.releaseControl.complete();
       await tester.pump();
       expect(repo.controlCalls, 1);
+
+      await _unmount(tester);
+    });
+  });
+
+  group('cold-start LAN loading (progressive render)', () {
+    testWidgets('cold start: cloud + LAN both up → device renders from cache '
+        'quickly and reconciles to ONLINE', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudApi(devices: [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ])),
+        locator: _LocatorStub(cached: '192.168.1.5'),
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // Card rendered without waiting on anything and the confirmed local
+      // status filled in the ON/OFF states.
+      expect(find.text('Controller'), findsOneWidget);
+      expect(find.text('DRY'), findsNWidgets(4));
+
+      // Cloud reachability is still UNKNOWN at cold start → the safe cloud-first
+      // default keeps ONLINE (never LAN) until the socket confirms otherwise.
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
+
+      // Socket connects: cloud confirmed reachable → stays ONLINE.
+      socket.fireConnect();
+      await tester.pump();
+      expect(find.text('Online'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cold start: cloud list hangs but LAN device answers → page '
+        'renders immediately, no 15s cloud timeout wait, then LAN badge',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _HangingCloudApi()),
+        locator: _LocatorStub(cached: '192.168.1.5'),
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      // The device card + confirmed states render WITHOUT the cloud list ever
+      // resolving (previously the page stayed on the spinner until the 15s
+      // API timeout expired).
+      expect(find.text('Controller'), findsOneWidget);
+      expect(find.text('DRY'), findsNWidgets(4));
+      expect(find.text('Could not load devices'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing,
+          reason: 'the page must never sit on an infinite spinner');
+
+      // Confirm the cloud outage via the socket monitor → the verified local
+      // evidence resolves the badge to LAN.
+      socket.fireConnectError();
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cold start: cloud down + LAN down + empty cache → proper '
+        'error state, never an infinite spinner', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: _LocatorStub(),
+        cache: LocalDeviceCache(),
+      );
+      await _pumpDevicesPage(tester, repo: repo);
+
+      expect(find.text('Could not load devices'), findsOneWidget);
+      expect(find.textContaining('Check your connection'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cold start: socket still UNKNOWN + no device evidence → '
+        'SYNCING, never a fabricated ONLINE', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: _LocatorStub(), // no LAN device reachable
+        cache: cache,
+      );
+      await _pumpDevicesPage(tester, repo: repo);
+
+      // The card structure renders from the cache, but with NO device evidence
+      // the page must show SYNCING — never ONLINE just because the socket
+      // cloud state is still UNKNOWN (safe cloud-first default).
+      expect(find.text('Controller'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
+      expect(find.text('Offline'), findsNothing);
+      expect(find.text('SYNCING'), findsWidgets);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('cold start: LAN displayed, then cloud reconnects → reconciles '
+        'to ONLINE via existing rules', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final cache = LocalDeviceCache();
+      await cache.upsert(
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4});
+      final cm = _CmFake(responses: {'Status%205': _macBody, 'State': _stateBody});
+      final repo = DeviceRepositoryService(
+        cloud: CloudDeviceTransport(api: _CloudDownApi()),
+        locator: _LocatorStub(cached: '192.168.1.5'),
+        fetch: cm.call,
+        cache: cache,
+      );
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      socket.fireConnectError();
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget);
+
+      // Cloud comes back: existing reconciliation restores ONLINE priority.
+      socket.fireConnect();
+      await tester.pump();
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
 
       await _unmount(tester);
     });
