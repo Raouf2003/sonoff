@@ -23,6 +23,7 @@ class _FakeCloudApi extends ApiService {
   int controlCalls = 0;
   int statusCalls = 0;
   int devicesCalls = 0;
+  String? lastControlOpId;
   List<Map<String, dynamic>> devices = [];
   Map<String, dynamic> statusBody = {};
   Map<String, dynamic> controlBody = {};
@@ -43,6 +44,7 @@ class _FakeCloudApi extends ApiService {
     String? opId,
   }) async {
     controlCalls++;
+    lastControlOpId = opId;
     final err = controlError;
     if (err != null) throw err;
     return {'online': true, 'POWER$channel': state, ...controlBody};
@@ -305,8 +307,9 @@ void main() {
     });
   });
 
-  group('local is preferred and wins', () {
-    test('control: local success never touches the cloud', () async {
+  group('control: cloud-first, local fallback on availability only', () {
+    test('cloud success returns the cloud result; the LAN is never touched',
+        () async {
       final cloud = _FakeCloudApi();
       final cm = _localRelayCm();
       final locator = _FakeLocator(cached: '192.168.1.5');
@@ -314,18 +317,126 @@ void main() {
 
       final result = await repo.control(_deviceId, 1, 'ON');
 
-      expect(cloud.controlCalls, 0,
-          reason: 'a working LAN relay must not need the cloud');
+      expect(cloud.controlCalls, 1);
       expect(result.channels[1]!.state, 'ON');
       expect(result.online, isTrue);
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(cm.called, isEmpty,
+          reason: 'the LAN is never probed when the cloud answered');
+      expect(locator.cachedQueries, 0,
+          reason: 'no local discovery runs on a cloud-first tap');
+      expect(locator.mDnsQueries, 0);
+    });
+
+    test('cloud availability failure falls back to the LAN', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(cloud.controlCalls, 1);
+      expect(result.channels[1]!.state, 'ON');
       expect(result.source, DeviceTransportSource.local);
       expect(locator.mDnsQueries, 0,
-          reason: 'a cached verified IP avoids mDNS entirely');
+          reason: 'the cached verified IP avoids mDNS entirely');
       expect(cm.called,
           containsAll(['Status%205', 'Power1%20ON', 'State']));
     });
 
-    test('status: local success never touches the cloud', () async {
+    test('cloud business rejection is surfaced; the LAN is never touched',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('Forbidden', statusCode: 403);
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            403,
+          ),
+        ),
+      );
+      expect(cloud.controlCalls, 1);
+      expect(cm.called, isEmpty,
+          reason: 'a business rejection must never fall back to the LAN');
+      expect(locator.cachedQueries, 0);
+    });
+
+    test('cloud 5xx is availability: the LAN gets its chance', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('boom', statusCode: 503);
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON');
+
+      expect(cloud.controlCalls, 1);
+      expect(result.source, DeviceTransportSource.local);
+    });
+
+    test('coded cloud 409 (device offline) is surfaced; the LAN is untouched',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException(
+          'Device is offline',
+          statusCode: 409,
+          code: 'DEVICE_OFFLINE',
+        );
+      final repo = _repo(cloud, locator: _FakeLocator());
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<ApiException>()
+              .having((e) => e.statusCode, 'statusCode', 409)
+              .having((e) => e.code, 'code', 'DEVICE_OFFLINE'),
+        ),
+      );
+      expect(cloud.controlCalls, 1);
+    });
+
+    test('cloud unavailable + LAN unavailable → wrapped availability error',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, locator: _FakeLocator());
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.cause,
+            'cause',
+            isNotNull,
+          ),
+        ),
+      );
+      expect(cloud.controlCalls, 1);
+      expect(repo.lastSource, isNull,
+          reason: 'both transports failed — no transport wins');
+    });
+
+    test('opId is propagated to the cloud transport', () async {
+      final cloud = _FakeCloudApi();
+      final repo = _repo(cloud);
+
+      await repo.control(_deviceId, 1, 'ON', opId: 'tap-42');
+
+      expect(cloud.lastControlOpId, 'tap-42');
+    });
+  });
+
+  group('status: local-first with cloud fallback', () {
+    test('local success never touches the cloud', () async {
       final cloud = _FakeCloudApi();
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
@@ -341,40 +452,8 @@ void main() {
       expect(result.channels[2]!.state, 'OFF');
       expect(result.source, DeviceTransportSource.local);
     });
-  });
 
-  group('local availability failure falls back to cloud', () {
-    test('control: no local device → cloud is used once', () async {
-      final cloud = _FakeCloudApi();
-      final repo = _repo(cloud, locator: _FakeLocator());
-
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(cloud.controlCalls, 1);
-      expect(result.channels[1]!.state, 'ON');
-      expect(result.source, DeviceTransportSource.cloud);
-    });
-
-    test('control: local unreachable → cloud is used once', () async {
-      final cloud = _FakeCloudApi();
-      final cm = _CmFake()..unreachable = true;
-      // A previously-VERIFIED address that no longer answers is dead weight and
-      // must be discarded (a cloud-learned CANDIDATE would instead be kept).
-      final locator = _FakeLocator(
-        cached: '192.168.1.5',
-        verifiedAt: DateTime.now().subtract(kVerifiedIpTtl * 2),
-      );
-      final repo = _repo(cloud, locator: locator, cm: cm);
-
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(cloud.controlCalls, 1);
-      expect(result.source, DeviceTransportSource.cloud);
-      expect(locator.discards, 1,
-          reason: 'the dead verified cached IP must not be trusted next time');
-    });
-
-    test('status: no local device → cloud is used once', () async {
+    test('no local device → cloud is used once', () async {
       final cloud = _FakeCloudApi();
       final repo = _repo(cloud, locator: _FakeLocator());
 
@@ -384,34 +463,16 @@ void main() {
       expect(result.channels[1]!.state, 'ON');
       expect(result.source, DeviceTransportSource.cloud);
     });
-
-    test('control: local unavailable + cloud 5xx → both down, wrapped failure',
-        () async {
-      final cloud = _FakeCloudApi()
-        ..controlError = const ApiException('boom', statusCode: 503);
-      final repo = _repo(cloud, locator: _FakeLocator());
-
-      await expectLater(
-        repo.control(_deviceId, 1, 'ON'),
-        throwsA(
-          isA<DeviceTransportException>().having(
-            (e) => e.cause,
-            'cause',
-            isNotNull,
-          ),
-        ),
-      );
-      expect(cloud.controlCalls, 1,
-          reason: 'cloud is attempted after local fails, then both are down');
-    });
   });
 
-  group('local logical rejections are NEVER rerouted to cloud', () {
-    test('control: identity mismatch at command time is surfaced', () async {
-      // Discovery trusts the (fresh) verified cache; the command-time re-verify
-      // discovers the box has been repurposed — a security rejection that must
-      // surface, never fall back to the cloud.
-      final cloud = _FakeCloudApi();
+  group('logical rejections are NEVER rerouted', () {
+    test('control: LAN identity mismatch surfaces after a cloud outage',
+        () async {
+      // Cloud unavailable → the LAN fallback runs, and its command-time
+      // re-verify discovers the box has been repurposed — a security rejection
+      // that must surface, never be retried.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {'Power1%20ON': '{"POWER1":"ON"}', 'State': '{"POWER1":"ON"}'},
         macByAddress: {'192.168.1.5': [_foreignMacBody]},
@@ -432,13 +493,13 @@ void main() {
           ),
         ),
       );
-      expect(cloud.controlCalls, 0,
-          reason: 'a foreign device must never trigger a cloud command');
+      expect(cloud.controlCalls, 1);
     });
 
     test('control: unconfirmed command (read-back mismatch) is surfaced',
         () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       // The relay answers Power1 ON but the follow-up State reads back OFF.
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
@@ -459,27 +520,7 @@ void main() {
               .having((e) => e.code, 'code', 'UNCONFIRMED'),
         ),
       );
-      expect(cloud.controlCalls, 0,
-          reason: 'the device was already contacted — no cloud resend');
-    });
-
-    test('control: local unavailable + coded cloud 409 is surfaced', () async {
-      final cloud = _FakeCloudApi()
-        ..controlError = const ApiException(
-          'Device is offline',
-          statusCode: 409,
-          code: 'DEVICE_OFFLINE',
-        );
-      final repo = _repo(cloud, locator: _FakeLocator());
-
-      await expectLater(
-        repo.control(_deviceId, 1, 'ON'),
-        throwsA(
-          isA<ApiException>()
-              .having((e) => e.statusCode, 'statusCode', 409)
-              .having((e) => e.code, 'code', 'DEVICE_OFFLINE'),
-        ),
-      );
+      expect(cloud.controlCalls, 1);
     });
   });
 
@@ -559,7 +600,10 @@ void main() {
 
   group('discovery ladder and identity verification', () {
     test('concurrent local fallbacks share ONE discovery window', () async {
-      final cloud = _FakeCloudApi();
+      // Cloud unavailable → both taps land on the LAN fallback and must share
+      // one discovery ladder instead of opening two mDNS browsers.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {
           'Status%205': _macBody,
@@ -586,7 +630,8 @@ void main() {
     });
 
     test('fresh verified cached IP is used without re-verification', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _localRelayCm();
       final locator = _FakeLocator(
         cached: '192.168.1.5',
@@ -602,7 +647,8 @@ void main() {
     });
 
     test('stale verified cached IP is re-verified before use', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _localRelayCm();
       final locator = _FakeLocator(
         cached: '192.168.1.5',
@@ -620,7 +666,8 @@ void main() {
 
     test('stale cached IP with a foreign MAC is discarded, mDNS re-discovered',
         () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {
           'Status%205': _macBody,
@@ -649,7 +696,8 @@ void main() {
     });
 
     test('cache miss: identity-verified mDNS candidate is cached', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {
           'Status%205': _macBody,
@@ -671,7 +719,11 @@ void main() {
 
     test('foreign mDNS candidates are ignored (never cached, never commanded)',
         () async {
-      final cloud = _FakeCloudApi();
+      // Cloud unavailable → the LAN fallback runs. Its only mDNS hit is a
+      // foreign box: never cached, never commanded, so the tap ends in a
+      // wrapped availability failure instead of reaching a stranger's relay.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {'Power1%20ON': '{"POWER1":"ON"}', 'State': '{"POWER1":"ON"}'},
         macByAddress: {'10.0.0.2': [_foreignMacBody]},
@@ -679,10 +731,16 @@ void main() {
       final locator = _FakeLocator(candidates: ['10.0.0.2']);
       final repo = _repo(cloud, locator: locator, cm: cm);
 
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(result.source, DeviceTransportSource.cloud,
-          reason: 'no verified local device found — cloud fallback');
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.cause,
+            'cause',
+            isNotNull,
+          ),
+        ),
+      );
       expect(locator.stores, 0,
           reason: 'no foreign device may ever be cached as this device');
       expect(
@@ -694,7 +752,8 @@ void main() {
 
     test('warmUp populates the warm endpoint so a tap skips discovery',
         () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _localRelayCm();
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
@@ -709,7 +768,9 @@ void main() {
       expect(locator.cachedQueries, 1,
           reason: 'the tap hit the warm endpoint, no further discovery');
       expect(locator.mDnsQueries, 0);
-      expect(cloud.controlCalls, 0);
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud is attempted first; the offline tap then uses '
+              'the warm endpoint');
     });
   });
 
@@ -816,8 +877,9 @@ void main() {
 
       final result = await repo.control(_deviceId, 1, 'ON');
 
-      expect(cloud.controlCalls, 0,
-          reason: 'the LAN device was reachable — no cloud needed');
+      expect(cloud.controlCalls, 1,
+          reason: 'cloud is attempted first and fails; the candidate IP is '
+              'then used offline');
       expect(result.channels[1]!.state, 'ON');
       expect(result.source, DeviceTransportSource.local);
       expect(locator.mDnsQueries, 0,
@@ -827,14 +889,22 @@ void main() {
     });
 
     test('an unreachable candidate is KEPT (device may be off)', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake()..unreachable = true;
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
 
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(result.source, DeviceTransportSource.cloud);
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.cause,
+            'cause',
+            isNotNull,
+          ),
+        ),
+      );
       expect(locator.discards, 0,
           reason: 'a cloud-learned hint survives transient unavailability');
       expect(locator.mDnsQueries, 1,
@@ -842,7 +912,8 @@ void main() {
     });
 
     test('a candidate with a foreign MAC is discarded', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(
         responses: {'Power1%20ON': '{"POWER1":"ON"}', 'State': '{"POWER1":"ON"}'},
         macByAddress: {'192.168.1.5': [_foreignMacBody]},
@@ -850,16 +921,24 @@ void main() {
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
 
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(result.source, DeviceTransportSource.cloud);
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.cause,
+            'cause',
+            isNotNull,
+          ),
+        ),
+      );
       expect(locator.discards, 1,
           reason: 'a repurposed address must never be trusted');
     });
 
     test('a local report with a new IPAddress refreshes the discovery cache',
         () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       // The box answers at 192.168.1.5 but reports its current address as
       // 192.168.1.77 (DHCP lease changed).
       final cm = _CmFake(responses: {
@@ -878,7 +957,8 @@ void main() {
     });
 
     test('a matching reported IPAddress does not churn the cache', () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
         'Power1%20ON': '{"POWER1":"ON"}',
@@ -945,15 +1025,25 @@ void main() {
 
     test('an invalid cached address is discarded and never reaches the fetcher',
         () async {
-      final cloud = _FakeCloudApi();
+      // Cloud unavailable → the LAN fallback runs, but its only cached address
+      // is invalid: it is dropped and never fetched, so the tap ends in a
+      // wrapped availability failure.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake();
       final locator = _FakeLocator(cached: '0.0.0.0');
       final repo = _repo(cloud, locator: locator, cm: cm);
 
-      final result = await repo.control(_deviceId, 1, 'ON');
-
-      expect(result.source, DeviceTransportSource.cloud,
-          reason: 'no usable local endpoint — cloud fallback');
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON'),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.cause,
+            'cause',
+            isNotNull,
+          ),
+        ),
+      );
       expect(locator.discards, 1,
           reason: 'the invalid cached endpoint is dropped, never retried');
       expect(cm.called, isEmpty,
@@ -962,7 +1052,8 @@ void main() {
 
     test('a local report carrying IPAddress 0.0.0.0 is never learned',
         () async {
-      final cloud = _FakeCloudApi();
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
         'Power1%20ON': '{"POWER1":"ON"}',

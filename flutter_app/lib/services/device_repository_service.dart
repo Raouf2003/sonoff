@@ -33,16 +33,16 @@ const Duration kLocalReportHold = Duration(seconds: 60);
 
 /// The single service the devices page uses for relay control and status.
 ///
-/// The transport order is LOCAL-FIRST: whenever the phone can reach the device
-/// on the LAN the device's own report (HTTP) is the closest source of truth,
-/// and the cloud is the fallback/remote transport. The two are never combined
-/// for one user action — either the local command confirms, or the cloud
-/// command runs; never both.
+/// Relay CONTROL is CLOUD-FIRST (the tap reaches MQTT immediately; the LAN is
+/// the fallback when the cloud/backend is genuinely unavailable), while STATUS
+/// reads remain LOCAL-FIRST (the device's own HTTP report is the freshest
+/// truth). The two transports are never combined for one user action — the
+/// first transport that succeeds wins, never both.
 ///
-/// Local logical rejections (identity mismatch, unconfirmed command) are NEVER
-/// rerouted to the cloud: an identity violation is a security/ownership matter
-/// and an unconfirmed command means the device was already contacted, so a
-/// cloud resend would be a duplicate execution.
+/// Logical rejections (identity mismatch, unconfirmed command) are NEVER
+/// rerouted: an identity violation is a security/ownership matter and an
+/// unconfirmed command means the device was already contacted, so a resend
+/// would be a duplicate execution.
 class DeviceRepositoryService {
   DeviceRepositoryService({
     CloudDeviceTransport? cloud,
@@ -215,12 +215,15 @@ class DeviceRepositoryService {
     }
   }
 
-  /// Relay command, LOCAL-FIRST. The command is NEVER sent through both
-  /// transports: a local confirmation (device reported the requested state via
-  /// HTTP read-back) wins; otherwise the cloud runs the command once.
+  /// Relay command, CLOUD-FIRST: a tap reaches the backend/MQTT immediately —
+  /// local discovery is never started (nor awaited) before the command. The LAN
+  /// is the fallback, used ONLY when the cloud/backend is genuinely unavailable
+  /// (see [isAvailabilityFailure]). Every logical rejection — auth/ownership,
+  /// validation, command conflicts, coded 409, MAC identity mismatches — is
+  /// surfaced to the user and NEVER rerouted to the LAN.
   ///
-  /// A local logical failure (identity mismatch / unconfirmed command) is
-  /// rethrown, never rerouted to the cloud.
+  /// The command is never sent through both transports for one tap: the first
+  /// transport that succeeds wins.
   ///
   /// [opId] threads the per-tap correlation id into the [ControlTimeline].
   Future<RelayStatusResult> control(
@@ -232,7 +235,40 @@ class DeviceRepositoryService {
     _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
     DeviceTransportException? localFailure;
-    // LOCAL first.
+
+    // CLOUD first.
+    try {
+      _tl(opId, deviceId, channel, 'Cloud request start');
+      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
+      _tl(opId, deviceId, channel, 'Cloud response received');
+      _lastSource = DeviceTransportSource.cloud;
+      await _seedOneCandidate(deviceId, cloud['lastIp']);
+      final result = parseRelayStatus(
+        cloud,
+        source: DeviceTransportSource.cloud,
+        seq: seq,
+      );
+      _log('cloud control success for $deviceId channel $channel');
+      return result;
+    } on Object catch (e) {
+      // A logical rejection (ownership/validation/conflict, coded 409, MAC
+      // identity) must surface to the user — never fall back to the LAN.
+      if (e is ApiException && !isAvailabilityFailure(e)) {
+        _tl(opId, deviceId, channel, 'Cloud request rejected');
+        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
+        rethrow;
+      }
+      if (e is DeviceTransportException &&
+          e.kind == TransportFailureKind.logical) {
+        _tl(opId, deviceId, channel, 'Cloud request rejected');
+        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
+        rethrow;
+      }
+      _tl(opId, deviceId, channel, 'Cloud request failed (availability)');
+      _log('cloud control unavailable for $deviceId (${_describe(e)})');
+    }
+
+    // LOCAL fallback (cloud/backend genuinely unavailable).
     try {
       final local = await _localControl(deviceId, channel, state, opId: opId)
           .timeout(kLocalBudget);
@@ -242,7 +278,7 @@ class DeviceRepositoryService {
       return parseRelayStatus(
         local,
         source: DeviceTransportSource.local,
-        seq: seq,
+        seq: ++_seq,
       );
     } on Object catch (e) {
       if (e is DeviceTransportException &&
@@ -258,35 +294,12 @@ class DeviceRepositoryService {
       _log('local control failed for $deviceId (${_describe(localFailure)})');
     }
 
-    // CLOUD fallback.
-    try {
-      _tl(opId, deviceId, channel, 'Cloud request start');
-      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
-      _tl(opId, deviceId, channel, 'Cloud response received');
-      _lastSource = DeviceTransportSource.cloud;
-      await _seedOneCandidate(deviceId, cloud['lastIp']);
-      final result = parseRelayStatus(
-        cloud,
-        source: DeviceTransportSource.cloud,
-        seq: ++_seq,
-      );
-      _log('cloud control success for $deviceId channel $channel');
-      return result;
-    } on Object catch (e) {
-      if (e is ApiException && !isAvailabilityFailure(e)) rethrow;
-      if (e is DeviceTransportException &&
-          e.kind == TransportFailureKind.logical) {
-        rethrow;
-      }
-      _log('cloud control failed for $deviceId (${_describe(e)})');
-      // Local already failed (any success would have returned above), so both
-      // transports are down: wrap the local failure so the UI gets one
-      // human-readable availability error.
-      throw DeviceTransportException(
-        'The device could not be reached locally or via the cloud.',
-        cause: localFailure,
-      );
-    }
+    // Cloud and LAN both down: one human-readable availability error, keeping
+    // the last transport's underlying failure as the cause for diagnostics.
+    throw DeviceTransportException(
+      'The device could not be reached locally or via the cloud.',
+      cause: localFailure,
+    );
   }
 
   Future<Map<String, dynamic>> _localStatus(String deviceId) async {
