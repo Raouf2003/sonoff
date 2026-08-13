@@ -135,22 +135,21 @@ class DeviceRepositoryService {
   Future<void> _seedCandidates(List<Map<String, dynamic>> devices) async {
     await Future.wait([
       for (final d in devices)
-        () async {
-          final id = d['deviceId'];
-          final ip = d['lastIp'];
-          if (id is! String || id.isEmpty || ip is! String || ip.isEmpty) {
-            return;
-          }
-          if (InternetAddress.tryParse(ip) == null) return;
-          try {
-            await _locator
-                .storeCandidateAddress(id, ip)
-                .timeout(const Duration(seconds: 2));
-          } on Object catch (e) {
-            _log('candidate seed failed for $id (${_describe(e)})');
-          }
-        }(),
+        _seedOneCandidate(d['deviceId'], d['lastIp']),
     ]);
+  }
+
+  Future<void> _seedOneCandidate(Object? id, Object? ip) async {
+    if (id is! String || id.isEmpty || ip is! String || ip.isEmpty) return;
+    if (InternetAddress.tryParse(ip) == null) return;
+    try {
+      await _locator
+          .storeCandidateAddress(id, ip)
+          .timeout(const Duration(seconds: 2));
+      _log('seeded candidate IP for $id: $ip');
+    } on Object catch (e) {
+      _log('candidate seed failed for $id (${_describe(e)})');
+    }
   }
 
   /// Status, LOCAL-FIRST: a live LAN read (the freshest possible report) wins
@@ -181,6 +180,7 @@ class DeviceRepositoryService {
     try {
       final cloud = await _cloud.getStatus(deviceId);
       _lastSource = DeviceTransportSource.cloud;
+      await _seedOneCandidate(deviceId, cloud['lastIp']);
       final result = parseRelayStatus(
         cloud,
         source: DeviceTransportSource.cloud,
@@ -251,6 +251,7 @@ class DeviceRepositoryService {
     try {
       final cloud = await _cloud.control(deviceId, channel, state);
       _lastSource = DeviceTransportSource.cloud;
+      await _seedOneCandidate(deviceId, cloud['lastIp']);
       final result = parseRelayStatus(
         cloud,
         source: DeviceTransportSource.cloud,

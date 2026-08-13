@@ -65,6 +65,10 @@ router.post('/control', async (req, res) => {
     res.json({
       [key]: reported,
       acked: !!outcome.acked,
+      // The device's last-known LAN IP (learned via MQTT telemetry) so the app
+      // can seed a local discovery candidate even if it only ever talks to the
+      // cloud — identity is still verified with `Status 5` before use.
+      lastIp: device.lastIp || null,
       channels: {
         [String(channel)]: {
           state: reported,
@@ -114,6 +118,9 @@ router.get('/status', async (req, res) => {
       status[`POWER${i}`] = status.channels[String(i)].state;
     }
     status.online = deviceStatus.online;
+    // Last-known LAN IP (MQTT telemetry) so the app can seed a local discovery
+    // candidate during normal online status polling.
+    status.lastIp = device.lastIp || null;
     res.json(status);
   } catch (err) {
     console.error('Status error:', err);

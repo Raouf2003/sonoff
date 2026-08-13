@@ -24,6 +24,8 @@ class _FakeCloudApi extends ApiService {
   int statusCalls = 0;
   int devicesCalls = 0;
   List<Map<String, dynamic>> devices = [];
+  Map<String, dynamic> statusBody = {};
+  Map<String, dynamic> controlBody = {};
 
   @override
   Future<List<dynamic>> getDevices() async {
@@ -42,7 +44,7 @@ class _FakeCloudApi extends ApiService {
     controlCalls++;
     final err = controlError;
     if (err != null) throw err;
-    return {'online': true, 'POWER$channel': state};
+    return {'online': true, 'POWER$channel': state, ...controlBody};
   }
 
   @override
@@ -50,7 +52,7 @@ class _FakeCloudApi extends ApiService {
     statusCalls++;
     final err = statusError;
     if (err != null) throw err;
-    return {'online': statusOnline, ...jsonDecode(_statusBody)};
+    return {'online': statusOnline, ...jsonDecode(_statusBody), ...statusBody};
   }
 }
 
@@ -766,6 +768,32 @@ void main() {
       await repo.getDevices();
 
       expect(locator.candidateStores, 0);
+    });
+
+    test('a cloud status response with lastIp seeds the candidate', () async {
+      final cloud = _FakeCloudApi()
+        ..statusBody = {'lastIp': '192.168.1.5'};
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      await repo.getStatus(_deviceId);
+
+      expect(cloud.statusCalls, 1);
+      expect(locator.candidateStores, 1);
+      expect(locator.lastCandidate, '192.168.1.5',
+          reason: 'the online status poll self-seeds without a list refresh');
+    });
+
+    test('a cloud control response with lastIp seeds the candidate', () async {
+      final cloud = _FakeCloudApi()
+        ..controlBody = {'lastIp': '192.168.1.5'};
+      final locator = _FakeLocator();
+      final repo = _repo(cloud, locator: locator);
+
+      await repo.control(_deviceId, 1, 'ON');
+
+      expect(locator.candidateStores, 1);
+      expect(locator.lastCandidate, '192.168.1.5');
     });
 
     test(
