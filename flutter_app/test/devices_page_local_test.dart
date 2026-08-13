@@ -43,8 +43,9 @@ class _CloudDownApi extends ApiService {
   Future<Map<String, dynamic>> control(
     String deviceId,
     int channel,
-    String state,
-  ) async => throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+    String state, {
+    String? opId,
+  }) async => throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
 }
 
 /// Local Tasmota fetcher stub for widget-level Local Mode tests.
@@ -121,8 +122,9 @@ class _FakeRepo extends DeviceRepositoryService {
   Future<RelayStatusResult> control(
     String deviceId,
     int channel,
-    String state,
-  ) async {
+    String state, {
+    String? opId,
+  }) async {
     controlCalls++;
     if (gateControl) {
       // Hold in flight so the busy state and the double-tap guard can be
@@ -169,9 +171,100 @@ class _FakeSocket implements io.Socket {
   void noSuchMethod(Invocation invocation) {}
 }
 
+/// Socket-io client that can be DRIVEN by the test: `on`/`onConnect`/
+/// `onDisconnect`/`onConnectError` handlers are captured so the test can emit
+/// `device_status`/`device_update` events and fire connect/disconnect at will.
+class _ScriptableSocket implements io.Socket {
+  final Map<String, Function> _handlers = {};
+  Function? _onConnect;
+  Function? _onDisconnect;
+  Function? _onConnectError;
+  final List<String> log = [];
+
+  @override
+  Function() on(String event, dynamic handler) {
+    _handlers[event] = handler as Function;
+    return () {};
+  }
+
+  @override
+  io.Socket connect() {
+    log.add('connect');
+    return this;
+  }
+
+  @override
+  io.Socket disconnect() {
+    log.add('disconnect');
+    return this;
+  }
+
+  @override
+  void dispose() {}
+
+  @override
+  void noSuchMethod(Invocation invocation) {
+    final arg = invocation.positionalArguments.isNotEmpty
+        ? invocation.positionalArguments.first
+        : null;
+    if (arg is Function) {
+      if (invocation.memberName == #onConnect) _onConnect = arg;
+      if (invocation.memberName == #onDisconnect) _onDisconnect = arg;
+      if (invocation.memberName == #onConnectError) _onConnectError = arg;
+    }
+  }
+
+  void fireConnect() => _onConnect?.call(null);
+  void fireDisconnect() => _onDisconnect?.call(null);
+  void fireConnectError() => _onConnectError?.call(null);
+  void push(String event, dynamic data) {
+    final h = _handlers[event];
+    if (h != null) h(data);
+  }
+}
+
+/// Repository whose status reads always fail (availability). Used to prove a
+/// single poll failure does not flip the card OFFLINE and that only the
+/// repeated-failure threshold may.
+class _StatusFailingRepo extends _FakeRepo {
+  @override
+  Future<RelayStatusResult> getStatus(String deviceId) async {
+    throw const ApiException('Could not reach the server', code: 'NETWORK_ERROR');
+  }
+}
+
+/// Repository whose control command reports a STALE (older) device state when
+/// it finally resolves — used to prove the late REST response can never
+/// regress a newer Socket.IO-confirmed report.
+class _StaleControlRepo extends _FakeRepo {
+  _StaleControlRepo({super.gateControl = true});
+
+  final DateTime staleAt =
+      DateTime.now().subtract(const Duration(minutes: 5));
+
+  @override
+  Future<RelayStatusResult> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async {
+    controlCalls++;
+    if (gateControl) await releaseControl.future;
+    // Always reports OFF with an OLD timestamp, regardless of the request.
+    return RelayStatusResult(
+      online: true,
+      channels: {channel: ChannelReport('OFF', updatedAt: staleAt)},
+      source: source,
+      seq: 1,
+    );
+  }
+}
+
 Future<void> _pumpDevicesPage(
   WidgetTester tester, {
   required DeviceRepositoryService repo,
+  io.Socket Function(String url, Map<String, dynamic> options)? socketFactory,
 }) async {
   _mockSecureStorage(tester);
   await tester.pumpWidget(
@@ -181,7 +274,7 @@ Future<void> _pumpDevicesPage(
         body: DevicesPage.test(
           onNavigateToTab: (_) {},
           testRepository: repo,
-          testSocketFactory: (url, opts) => _FakeSocket(),
+          testSocketFactory: socketFactory ?? (url, opts) => _FakeSocket(),
         ),
       ),
     ),
@@ -318,8 +411,8 @@ void main() {
     });
 
     testWidgets(
-        'cloud down + cache present + no local device → offline, not a load '
-        'error (#11)', (tester) async {
+        'cloud down + cache present + no local device → SYNCING, not OFFLINE, '
+        'after a single status failure (#11)', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
       await cache.upsert(
@@ -334,8 +427,11 @@ void main() {
 
       expect(find.text('Controller'), findsOneWidget);
       expect(find.textContaining('Could not load devices'), findsNothing);
-      // Both transports failed for the STATUS, so the card is offline.
-      expect(find.text('Offline'), findsOneWidget);
+      // A SINGLE failed status poll is weak evidence: the card must show
+      // SYNCING (unknown), never a fabricated OFFLINE. Only the repeated
+      // failure threshold (or LWT Offline) may mark it offline.
+      expect(find.text('Offline'), findsNothing);
+      expect(find.text('SYNCING'), findsWidgets);
 
       await _unmount(tester);
     });
@@ -375,4 +471,267 @@ void main() {
       await _unmount(tester);
     });
   });
+
+  group('connectivity model (Phase 1)', () {
+    testWidgets('socket disconnect does NOT mark the device OFFLINE',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      expect(find.text('Online'), findsOneWidget);
+
+      socket.fireDisconnect();
+      await tester.pump();
+
+      expect(find.text('Online'), findsOneWidget,
+          reason: 'a Socket.IO transport drop is not device-offline evidence');
+      expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('a single REST status failure leaves the card SYNCING, not OFFLINE',
+        (tester) async {
+      final repo = _StatusFailingRepo();
+      await _pumpDevicesPage(tester, repo: repo);
+
+      expect(find.text('Offline'), findsNothing,
+          reason: 'one failed poll must not mark the device OFFLINE');
+      expect(find.text('SYNCING'), findsWidgets);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('repeated consecutive status failures mark the device OFFLINE',
+        (tester) async {
+      final repo = _StatusFailingRepo();
+      await _pumpDevicesPage(tester, repo: repo);
+
+      // The first failure happened during initial load (SYNCING). Two more
+      // 15s poll ticks cross the 3-failure threshold (strong evidence).
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+
+      expect(find.text('Offline'), findsOneWidget,
+          reason: '3 consecutive poll failures are strong offline evidence');
+
+      await _unmount(tester);
+    });
+
+    testWidgets('explicit LWT Offline via device_status marks the device OFFLINE',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      expect(find.text('Online'), findsOneWidget);
+
+      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+      await tester.pump();
+
+      expect(find.text('Offline'), findsOneWidget,
+          reason: 'LWT Offline is authoritative device-offline evidence');
+
+      await _unmount(tester);
+    });
+
+    testWidgets('a positive device_status report restores ONLINE after LWT Offline',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+      await tester.pump();
+      expect(find.text('Offline'), findsOneWidget);
+
+      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+      await tester.pump();
+
+      expect(find.text('Online'), findsOneWidget,
+          reason: 'a positive device report restores ONLINE');
+      expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('a cloud device_status event cannot overwrite fresher local evidence',
+        (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      expect(find.text('LAN'), findsOneWidget);
+
+      // A cloud LWT-offline event lands while the local session is still fresh.
+      socket.push('device_status', {'deviceId': _deviceId, 'online': false});
+      await tester.pump();
+
+      expect(find.text('LAN'), findsOneWidget,
+          reason: 'fresher local evidence must never be overwritten by a stale '
+              'cloud verdict');
+      expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+  });
+
+  group('Phase 3: socket-confirmed report resolves pending before REST', () {
+    testWidgets('a confirmed device_update resolves TURNING… immediately',
+        (tester) async {
+      final repo = _FakeRepo(gateControl: true);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      expect(find.text('DRY'), findsNWidgets(4));
+
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(find.text('TURNING…'), findsOneWidget);
+      expect(repo.controlCalls, 1);
+
+      // The device confirms ON over Socket.IO while the REST command is still
+      // in flight (gated). The pill must resolve immediately.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'ON',
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      await tester.pump();
+
+      expect(find.text('TURNING…'), findsNothing,
+          reason: 'a confirmed device report must resolve the pending tap');
+      expect(find.text('FLOWING'), findsOneWidget);
+      expect(find.text('DRY'), findsNWidgets(3));
+
+      // The later REST response completes the lifecycle WITHOUT a second
+      // command and without re-enabling pending.
+      repo.releaseControl.complete();
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('FLOWING'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('only a strictly-newer socket report may commit or flip state',
+        (tester) async {
+      final repo = _FakeRepo(gateControl: true);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(find.text('TURNING…'), findsOneWidget);
+
+      // Fresh report: commits ON, resolves the pending tap.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'ON',
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      await tester.pump();
+      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('FLOWING'), findsOneWidget);
+
+      // A STALE report (older than the confirmed ON) must neither commit nor
+      // flip the channel back — only strictly-newer reports may.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'OFF',
+        'updatedAt': DateTime.now()
+            .subtract(const Duration(minutes: 10))
+            .toIso8601String(),
+      });
+      await tester.pump();
+
+      expect(find.text('FLOWING'), findsOneWidget,
+          reason: 'a stale report must never regress the newer confirmed state');
+      // Channels 2-4 were never touched and remain DRY.
+      expect(find.text('DRY'), findsNWidgets(3));
+
+      repo.releaseControl.complete();
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+      expect(find.text('FLOWING'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('a late REST response cannot regress the newer socket-confirmed state',
+        (tester) async {
+      final repo = _StaleControlRepo(gateControl: true);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(find.text('TURNING…'), findsOneWidget);
+
+      // Socket confirms ON (newer).
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'ON',
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      await tester.pump();
+      expect(find.text('FLOWING'), findsOneWidget);
+
+      // The REST response lands late and reports OFF with an OLDER timestamp.
+      // The staleness guard must keep the socket-confirmed ON.
+      repo.releaseControl.complete();
+      await tester.pump();
+
+      expect(find.text('FLOWING'), findsOneWidget,
+          reason: 'a stale REST report must never regress the newer confirmed state');
+      expect(find.text('DRY'), findsNWidgets(3));
+      expect(repo.controlCalls, 1);
+
+      await _unmount(tester);
+    });
+
+    testWidgets('a tap after socket confirmation does not spawn a second command '
+        'while REST is in flight', (tester) async {
+      final repo = _FakeRepo(gateControl: true);
+      final socket = _ScriptableSocket();
+      await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+
+      // Socket confirms ON: pending clears but the single-flight guard stays
+      // until the REST lifecycle completes.
+      socket.push('device_update', {
+        'deviceId': _deviceId,
+        'channel': 1,
+        'state': 'ON',
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      await tester.pump();
+      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('FLOWING'), findsOneWidget);
+
+      // Second tap during the still-in-flight REST must be ignored.
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(repo.controlCalls, 1,
+          reason: 'exactly one command per tap: the guard persists until REST finishes');
+
+      repo.releaseControl.complete();
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+
+      await _unmount(tester);
+    });
+  });
 }
+

@@ -2,12 +2,14 @@ const express = require('express');
 const Device = require('../models/Device');
 const mqttGateway = require('../services/mqttGateway');
 const runtimeState = require('../services/runtimeState');
+const { timeline } = require('../services/timeline');
 
 const router = express.Router();
 
 router.post('/control', async (req, res) => {
   try {
-    const { deviceId, channel, state } = req.body;
+    const { deviceId, channel, state, opId } = req.body;
+    timeline(deviceId, channel, opId, 'Backend request received');
 
     if (!deviceId || !channel || !state) {
       return res.status(400).json({ error: 'deviceId, channel, and state are required' });
@@ -41,15 +43,23 @@ router.post('/control', async (req, res) => {
 
     let outcome;
     try {
-      outcome = await mqttGateway.publishCommand(device.deviceId, channel, state.toUpperCase());
+      outcome = await mqttGateway.publishCommand(
+        device.deviceId,
+        channel,
+        state.toUpperCase(),
+        opId,
+      );
     } catch (err) {
       if (err.code === 'ACK_TIMEOUT') {
+        timeline(device.deviceId, channel, opId, 'ACK_TIMEOUT');
         return res.status(504).json({ error: 'Device did not acknowledge the command' });
       }
       if (err.code === 'SUPERSEDED') {
+        timeline(device.deviceId, channel, opId, 'SUPERSEDED');
         return res.status(409).json({ error: 'A newer command superseded this one', code: 'SUPERSEDED' });
       }
       if (err.code === 'MQTT_DISCONNECTED' || /not connected|connection closed|connection reset/i.test(err.message || '')) {
+        timeline(device.deviceId, channel, opId, 'MQTT_DISCONNECTED');
         return res.status(503).json({ error: 'MQTT broker not connected' });
       }
       return res.status(500).json({ error: `Failed to publish command: ${err.message}` });
@@ -62,9 +72,11 @@ router.post('/control', async (req, res) => {
     const key = `POWER${channel}`;
     const entry = runtimeState.getDeviceState(device.deviceId);
     const chEntry = entry ? entry.channels[channel] : null;
+    timeline(device.deviceId, channel, opId, 'HTTP ACK response sent');
     res.json({
       [key]: reported,
       acked: !!outcome.acked,
+      opId: opId || null,
       // The device's last-known LAN IP (learned via MQTT telemetry) so the app
       // can seed a local discovery candidate even if it only ever talks to the
       // cloud — identity is still verified with `Status 5` before use.

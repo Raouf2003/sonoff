@@ -12,14 +12,19 @@ class RuntimeState {
   // observed reporting a real state must never be presented as a confident
   // "OFF". Only device reports (MQTT STATE/RESULT/POWERn) can turn a channel
   // into ON/OFF, and each report is timestamped.
-  ensureDeviceState(deviceId, channels) {
+    ensureDeviceState(deviceId, channels) {
     let state = this.deviceStates.get(deviceId);
     if (!state) {
       const chans = {};
       for (let i = 1; i <= channels; i++) {
         chans[i] = { state: 'UNKNOWN', updatedAt: null };
       }
-      state = { channels: chans, lastSeen: null, online: false };
+      // `online` mirrors the latest LWT/heartbeat intent; `offline` latches an
+      // explicit LWT Offline and is only cleared by a positive device report
+      // (tele/STATE, stat/RESULT, POWERn, LWT Online). `lastSeen` records when
+      // the device last produced ANY MQTT packet and must NEVER override an
+      // explicit `offline` (see isOnline).
+      state = { channels: chans, lastSeen: null, online: false, offline: false };
       this.deviceStates.set(deviceId, state);
     }
     return state.channels;
@@ -38,21 +43,34 @@ class RuntimeState {
     return chans[channel];
   }
 
+  // Any positive device report (tele/STATE, stat/RESULT, raw POWERn) is
+  // liveness evidence: it restores ONLINE and clears an explicit LWT Offline.
   touchDevice(deviceId) {
     const state = this.deviceStates.get(deviceId);
-    if (state) state.lastSeen = Date.now();
+    if (state) {
+      state.lastSeen = Date.now();
+      state.online = true;
+      state.offline = false;
+    }
   }
 
+  // LWT-driven connectivity. `setOnline(false)` (LWT Offline) is AUTHORITATIVE
+  // device-offline evidence: it latches `offline` so stale `lastSeen` cannot
+  // keep the device online. Only a positive report (touchDevice / LWT Online)
+  // clears it.
   setOnline(deviceId, online) {
     const state = this.deviceStates.get(deviceId);
     if (!state) return;
     state.online = online;
+    state.offline = !online;
     if (online) state.lastSeen = Date.now();
   }
 
   isOnline(deviceId) {
     const state = this.deviceStates.get(deviceId);
     if (!state) return false;
+    // An explicit LWT Offline is authoritative and beats any telemetry age.
+    if (state.offline) return false;
     if (state.online) return true;
     // Fallback: recent telemetry counts as alive even without an LWT event.
     // Uses the same freshMs window as `touchDevice` so devices don't flicker

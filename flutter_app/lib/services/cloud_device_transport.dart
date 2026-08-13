@@ -32,8 +32,9 @@ class CloudDeviceTransport implements DeviceTransport {
   Future<Map<String, dynamic>> control(
     String deviceId,
     int channel,
-    String state,
-  ) {
-    return _api.control(deviceId, channel, state);
+    String state, {
+    String? opId,
+  }) {
+    return _api.control(deviceId, channel, state, opId: opId);
   }
 }

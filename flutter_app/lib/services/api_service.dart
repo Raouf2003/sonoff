@@ -270,11 +270,17 @@ class ApiService {
     return _checkObject(res, const [200], 'Failed to fetch status');
   }
 
-  Future<Map<String, dynamic>> control(String deviceId, int channel, String state) async {
+  Future<Map<String, dynamic>> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async {
     final res = await post('/api/control', {
       'deviceId': deviceId,
       'channel': channel,
       'state': state,
+      'opId': ?opId,
     });
     return _checkObject(res, const [200], 'Control failed');
   }

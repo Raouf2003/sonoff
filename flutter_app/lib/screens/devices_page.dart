@@ -5,11 +5,19 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/auth_service.dart';
+import '../services/control_timeline.dart';
 import '../services/device_repository_service.dart';
 import '../services/device_transport.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
+
+/// Device-level connectivity, kept SEPARATE from Socket.IO transport state.
+/// `online` requires recent confirmed device evidence; `offline` requires
+/// authoritative LWT Offline or repeated failure evidence; everything else is
+/// `unknown` (SYNCING). A socket drop or a single failed poll must never flip
+/// the pill offline by itself.
+enum _DeviceConnectivity { online, unknown, offline }
 
 /// Per-channel state on the devices page. `reported` is ONLY ever set from a
 /// device report (local HTTP read-back, cloud MQTT report via socket/poll).
@@ -60,7 +68,18 @@ class _DevicesPageState extends State<DevicesPage>
   int _deviceChannels = 4;
 
   io.Socket? _socket;
-  bool _connected = false;
+  _DeviceConnectivity _connectivity = _DeviceConnectivity.unknown;
+
+  // When the DEVICE last produced positive evidence (confirmed channel report,
+  // online status/control result, or online socket event). Used to distinguish
+  // "never seen / stale → SYNCING" from "confirmed before, now authoritative
+  // offline → OFFLINE". This is device evidence, not socket/transport state.
+  DateTime? _lastDeviceEvidenceAt;
+
+  // When the phone last completed a successful LOCAL (verified LAN) operation.
+  // Fresh local evidence must never be overwritten by a stale cloud verdict.
+  DateTime? _lastLocalEvidenceAt;
+
   Timer? _statusTimer;
 
   static const int _maxPollFailures = 3;
@@ -79,18 +98,26 @@ class _DevicesPageState extends State<DevicesPage>
 
   bool _statusInFlight = false;
 
-  void _setConnected(bool connected) {
-    if (!mounted || _connected == connected) return;
-    setState(() => _connected = connected);
+  // device:channel -> opId of the command currently in flight, so a socket
+  // device_update for that relay can be correlated to its tap for the
+  // end-to-end timing timeline.
+  final Map<String, String> _inFlightOps = {};
+
+  bool get _isOnline => _connectivity == _DeviceConnectivity.online;
+  bool get _isOffline => _connectivity == _DeviceConnectivity.offline;
+
+  void _setConnectivity(_DeviceConnectivity value) {
+    if (!mounted || _connectivity == value) return;
+    setState(() => _connectivity = value);
   }
 
-  // The socket reflects CLOUD reachability only. When the last successful
-  // operation ran on the LAN, a cloud outage must not flip the card offline —
-  // the device is reachable and controllable locally. Polling re-establishes
-  // truth in every other case.
+  // The socket reflects CLOUD reachability only. Device connectivity is
+  // decided from DEVICE evidence (reports/polls/LWT), never from the transport
+  // socket itself. When the last successful operation ran on the LAN, a cloud
+  // outage must not flip the card offline — the device is reachable and
+  // controllable locally. Polling re-establishes truth in every other case.
   void _socketDown() {
-    if (_lastTransportSource == DeviceTransportSource.local) return;
-    _setConnected(false);
+    // No-op by design: a Socket.IO disconnect is NOT device-offline evidence.
   }
 
   // Stops every ripple so an OFF channel is never left animating.
@@ -105,12 +132,15 @@ class _DevicesPageState extends State<DevicesPage>
   /// command/status, cloud poll, socket event — funnels through here and is
   /// rejected when it is stale. A device report with `state == null` means
   /// UNKNOWN: it never fabricates OFF and never clears a confirmed state.
-  void _applyChannelReport(
+  /// Applies a confirmed device report for a channel. Returns true only when
+  /// the report was actually committed (i.e. it is genuinely NEWER than current
+  /// state) — false for stale/older reports that must never regress the UI.
+  bool _applyChannelReport(
     int index,
     ChannelReport report,
     DeviceTransportSource source,
   ) {
-    if (index < 0 || index >= _deviceChannels) return;
+    if (index < 0 || index >= _deviceChannels) return false;
     final ch = _channels[index];
     final now = DateTime.now();
 
@@ -122,8 +152,9 @@ class _DevicesPageState extends State<DevicesPage>
           ch.updatedAt = report.updatedAt ?? now;
           ch.seq++;
         });
+        return true;
       }
-      return;
+      return false;
     }
 
     final incomingTs = report.updatedAt ?? now;
@@ -133,7 +164,7 @@ class _DevicesPageState extends State<DevicesPage>
       if (ch.serverTs != null &&
           report.updatedAt != null &&
           !report.updatedAt!.isAfter(ch.serverTs!)) {
-        return;
+        return false;
       }
       // A fresh LAN read is the closest truth. A cloud report may only replace
       // it when the backend genuinely has newer (recent) information.
@@ -142,7 +173,7 @@ class _DevicesPageState extends State<DevicesPage>
           now.difference(ch.updatedAt!) < kLocalReportHold;
       final cloudFresh = report.updatedAt == null ||
           now.difference(report.updatedAt!) < _kCloudFreshWindow;
-      if (hasFreshLocal && !cloudFresh) return;
+      if (hasFreshLocal && !cloudFresh) return false;
     } else {
       // Local is the freshest possible report; only a strictly-newer local
       // read may replace the current one (guards an older local read that
@@ -150,10 +181,12 @@ class _DevicesPageState extends State<DevicesPage>
       if (ch.source == DeviceTransportSource.local &&
           ch.updatedAt != null &&
           incomingTs.isBefore(ch.updatedAt!)) {
-        return;
+        return false;
       }
     }
 
+    // A confirmed device state is positive liveness evidence.
+    _lastDeviceEvidenceAt = now;
     setState(() {
       ch.reported = report.state;
       ch.updatedAt = incomingTs;
@@ -169,11 +202,49 @@ class _DevicesPageState extends State<DevicesPage>
         _rippleControllers[index].reset();
       }
     });
+    return true;
+  }
+
+  /// Clears the visual pending state for a relay whose command has been
+  /// confirmed by a device report. Keeps the single-flight `_pendingRelays`
+  /// guard in place until the REST lifecycle finishes, so a tap can never
+  /// spawn a second command.
+  void _resolvePendingForChannel(int channel, String opId) {
+    final index = channel - 1;
+    final key = '${_selectedDeviceId}_$channel';
+    if (index < 0 || index >= _deviceChannels) return;
+    if (!_pendingRelays.contains(key)) return;
+    setState(() {
+      _channels[index].pending = false;
+      _channels[index].desired = null;
+      _channelLoading[index] = false;
+    });
+    ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'UI confirmed (socket)');
   }
 
   void _applyResult(RelayStatusResult result) {
+    final freshLocal = _lastLocalEvidenceAt != null &&
+        DateTime.now().difference(_lastLocalEvidenceAt!) < kLocalReportHold;
     _lastTransportSource = result.source;
-    _setConnected(result.online);
+    if (result.source == DeviceTransportSource.local) {
+      // A verified local report is always positive liveness evidence.
+      _lastLocalEvidenceAt = DateTime.now();
+      _lastDeviceEvidenceAt = DateTime.now();
+      _setConnectivity(_DeviceConnectivity.online);
+    } else if (result.online) {
+      _lastDeviceEvidenceAt = DateTime.now();
+      _setConnectivity(_DeviceConnectivity.online);
+    } else if (freshLocal) {
+      // A stale cloud "offline" verdict must never kill a live local session.
+      _setConnectivity(_DeviceConnectivity.online);
+    } else if (_lastDeviceEvidenceAt != null) {
+      // The device was confirmed before and the cloud now reports
+      // authoritative offline (LWT): strong evidence, so OFFLINE.
+      _setConnectivity(_DeviceConnectivity.offline);
+    } else {
+      // No confirmed device evidence yet: SYNCING, never a fabricated OFFLINE.
+      _setConnectivity(_DeviceConnectivity.unknown);
+    }
     for (final e in result.channels.entries) {
       _applyChannelReport(e.key - 1, e.value, result.source);
     }
@@ -332,9 +403,20 @@ class _DevicesPageState extends State<DevicesPage>
         final deviceId = map['deviceId'] as String?;
         if (deviceId != null && deviceId != _selectedDeviceId) return;
         final online = map['online'] == true;
+        final freshLocal = _lastLocalEvidenceAt != null &&
+            DateTime.now().difference(_lastLocalEvidenceAt!) < kLocalReportHold;
+        // A cloud status event must never overwrite a fresher local session.
+        if (freshLocal) return;
         // A socket event is always cloud truth.
         _lastTransportSource = DeviceTransportSource.cloud;
-        _setConnected(online);
+        if (online) {
+          // Positive device report: restore ONLINE.
+          _lastDeviceEvidenceAt = DateTime.now();
+          _setConnectivity(_DeviceConnectivity.online);
+        } else {
+          // Explicit MQTT LWT Offline — authoritative device-offline evidence.
+          _setConnectivity(_DeviceConnectivity.offline);
+        }
       } catch (_) {
         // Ignore malformed event; polling re-establishes truth.
       }
@@ -352,11 +434,27 @@ class _DevicesPageState extends State<DevicesPage>
         DateTime? updatedAt;
         final ua = map['updatedAt'];
         if (ua is String) updatedAt = DateTime.tryParse(ua);
-        _applyChannelReport(
+        // Phase 2: correlate this socket report to the in-flight tap so the
+        // timeline can answer "did Socket.IO confirm before the REST response?"
+        final opId = _inFlightOps['$_selectedDeviceId:$channel'];
+        if (opId != null) {
+          ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+              'Socket.IO received (device_update)');
+        }
+        final committed = _applyChannelReport(
           channel - 1,
           ChannelReport(state == 'UNKNOWN' ? null : state, updatedAt: updatedAt),
           DeviceTransportSource.cloud,
         );
+        // Phase 3: a Socket.IO report that the device itself confirmed is
+        // authoritative and may resolve the pending tap immediately — but ONLY
+        // when it was actually committed as newer (the `_applyChannelReport`
+        // return value), for the right device/channel (guarded above). The
+        // later REST response still completes the command lifecycle, but can
+        // no longer re-enable pending or regress this confirmed state.
+        if (opId != null && committed && state != null && state != 'UNKNOWN') {
+          _resolvePendingForChannel(channel, opId);
+        }
       } catch (_) {
         // Ignore malformed event; polling re-establishes truth.
       }
@@ -386,15 +484,12 @@ class _DevicesPageState extends State<DevicesPage>
       _applyResult(result);
     } catch (e) {
       if (mounted) {
-        if (!silent) {
-          _setConnected(false);
-          _showError('Failed to fetch status');
-        } else {
-          // Background polling: stay silent until several consecutive failures.
-          _pollFailures++;
-          if (_pollFailures >= _maxPollFailures) {
-            _setConnected(false);
-          }
+        if (!silent) _showError('Failed to fetch status');
+        // A single failed poll is NOT device-offline evidence (flicker guard).
+        // Only repeated consecutive failures count as strong evidence.
+        _pollFailures++;
+        if (_pollFailures >= _maxPollFailures) {
+          _setConnectivity(_DeviceConnectivity.offline);
         }
       }
     } finally {
@@ -404,14 +499,16 @@ class _DevicesPageState extends State<DevicesPage>
 
   Future<void> _toggle(int channel, bool targetState) async {
     if (_selectedDeviceId == null) return;
-    // No `_connected` gate here: the repository owns reachability. This lets a
+    // No connectivity gate here: the repository owns reachability. This lets a
     // tap reach the transport layer so the local-first path can run; the card
-    // visuals still reflect `_connected`.
+    // visuals still reflect `_connectivity`.
     final key = '${_selectedDeviceId}_$channel';
     if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
     final ch = _channels[index];
     final seqBefore = ch.seq;
+    final opId = ControlTimeline.begin(_selectedDeviceId!, channel);
+    _inFlightOps['$_selectedDeviceId:$channel'] = opId;
     _pendingRelays.add(key);
     setState(() {
       ch.pending = true;
@@ -423,24 +520,44 @@ class _DevicesPageState extends State<DevicesPage>
         _selectedDeviceId!,
         channel,
         targetState ? 'ON' : 'OFF',
+        opId: opId,
       );
-      if (!mounted) return;
+      if (!mounted) {
+        ControlTimeline.end(opId);
+        return;
+      }
       _lastTransportSource = result.source;
-      _setConnected(result.online);
+      ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+          'HTTP response received');
+      // The socket may already have confirmed this relay (Phase 3): then
+      // pending is already resolved and this REST response must only finish
+      // the lifecycle, never re-enable pending or regress the confirmed state.
+      final alreadyResolved = !ch.pending;
       setState(() {
         ch.pending = false;
         ch.desired = null;
         _channelLoading[index] = false;
       });
+      ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+          alreadyResolved ? 'REST completed (already resolved)' : 'Pending cleared');
       _applyResult(result);
+      if (!alreadyResolved) {
+        ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+            'UI confirmed (REST)');
+      }
       // If the changed channel did not come back with a confirmed report,
       // reconcile immediately rather than leaving a silent pending state.
       if (result.channels[channel]?.state == null) {
         _fetchStatus(silent: true);
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        ControlTimeline.end(opId);
+        return;
+      }
+      ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Command failed');
       final msg = e.toString().replaceFirst('Exception: ', '');
+      final socketConfirmed = ch.seq != seqBefore;
       setState(() {
         ch.pending = false;
         ch.desired = null;
@@ -454,14 +571,22 @@ class _DevicesPageState extends State<DevicesPage>
           ch.updatedAt = null;
         }
       });
-      if (msg.toLowerCase().contains('not connected') ||
-          msg.toLowerCase().contains('offline') ||
-          msg.toLowerCase().contains('powered off')) {
-        _setConnected(false);
+      if (socketConfirmed) {
+        // The device already confirmed a newer state (e.g. via tele/STATE)
+        // while the REST wait timed out: the UI shows the truth, so a scary
+        // error toast would contradict the confirmed state. Stay quiet.
+        ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+            'REST failed but socket confirmed');
+      } else {
+        // Connectivity is NOT decided here: a single command failure is weak
+        // evidence and the reconcile poll below re-establishes truth from the
+        // device report (or the repeated-failure threshold).
+        _showError(msg);
       }
-      _showError(msg);
       _fetchStatus(silent: true); // reconcile
     } finally {
+      _inFlightOps.remove('$_selectedDeviceId:$channel');
+      ControlTimeline.end(opId);
       _pendingRelays.remove(key);
     }
   }
@@ -698,7 +823,7 @@ class _DevicesPageState extends State<DevicesPage>
           colors: [colors.submerged, colors.surface],
         ),
         border: Border.all(
-          color: _connected
+          color: _isOnline
               ? colors.stream.withValues(alpha: 0.25)
               : colors.border,
         ),
@@ -706,7 +831,7 @@ class _DevicesPageState extends State<DevicesPage>
       ),
       child: Row(
         children: [
-          _HeroIcon(connected: _connected),
+          _HeroIcon(connected: _isOnline),
           const SizedBox(width: AppSpacing.md),
           Expanded(
             child: Column(
@@ -727,7 +852,7 @@ class _DevicesPageState extends State<DevicesPage>
                   // When the device is unreachable the flowing count is not
                   // live truth (it is only the last-known relay states), so the
                   // summary stops implying current flow and shows zones alone.
-                  _connected
+                  _isOnline
                       ? '$channelsCount zones · $_activeCount flowing'
                       : '$channelsCount zones',
                   style: GoogleFonts.inter(
@@ -739,7 +864,7 @@ class _DevicesPageState extends State<DevicesPage>
               ],
             ),
           ),
-          _StatusPill(connected: _connected, source: _lastTransportSource),
+          _StatusPill(connectivity: _connectivity, source: _lastTransportSource),
         ],
       ),
     );
@@ -799,7 +924,7 @@ class _DevicesPageState extends State<DevicesPage>
             reported: _channels[i].reported,
             pending: _channels[i].pending,
             loading: _channelLoading[i],
-            offline: !_connected,
+            offline: _isOffline,
             entrance: _entranceControllers[i],
             ripple: _rippleControllers[i],
             onToggle: (val) => _toggle(i + 1, val),
@@ -878,17 +1003,23 @@ class _HeroIcon extends StatelessWidget {
 }
 
 class _StatusPill extends StatelessWidget {
-  final bool connected;
+  final _DeviceConnectivity connectivity;
   final DeviceTransportSource? source;
-  const _StatusPill({required this.connected, this.source});
+  const _StatusPill({required this.connectivity, this.source});
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     // 'LAN' is the subtle Local Mode indicator: same styling as 'Online' so the
     // relay UI itself never changes; only the label differentiates transport.
-    final isLocal = connected && source == DeviceTransportSource.local;
-    final color = connected ? colors.leaf : colors.mist;
+    final isOnline = connectivity == _DeviceConnectivity.online;
+    final isLocal = isOnline && source == DeviceTransportSource.local;
+    final color = isOnline ? colors.leaf : colors.mist;
+    final label = isOnline
+        ? (isLocal ? 'LAN' : 'Online')
+        : connectivity == _DeviceConnectivity.offline
+            ? 'Offline'
+            : 'SYNCING';
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.sm + 2,
@@ -907,7 +1038,7 @@ class _StatusPill extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: color,
-              boxShadow: connected
+              boxShadow: isOnline
                   ? [
                       BoxShadow(
                         color: color.withValues(alpha: 0.35),
@@ -919,11 +1050,7 @@ class _StatusPill extends StatelessWidget {
           ),
           const SizedBox(width: 5),
           Text(
-            isLocal
-                ? 'LAN'
-                : connected
-                    ? 'Online'
-                    : 'Offline',
+            label,
             style: GoogleFonts.sora(
               fontSize: 10,
               fontWeight: FontWeight.w600,

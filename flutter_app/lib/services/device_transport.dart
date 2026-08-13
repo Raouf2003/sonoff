@@ -182,10 +182,13 @@ abstract class DeviceTransport {
   /// (`online: true` plus `POWERn` as 'ON'/'OFF' for every channel).
   Future<Map<String, dynamic>> getStatus(String deviceId);
 
-  /// Turn relay [channel] (1-based) to [state] ('ON'/'OFF').
+  /// Turn relay [channel] (1-based) to [state] ('ON'/'OFF'). [opId] is the
+  /// per-tap command correlation id threaded to the backend for the end-to-end
+  /// timing timeline; transports that ignore it still complete identically.
   Future<Map<String, dynamic>> control(
     String deviceId,
     int channel,
-    String state,
-  );
+    String state, {
+    String? opId,
+  });
 }

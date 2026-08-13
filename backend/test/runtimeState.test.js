@@ -25,6 +25,32 @@ test('LWT online flag beats stale telemetry', () => {
   assert.strictEqual(runtimeState.isOnline('dev-b'), true);
 });
 
+test('explicit LWT Offline is authoritative: fresh lastSeen cannot override it', () => {
+  runtimeState.ensureDeviceState('dev-offline', 4);
+  const state = runtimeState.getDeviceState('dev-offline');
+  // The device was recently seen AND explicitly reported offline via LWT.
+  state.lastSeen = Date.now();
+  runtimeState.setOnline('dev-offline', false);
+  assert.strictEqual(runtimeState.isOnline('dev-offline'), false,
+    'stale lastSeen must never override an explicit LWT Offline');
+});
+
+test('a positive device report (touchDevice) restores ONLINE after LWT Offline', () => {
+  runtimeState.ensureDeviceState('dev-restore', 4);
+  runtimeState.setOnline('dev-restore', false);
+  assert.strictEqual(runtimeState.isOnline('dev-restore'), false);
+  runtimeState.touchDevice('dev-restore');
+  assert.strictEqual(runtimeState.isOnline('dev-restore'), true,
+    'tele/STATE / stat/RESULT must restore online status');
+});
+
+test('LWT Online clears an explicit offline latch', () => {
+  runtimeState.ensureDeviceState('dev-reonline', 4);
+  runtimeState.setOnline('dev-reonline', false);
+  runtimeState.setOnline('dev-reonline', true);
+  assert.strictEqual(runtimeState.isOnline('dev-reonline'), true);
+});
+
 test('unknown device is offline', () => {
   assert.strictEqual(runtimeState.isOnline('nope'), false);
 });

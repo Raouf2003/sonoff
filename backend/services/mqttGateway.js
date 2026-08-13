@@ -2,6 +2,7 @@ const mqtt = require('mqtt');
 const Device = require('../models/Device');
 const Sensor = require('../models/Sensor');
 const { classifyIp } = require('./ipValidation');
+const { timeline } = require('./timeline');
 
 const ACK_TIMEOUT_MS = 5000;
 // How long a device stays visible in recentDevices after its last MQTT packet.
@@ -186,9 +187,14 @@ class MqttGateway {
   // A concurrent command for the SAME device+channel explicitly SUPERSEDES the
   // previous one (deterministic last-writer-wins) and rejects the older
   // promise with `SUPERSEDED` — no caller is ever left hanging forever.
-  publishCommand(deviceId, channel, state) {
+  //
+  // [opId] is the per-tap correlation id threaded from the app for the
+  // end-to-end timing timeline; it is echoed on the device_update socket event
+  // so the app can correlate the MQTT RESULT to its tap.
+  publishCommand(deviceId, channel, state, opId) {
     return new Promise((resolve, reject) => {
       const c = this.client;
+      timeline(deviceId, channel, opId, 'MQTT publish start');
       if (!c || !c.connected) {
         const err = new Error('MQTT not connected');
         err.code = 'MQTT_DISCONNECTED';
@@ -223,6 +229,7 @@ class MqttGateway {
         timer,
         resolve,
         reject,
+        opId,
       });
 
       console.log(`MQTT command published: cmnd/${deviceId}/POWER${channel} = ${expected}`);
@@ -234,6 +241,8 @@ class MqttGateway {
           this.pending.delete(key);
           console.error(`MQTT publish failed: ${deviceId} POWER${channel}: ${err.message}`);
           reject(err);
+        } else {
+          timeline(deviceId, channel, opId, 'MQTT publish completed');
         }
       });
     });
@@ -302,13 +311,15 @@ class MqttGateway {
   _resolvePending(deviceId, channel, observed) {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);
-    if (!p) return;
+    if (!p) return null;
     clearTimeout(p.timer);
     this.pending.delete(key);
     const acked = String(observed).toUpperCase() === p.state;
+    timeline(deviceId, channel, p.opId, 'Device RESULT received');
     console.log(`ACK received: ${deviceId} POWER${channel} = ${observed} (expected ${p.state}, acked: ${acked})`);
     console.log(`Pending commands: ${this.pending.size}`);
     if (p.resolve) p.resolve({ acked, observed: String(observed).toUpperCase() });
+    return p.opId;
   }
 
   _failPending(reason) {
@@ -382,12 +393,18 @@ class MqttGateway {
     const channelCount = device ? device.channels : 4;
 
     // Tasmota LWT reports liveness: tele/<deviceId>/LWT = "Online"/"Offline".
+    // LWT Offline is authoritative (setOnline latches `offline`); the emitted
+    // value is the resolved runtimeState verdict so every consumer reads ONE
+    // consistent truth instead of raw LWT vs telemetry disagreeing.
     if (parts[0] === 'tele' && parts[2] === 'LWT') {
       const up = payload.trim().toLowerCase() === 'online';
       this.runtimeState.ensureDeviceState(deviceId, channelCount);
       this.runtimeState.setOnline(deviceId, up);
       if (this.io && ownerId) {
-        this.io.to(`user:${ownerId}`).emit('device_status', { deviceId, online: up });
+        this.io.to(`user:${ownerId}`).emit('device_status', {
+          deviceId,
+          online: this.runtimeState.isOnline(deviceId),
+        });
       }
       return;
     }
@@ -403,15 +420,18 @@ class MqttGateway {
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
     const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER(\d*)$/.test(parts[2]));
 
+    // channel -> opId resolved by this message. Captured BEFORE the pending
+    // entry is deleted so the socket emit can correlate to the original tap.
+    const resolvedOps = {};
     if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      this._resolveAcks(deviceId, parsed);
+      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed));
       // tele/STATE carries the device's current LAN IP; learn it as the
       // local-first discovery hint exposed via GET /api/devices.
       this._recordDeviceIp(deviceId, parsed.IPAddress);
     } else if (isResult && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      this._resolveAcks(deviceId, parsed);
+      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed));
     } else if (isResult) {
       // Raw stat/<deviceId>/POWERn = "ON"/"OFF" (non-JSON payload). It is both
       // a device state report AND the direct reply to a command, so it updates
@@ -422,7 +442,8 @@ class MqttGateway {
         const st = payload.trim().toUpperCase();
         if (st === 'ON' || st === 'OFF') {
           channelUpdates[ch] = st;
-          this._resolvePending(deviceId, ch, st);
+          const opId = this._resolvePending(deviceId, ch, st);
+          if (opId) resolvedOps[ch] = opId;
         }
       }
     }
@@ -434,6 +455,8 @@ class MqttGateway {
         const entry = this.runtimeState.applyChannelState(deviceId, Number(ch), st);
         if (this.io && ownerId) {
           const room = `user:${ownerId}`;
+          const opId = resolvedOps[ch] || null;
+          timeline(deviceId, Number(ch), opId, 'Socket.IO emitted');
           this.io.to(room).emit('device_update', {
             deviceId,
             channel: Number(ch),
@@ -441,22 +464,32 @@ class MqttGateway {
             updatedAt: entry.updatedAt
               ? new Date(entry.updatedAt).toISOString()
               : null,
+            opId,
           });
-          this.io.to(room).emit('device_status', { deviceId, online: true });
+          // A positive device report restores ONLINE (touchDevice already
+          // cleared any LWT Offline); emit the resolved verdict, never a
+          // hardcoded true, so all consumers share one truth.
+          this.io.to(room).emit('device_status', {
+            deviceId,
+            online: this.runtimeState.isOnline(deviceId),
+          });
         }
       }
     }
   }
 
   _resolveAcks(deviceId, parsed) {
-    if (!parsed || typeof parsed !== 'object') return;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const resolved = {};
     for (const key of Object.keys(parsed)) {
       const m = key.match(/^POWER(\d*)$/);
       if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
         const ch = m[1] ? parseInt(m[1], 10) : 1;
-        this._resolvePending(deviceId, ch, parsed[key]);
+        const opId = this._resolvePending(deviceId, ch, parsed[key]);
+        if (opId) resolved[ch] = opId;
       }
     }
+    return resolved;
   }
 
   _ingestSensor(sensorId, payload) {

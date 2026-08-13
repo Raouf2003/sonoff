@@ -39,8 +39,9 @@ class _FakeCloudApi extends ApiService {
   Future<Map<String, dynamic>> control(
     String deviceId,
     int channel,
-    String state,
-  ) async {
+    String state, {
+    String? opId,
+  }) async {
     controlCalls++;
     final err = controlError;
     if (err != null) throw err;

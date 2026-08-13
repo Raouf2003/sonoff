@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { MqttGateway } = require('../services/mqttGateway');
+const runtimeState = require('../services/runtimeState');
 
 function makeClient() {
   const published = [];
@@ -87,6 +88,45 @@ test('a raw stat/POWERn payload resolves the pending ACK and feeds runtimeState'
   const outcome = await cmd;
   assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
   assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
+});
+
+// LWT Offline must be authoritative even when telemetry is fresh, and a later
+// positive report (tele/STATE) must restore ONLINE — and both emissions must
+// carry the RESOLVED runtimeState verdict so no consumer sees two truths.
+test('LWT Offline emits authoritative offline; a later tele/STATE restores online', () => {
+  const gw = new MqttGateway();
+  gw.client = makeClient();
+  gw.runtimeState = runtimeState;
+  gw.deviceRegistry = {
+    get: () => ({ deviceId: 'dev-lwt', ownerId: 'owner-x', channels: 2 }),
+    all: () => [],
+    isOwned: () => true,
+  };
+  const emitted = [];
+  gw.io = {
+    to: (room) => ({
+      emit: (ev, payload) => emitted.push({ room, ev, payload }),
+    }),
+  };
+
+  runtimeState.ensureDeviceState('dev-lwt', 2);
+  // Fresh telemetry immediately before the LWT Offline — the flicker scenario.
+  runtimeState.touchDevice('dev-lwt');
+  assert.strictEqual(runtimeState.isOnline('dev-lwt'), true);
+
+  gw._handle('tele/dev-lwt/LWT', 'Offline');
+  const offlineEvent = emitted[emitted.length - 1];
+  assert.strictEqual(offlineEvent.ev, 'device_status');
+  assert.strictEqual(offlineEvent.payload.online, false,
+    'LWT Offline is authoritative even with fresh lastSeen');
+  assert.strictEqual(runtimeState.isOnline('dev-lwt'), false);
+
+  gw._handle('tele/dev-lwt/STATE', JSON.stringify({ POWER1: 'ON' }));
+  const onlineEvent = emitted[emitted.length - 1];
+  assert.strictEqual(onlineEvent.ev, 'device_status');
+  assert.strictEqual(onlineEvent.payload.online, true,
+    'a positive device report restores ONLINE');
+  assert.strictEqual(runtimeState.isOnline('dev-lwt'), true);
 });
 
 function ipStateGateway({ lastIp }) {

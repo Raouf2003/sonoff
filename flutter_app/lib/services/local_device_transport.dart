@@ -336,8 +336,9 @@ class LocalDeviceTransport implements DeviceTransport {
   Future<Map<String, dynamic>> control(
     String deviceId,
     int channel,
-    String state,
-  ) async {
+    String state, {
+    String? opId,
+  }) async {
     _assertTarget(deviceId);
     await _verifyIdentity();
     final expected = state.toUpperCase();

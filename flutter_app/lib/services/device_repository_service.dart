@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'api_service.dart';
 import 'cloud_device_transport.dart';
+import 'control_timeline.dart';
 import 'device_transport.dart';
 import 'local_device_cache.dart';
 import 'local_device_discovery.dart';
@@ -220,17 +221,22 @@ class DeviceRepositoryService {
   ///
   /// A local logical failure (identity mismatch / unconfirmed command) is
   /// rethrown, never rerouted to the cloud.
+  ///
+  /// [opId] threads the per-tap correlation id into the [ControlTimeline].
   Future<RelayStatusResult> control(
     String deviceId,
     int channel,
-    String state,
-  ) async {
+    String state, {
+    String? opId,
+  }) async {
+    _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
     DeviceTransportException? localFailure;
     // LOCAL first.
     try {
-      final local = await _localControl(deviceId, channel, state)
+      final local = await _localControl(deviceId, channel, state, opId: opId)
           .timeout(kLocalBudget);
+      _tl(opId, deviceId, channel, 'Local attempt done');
       _lastSource = DeviceTransportSource.local;
       _log('local control success for $deviceId channel $channel');
       return parseRelayStatus(
@@ -241,18 +247,22 @@ class DeviceRepositoryService {
     } on Object catch (e) {
       if (e is DeviceTransportException &&
           e.kind == TransportFailureKind.logical) {
+        _tl(opId, deviceId, channel, 'Local attempt rejected');
         _log('local control REJECTED for $deviceId (${_describe(e)})');
         rethrow;
       }
       localFailure = e is DeviceTransportException
           ? e
           : DeviceTransportException('Local control failed: $e');
+      _tl(opId, deviceId, channel, 'Local attempt failed');
       _log('local control failed for $deviceId (${_describe(localFailure)})');
     }
 
     // CLOUD fallback.
     try {
-      final cloud = await _cloud.control(deviceId, channel, state);
+      _tl(opId, deviceId, channel, 'Cloud request start');
+      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
+      _tl(opId, deviceId, channel, 'Cloud response received');
       _lastSource = DeviceTransportSource.cloud;
       await _seedOneCandidate(deviceId, cloud['lastIp']);
       final result = parseRelayStatus(
@@ -292,13 +302,14 @@ class DeviceRepositoryService {
   Future<Map<String, dynamic>> _localControl(
     String deviceId,
     int channel,
-    String state,
-  ) async {
-    final local = await _findLocal(deviceId, urgent: true);
+    String state, {
+    String? opId,
+  }) async {
+    final local = await _findLocal(deviceId, urgent: true, opId: opId, channel: channel);
     if (local == null) {
       throw const DeviceTransportException('No local device available.');
     }
-    final result = await local.control(deviceId, channel, state);
+    final result = await local.control(deviceId, channel, state, opId: opId);
     _maybeLearnIp(deviceId, local.address, result);
     return result;
   }
@@ -344,13 +355,17 @@ class DeviceRepositoryService {
   Future<LocalDeviceTransport?> _findLocal(
     String deviceId, {
     bool urgent = false,
+    String? opId,
+    int channel = 0,
   }) {
     final existing = _discoveryInFlight[deviceId];
     if (existing != null) {
       _log('reusing in-flight discovery for $deviceId');
       return existing;
     }
-    final future = _discoverLocal(deviceId, urgent: urgent).whenComplete(() {
+    final future =
+        _discoverLocal(deviceId, urgent: urgent, opId: opId, channel: channel)
+            .whenComplete(() {
       _discoveryInFlight.remove(deviceId);
     });
     _discoveryInFlight[deviceId] = future;
@@ -364,6 +379,8 @@ class DeviceRepositoryService {
   Future<LocalDeviceTransport?> _discoverLocal(
     String deviceId, {
     bool urgent = false,
+    String? opId,
+    int channel = 0,
   }) async {
     final warm = _warmCache[deviceId];
     final warmAt = _warmVerifiedAt[deviceId];
@@ -380,16 +397,19 @@ class DeviceRepositoryService {
           '${warm.address}',
         );
       } else {
+        _tl(opId, deviceId, channel, 'Warm endpoint used');
         _log('using warm verified endpoint for $deviceId');
         return warm;
       }
     }
 
+    _tl(opId, deviceId, channel, 'Cached IP probe start');
     final cached = await _locator.cachedAddress(deviceId);
     if (cached != null && cached.isNotEmpty) {
       // The locator self-heals invalid entries on read, but never trust any
       // locator blindly: an unusable address must not reach a transport.
       if (!isUsableHttpHost(cached)) {
+        _tl(opId, deviceId, channel, 'Cached IP probe result: invalid');
         _log('removed invalid cached endpoint for $deviceId: $cached');
         await _locator.discardAddress(deviceId);
       } else {
@@ -398,6 +418,7 @@ class DeviceRepositoryService {
         final fresh = isVerified &&
             DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
         if (fresh) {
+          _tl(opId, deviceId, channel, 'Cached IP probe result: fresh-verified');
           final transport = _buildLocal(cached, deviceId);
           _warmCache[deviceId] = transport;
           _warmVerifiedAt[deviceId] = verifiedAt;
@@ -407,6 +428,7 @@ class DeviceRepositoryService {
         final transport = _buildLocal(cached, deviceId);
         switch (await transport.checkIdentity()) {
           case LocalIdentityCheck.verified:
+            _tl(opId, deviceId, channel, 'Cached IP probe result: verified');
             _warmCache[deviceId] = transport;
             _warmVerifiedAt[deviceId] = DateTime.now();
             await _locator.storeVerifiedAddress(deviceId, cached);
@@ -416,6 +438,7 @@ class DeviceRepositoryService {
             // The box at this address is NOT our device — the IP was repurposed.
             // Drop it so we never probe a stranger's box again.
             await _locator.discardAddress(deviceId);
+            _tl(opId, deviceId, channel, 'Cached IP probe result: mismatch');
             _log('cached IP identity mismatch — discarding $cached');
             break;
           case LocalIdentityCheck.unavailable:
@@ -423,20 +446,26 @@ class DeviceRepositoryService {
               // A previously-confirmed address that no longer answers (box off /
               // network change): drop it rather than probe it forever.
               await _locator.discardAddress(deviceId);
+              _tl(opId, deviceId, channel, 'Cached IP probe result: unreachable-discard');
               _log('verified cached IP unreachable — discarding $cached');
             } else {
               // A cloud-learned hint that is not reachable RIGHT NOW: keep it —
               // the box may be powered off or waking. mDNS still runs below.
+              _tl(opId, deviceId, channel, 'Cached IP probe result: unreachable-kept');
               _log('candidate IP unreachable — keeping $cached as a hint');
             }
             break;
         }
       }
+    } else {
+      _tl(opId, deviceId, channel, 'Cached IP probe result: none');
     }
 
     final window = urgent ? kTapMdnWindow : kWarmMdnWindow;
+    _tl(opId, deviceId, channel, 'mDNS start');
     _log('starting mDNS discovery ($window)');
     final candidates = await _locator.mDnsCandidates(window);
+    _tl(opId, deviceId, channel, 'mDNS finished');
     for (final ip in candidates) {
       _log('mDNS candidate: $ip — verifying MAC');
       final transport = _buildLocal(ip, deviceId);
@@ -445,11 +474,13 @@ class DeviceRepositoryService {
         await _locator.storeVerifiedAddress(deviceId, ip);
         _warmCache[deviceId] = transport;
         _warmVerifiedAt[deviceId] = DateTime.now();
+        _tl(opId, deviceId, channel, 'mDNS verified');
         return transport;
       }
       _log('mDNS candidate failed identity check — skipped');
     }
 
+    _tl(opId, deviceId, channel, 'Local discovery failed');
     _log('local discovery failed');
     return null;
   }
@@ -475,6 +506,12 @@ class DeviceRepositoryService {
 
   void _log(String message) {
     debugPrint('[LOCAL] $message');
+  }
+
+  /// No-op when [opId] is null (status polls, non-command flows).
+  void _tl(String? opId, String deviceId, int channel, String label) {
+    if (opId == null) return;
+    ControlTimeline.mark(opId, deviceId, channel, label);
   }
 
   LocalDeviceTransport _buildLocal(String address, String deviceId) {
