@@ -170,7 +170,10 @@ app.use('/api', authMiddleware, controlRoutes);
 // as the control routes. It only invokes the schedule sync service for a device
 // the caller owns, and the service itself remains off by default until
 // TASMOTA_SCHEDULE_SYNC_ENABLED=true.
-if (process.env.NODE_ENV !== 'production') {
+if (
+  process.env.NODE_ENV !== 'production' ||
+  process.env.ENABLE_SCHEDULE_SYNC_ROUTE === 'true'
+) {
   app.use('/api/dev', authMiddleware, devSyncRoutes);
 }
 
