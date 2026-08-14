@@ -197,6 +197,104 @@ test('syncDevice with flag off returns pending and publishes zero writes', async
   assert.ok(Array.isArray(out.intendedWrites));
 });
 
+test('flag-off report exposes the compiled plan, allocation, protected resources and zero published writes', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const out = await syncService.syncDevice('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+
+  // Compiled plan: 2 direct timers for a single daily range, no rules.
+  assert.ok(out.plan, 'plan must be present');
+  assert.strictEqual(out.plan.requiredTimerCount, 2);
+  assert.strictEqual(out.plan.timers.length, 2);
+  assert.strictEqual(out.plan.rules.length, 0);
+
+  // Allocation: logical 1..2 -> physical slots 1 and 2 (safe empty slots).
+  assert.deepStrictEqual(out.allocation, [
+    { logical: 1, physical: 1 },
+    { logical: 2, physical: 2 },
+  ]);
+
+  // Protected resources: Timer3 (user Rule1 trigger), Rule1 + Rule3 user rules.
+  const protectedTimerIndexes = out.protected.timers.map((t) => t.index);
+  assert.ok(protectedTimerIndexes.includes(syncService.USER_TRIGGER_TIMER), 'Timer3 must be reported as protected');
+  const protectedRuleIndexes = out.protected.rules.map((r) => r.index);
+  for (const idx of syncService.USER_RULE_INDEXES) {
+    assert.ok(protectedRuleIndexes.includes(idx), `Rule${idx} must be reported as protected`);
+  }
+
+  // Intended writes are the two direct timers; nothing was published.
+  assert.deepStrictEqual(out.changedTimers.sort(), [1, 2]);
+  assert.deepStrictEqual(out.intendedWrites.length, 2);
+  assert.deepStrictEqual(out.publishedWrites, []);
+  assert.deepStrictEqual(out.verification, []);
+});
+
+test('flag-on report includes per-resource readback verification with actual vs desired', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const out = await syncService.syncDevice('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+  assert.strictEqual(out.status, 'synced');
+  assert.strictEqual(out.verificationPassed, true);
+  // Two published writes match the two changed timers.
+  assert.deepStrictEqual(out.publishedWrites.length, 2);
+  assert.strictEqual(out.verification.length, 2);
+  for (const v of out.verification) {
+    assert.strictEqual(v.matches, true);
+    assert.ok(v.desired, 'desired config must be reported');
+    assert.ok(v.actual, 'actual readback config must be reported');
+    if (v.resource.startsWith('Timer')) {
+      assert.strictEqual(v.desired.Enable, 1);
+      const actualNoIndex = { ...v.actual };
+      delete actualNoIndex.index;
+      assert.deepStrictEqual(v.desired, actualNoIndex);
+    }
+  }
+});
+
+test('protectedResources reports occupied unmanaged timers and a user-occupied Rule2', () => {
+  const state = deviceState();
+  // Occupy a non-managed slot and occupy Rule2 with user config.
+  state.timers[4] = { ...defaultTimer(), Enable: 1, Time: '11:11', Days: '1010101', Action: 1, Output: 1 };
+  state.rules[1] = { index: 2, State: 'ON', Once: 'OFF', StopOnError: 'OFF', Length: 20, Free: 491, Rules: 'ON Time#OfDay DO Power1 ON ENDON' };
+  const actual = { timers: state.timers.map((t, i) => ({ index: i + 1, ...syncService.normalizeTimer(t) })), rules: state.rules };
+  const protectedInfo = syncService.protectedResources(actual, []);
+  const timerIndexes = protectedInfo.timers.map((t) => t.index);
+  assert.ok(timerIndexes.includes(3), 'Timer3 protected');
+  assert.ok(timerIndexes.includes(5), 'occupied slot 5 protected as unmanaged');
+  const ruleIndexes = protectedInfo.rules.map((r) => r.index);
+  assert.ok(ruleIndexes.includes(1) && ruleIndexes.includes(3), 'user rules protected');
+  assert.ok(ruleIndexes.includes(2), 'user-occupied Rule2 protected');
+});
+
+test('planView and allocationView are JSON-safe views', () => {
+  const state = deviceState();
+  const plan = compile({ deviceId: '34987AC30304', schedules: [dailySchedule()], device: deviceDoc });
+  const view = syncService.planView(plan);
+  JSON.stringify(view);
+  assert.strictEqual(view.requiredTimerCount, 2);
+  assert.ok(view.timers[0].config.Enable === 1);
+  assert.ok(Array.isArray(view.timers[0].sources));
+  const alloc = new Map([[1, 2], [2, 4]]);
+  assert.deepStrictEqual(syncService.allocationView(alloc), [
+    { logical: 1, physical: 2 },
+    { logical: 2, physical: 4 },
+  ]);
+});
+
+test('manualSync passes through to syncDevice with injectable models', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const out = await syncService.manualSync('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+  assert.strictEqual(out.status, 'pending');
+  assert.strictEqual(out.enabled, false);
+});
+
 test('syncDevice with flag on applies changed timers and verifies readback', async () => {
   process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
   const state = deviceState();

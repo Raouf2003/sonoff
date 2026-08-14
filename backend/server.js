@@ -11,6 +11,7 @@ const controlRoutes = require('./routes/control');
 const sensorRoutes = require('./routes/sensors');
 const ruleRoutes = require('./routes/rules');
 const scheduleRoutes = require('./routes/schedules');
+const devSyncRoutes = require('./routes/devSync');
 const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
 const { normalizeMac } = require('./services/macIdentity');
 const Device = require('./models/Device');
@@ -163,6 +164,15 @@ app.use('/api/sensors', authMiddleware, sensorRoutes);
 app.use('/api/rules', authMiddleware, ruleRoutes);
 app.use('/api/schedules', authMiddleware, scheduleRoutes);
 app.use('/api', authMiddleware, controlRoutes);
+
+// DEVELOPMENT-ONLY manual sync trigger (Phase 6.5). Never exposed in
+// production; in every other environment it is protected by the same JWT auth
+// as the control routes. It only invokes the schedule sync service for a device
+// the caller owns, and the service itself remains off by default until
+// TASMOTA_SCHEDULE_SYNC_ENABLED=true.
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/dev', authMiddleware, devSyncRoutes);
+}
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);

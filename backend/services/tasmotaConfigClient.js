@@ -2,6 +2,11 @@ const mqtt = require('mqtt');
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const CONFIG_RESULT_TOPIC = (deviceId) => `stat/${deviceId}/RESULT`;
+// Topic parts are strictly limited to unreserved MQTT characters so only the
+// exact device identity and command ever reach the wire. Labels, descriptions
+// ("Payload: (empty)"), pipes, spaces, slashes or any other text can never be
+// smuggled into a topic part.
+const SAFE_TOPIC_PART = /^[A-Za-z0-9_-]+$/;
 const CONFIG_CMD_TOPIC = (deviceId, command) => `cmnd/${deviceId}/${command}`;
 
 // Isolated request/response channel for Tasmota *configuration* commands
@@ -37,6 +42,24 @@ class TasmotaConfigClient {
 
   isConnected() {
     return !!(this.client && this.client.connected);
+  }
+
+  // Reject any deviceId/command that could turn the published topic into
+  // anything other than the exact `cmnd/<deviceId>/<command>`. This is the
+  // guarantee that a debug label like "Payload: (empty)" or a
+  // "cmnd/... | Payload: ..." description can never become part of the topic.
+  _validateTopicParts(deviceId, command) {
+    if (!deviceId || !SAFE_TOPIC_PART.test(deviceId)) {
+      const err = new Error('deviceId must contain only A-Za-z0-9_-');
+      err.code = 'BAD_TOPIC_PART';
+      return err;
+    }
+    if (!command || !SAFE_TOPIC_PART.test(command)) {
+      const err = new Error('command must contain only A-Za-z0-9_-');
+      err.code = 'BAD_TOPIC_PART';
+      return err;
+    }
+    return null;
   }
 
   // Lazily create the dedicated connection on first use so requiring this
@@ -80,8 +103,9 @@ class TasmotaConfigClient {
   // present. Rejects on timeout / publish failure / disconnect.
   requestTasmotaConfig(deviceId, command, payload = '', { timeoutMs = DEFAULT_TIMEOUT_MS, expectedResponseKey } = {}) {
     return new Promise((resolve, reject) => {
-      if (!deviceId || !command) {
-        reject(new Error('deviceId and command are required'));
+      const partErr = this._validateTopicParts(deviceId, command);
+      if (partErr) {
+        reject(partErr);
         return;
       }
       const op = {
@@ -126,6 +150,15 @@ class TasmotaConfigClient {
       return;
     }
 
+    // Defense in depth: even if an op somehow reached the pump with a labeled
+    // command, never publish a topic that is not exactly cmnd/<dev>/<command>.
+    const partErr = this._validateTopicParts(op.deviceId, op.command);
+    if (partErr) {
+      op.reject(partErr);
+      this._pump(deviceId);
+      return;
+    }
+
     this.inflight.set(deviceId, op);
     this._subscribe(deviceId);
 
@@ -135,7 +168,8 @@ class TasmotaConfigClient {
       this._fail(deviceId, op, err);
     }, op.timeoutMs);
 
-    client.publish(CONFIG_CMD_TOPIC(deviceId, op.command), op.payload, { qos: 1, retain: false }, (err) => {
+    const topic = CONFIG_CMD_TOPIC(op.deviceId, op.command);
+    client.publish(topic, op.payload, { qos: 1, retain: false }, (err) => {
       if (err) {
         const e = new Error(`Tasmota config publish failed for ${deviceId} ${op.command}: ${err.message}`);
         e.code = 'CFG_PUBLISH_FAILED';

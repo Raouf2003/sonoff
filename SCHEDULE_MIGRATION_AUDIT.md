@@ -466,3 +466,86 @@ made; all behavior is exercised through injected fake MQTT clients.
 
 STOP after Phase 6. No shadow mode, no migration, no Flutter, and no automatic
 Tasmota execution were introduced.
+
+---
+
+# Phase 6.5 — Development-only manual sync trigger for device 34987AC30304
+
+Status: **implemented and green. No live-broker writes were made — the trigger
+is intended to be exercised in two steps: first with
+`TASMOTA_SCHEDULE_SYNC_ENABLED=false` (pure dry-run report, zero writes), then
+with `TASMOTA_SCHEDULE_SYNC_ENABLED=true` (real apply + readback verification)
+only after the operator confirms the dry-run.**
+
+## What was added
+
+- `backend/routes/devSync.js` — `POST /api/dev/sync/:deviceId`:
+  - Development-only: mounted by `server.js` only when
+    `NODE_ENV !== 'production'`, and the route itself refuses to serve under
+    `NODE_ENV=production` (404).
+  - Requires the caller to **own** the device (same JWT auth + ownership guard
+    as the control routes) before invoking the sync service.
+  - Calls `scheduleSyncService.manualSync(deviceId)` (a thin pass-through to the
+    existing `syncDevice`) and returns the **full report** as JSON.
+- `scheduleSyncService.js` — **report enrichment only, no behavior change to the
+  apply path**:
+  - `summary.plan` — JSON-safe compiled plan (`timers`, `rules`,
+    `requiredTimerCount`).
+  - `summary.allocation` — the logical→physical slot allocation chosen.
+  - `summary.protected` — protected/unmanaged resources (`Timer3` user Rule1
+    trigger, occupied unmanaged timers, user `Rule1`/`Rule3`, and `Rule2` when
+    it holds user config).
+  - `summary.intendedWrites` — now populated on every path (previously only when
+    disabled), `summary.publishedWrites` (empty until a real apply), and
+    `summary.verification` — per-resource readback **actual vs desired** with a
+    `matches` flag after an enabled sync.
+  - New exported helpers: `manualSync`, `protectedResources`, `planView`,
+    `allocationView` (all JSON-safe). `Timer3`/`Rule1`/`Rule3` protection and
+    the safe-empty-slot-only allocation are unchanged and covered by tests.
+
+## Safety properties preserved
+
+- **ScheduleEngine fully active and unchanged** — no modification to
+  `scheduleEngine.js` or any schedule CRUD route.
+- **Ownership is unchanged** — only safe empty (or previously STEES-managed)
+  slots are ever allocated; user `Timer3`, `Rule1`, `Rule3`, occupied unmanaged
+  slots and a user-occupied `Rule2` are reported as protected and never written.
+- **Zero writes on dry-run** — with `TASMOTA_SCHEDULE_SYNC_ENABLED=false` the
+  report shows `publishedWrites: []` and only empty-payload read commands are
+  emitted.
+- **Real apply is verified** — after writes the service reads back every
+  modified Timer/Rule and reports `actual` vs `desired` per resource; mismatches
+  retry up to `MAX_SYNC_ATTEMPTS` and finally latch `status: 'failed'` (never
+  falsely `synced`).
+
+## Files
+
+- Added: `backend/routes/devSync.js`, `backend/test/devSyncRoute.test.js`.
+- Modified (reporting only): `backend/services/scheduleSyncService.js`,
+  `backend/test/scheduleSyncService.test.js`.
+- Modified (dev-only mount): `backend/server.js`.
+- Untouched and verified: `scheduleEngine.js`, `mqttGateway.js`, all schedule
+  CRUD routes, `Device.js`, `Schedule.js`, Flutter, LAN fallback.
+
+## Gates
+
+- `node --check` clean on all changed/new files.
+- Full backend suite: **`# tests 150, # pass 150, # fail 0`** (was 140;
+  +10 new = +5 sync-service report tests, +5 devSync route tests).
+- `git status`: `routes/devSync.js` untracked (new); modified = `server.js`
+  (dev-only mount), `scheduleSyncService.js`, and its test file.
+
+## Operator procedure (device 34987AC30304)
+
+1. Run the backend in a non-production environment with
+   `TASMOTA_SCHEDULE_SYNC_ENABLED=false`.
+2. `POST /api/dev/sync/34987AC30304` (with a valid owner JWT) → confirms the
+   compiled plan, chosen safe timer slots, protected resources, intended writes
+   and `publishedWrites: []`.
+3. Only after confirming step 2, restart the backend with
+   `TASMOTA_SCHEDULE_SYNC_ENABLED=true` and run the **exact same** `POST` → the
+   report includes the real `publishedWrites`, the full readback `verification`,
+   and `status: 'synced'` (or `failed` with the per-resource mismatch).
+
+STOP after Phase 6.5. No shadow mode, no migration, no Flutter, and no automatic
+Tasmota execution were introduced.

@@ -241,6 +241,54 @@ function computeWrites(plan, actual, managedTimerIndexes = []) {
   return result;
 }
 
+// Report the protected / unmanaged resources on the device: the user's rule
+// trigger timer, every occupied non-managed timer, the user rules, and Rule2
+// when it holds user config. These are the resources sync must never touch.
+function protectedResources(actual, managedTimerIndexes = []) {
+  const managed = new Set(managedTimerIndexes);
+  const timers = [];
+  const rules = [];
+
+  for (const timer of actual.timers || []) {
+    if (timer.index === USER_TRIGGER_TIMER) {
+      timers.push({ index: timer.index, reason: 'user Rule1 trigger' });
+    } else if (!isDefaultTimer(timer) && !managed.has(timer.index)) {
+      timers.push({ index: timer.index, reason: 'occupied (unmanaged)' });
+    }
+  }
+  for (const index of USER_RULE_INDEXES) {
+    rules.push({ index, reason: 'user rule' });
+  }
+  const rule2 = (actual.rules || []).find((r) => r.index === STEES_RULE_INDEX);
+  if (rule2 && rule2.State !== 'OFF' && rule2.Rules !== '') {
+    rules.push({ index: STEES_RULE_INDEX, reason: 'occupied by user config' });
+  }
+  return { timers, rules };
+}
+
+// Report the compiled plan as a JSON-safe view (logical timer index, its config
+// and event, and the rule clauses).
+function planView(plan) {
+  return {
+    requiredTimerCount: plan.requiredTimerCount,
+    timers: (plan.timers || []).map((t) => ({
+      index: t.index,
+      config: { ...t.config },
+      event: { on: (t.event && t.event.on) || [], off: (t.event && t.event.off) || [] },
+      sources: (t.sources || []).slice(),
+    })),
+    rules: (plan.rules || []).map((r) => ({ ruleIndex: r.ruleIndex, length: r.length, text: r.text })),
+  };
+}
+
+// Report the logical -> physical allocation as a JSON-safe list.
+function allocationView(allocation) {
+  const out = [];
+  for (const [logical, physical] of allocation) out.push({ logical, physical });
+  out.sort((a, b) => a.logical - b.logical);
+  return out;
+}
+
 // Sync one device: read -> compile -> allocate -> diff -> apply (if enabled)
 // -> readback verify with bounded retries. Never throws for expected conditions.
 // Returns a structured result ({ status, changedTimers, changedRules, ... }).
@@ -256,6 +304,12 @@ async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Sche
     conflicts: [],
     unsupportedReasons: [],
     enabled: syncEnabled(),
+    plan: null,
+    allocation: [],
+    protected: { timers: [], rules: [] },
+    intendedWrites: [],
+    publishedWrites: [],
+    verification: [],
   };
 
   try {
@@ -274,6 +328,7 @@ async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Sche
     const plan = compile({ deviceId, schedules, device });
     summary.conflicts = plan.conflicts.slice();
     summary.unsupportedReasons = plan.unsupportedReasons.slice();
+    summary.plan = planView(plan);
 
     if (plan.requiredTimerCount === 0 && plan.rules.length === 0) {
       summary.status = 'synced';
@@ -284,7 +339,9 @@ async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Sche
 
     const actual = await readDeviceScheduleState(deviceId);
     const managedIndexes = (device && device.scheduleSyncInfo && device.scheduleSyncInfo.managedTimerIndexes) || [];
+    summary.protected = protectedResources(actual, managedIndexes);
     const result = computeWrites(plan, actual, managedIndexes);
+    summary.allocation = allocationView(result.allocation || new Map());
 
     if (!result.okay) {
       summary.status = 'unsupported';
@@ -297,15 +354,15 @@ async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Sche
     const writes = result.writes || [];
     summary.changedTimers = writes.filter((w) => w.kind === 'timer').map((w) => w.index);
     summary.changedRules = writes.filter((w) => w.kind === 'rule').map((w) => w.index);
+    summary.intendedWrites = writes.map((w) =>
+      w.kind === 'timer'
+        ? { kind: 'timer', index: w.index, config: timerPayload(w.desired) }
+        : { kind: 'rule', index: w.index, text: w.text },
+    );
 
     if (!syncEnabled()) {
       summary.status = 'pending';
       summary.error = `${SYNC_FLAG} is disabled - no writes published (dry run complete)`;
-      summary.intendedWrites = writes.map((w) =>
-        w.kind === 'timer'
-          ? { kind: 'timer', index: w.index, config: timerPayload(w.desired) }
-          : { kind: 'rule', index: w.index, text: w.text },
-      );
       return summary;
     }
 
@@ -330,24 +387,41 @@ async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Sche
             });
           }
         }
+        summary.publishedWrites = summary.intendedWrites.slice();
 
         const after = await readDeviceScheduleState(deviceId);
         let verified = true;
+        const verification = [];
         for (const w of writes) {
           if (w.kind === 'timer') {
             const current = after.timers.find((t) => t.index === w.index);
-            if (!sameTimer(current, w.desired)) {
+            const matches = sameTimer(current, w.desired);
+            verification.push({
+              resource: `Timer${w.index}`,
+              desired: { ...w.desired },
+              actual: current ? { ...current } : null,
+              matches,
+            });
+            if (!matches) {
               verified = false;
               lastError = new Error(`Timer${w.index} verification failed on attempt ${attempts}`);
             }
           } else {
             const current = after.rules.find((r) => r.index === w.index);
-            if (!current || current.Rules !== w.text) {
+            const matches = !!(current && current.Rules === w.text);
+            verification.push({
+              resource: `Rule${w.index}`,
+              desired: { State: 'ON', Rules: w.text },
+              actual: current ? { ...current } : null,
+              matches,
+            });
+            if (!matches) {
               verified = false;
               lastError = new Error(`Rule2 verification failed on attempt ${attempts}`);
             }
           }
         }
+        summary.verification = verification;
 
         if (verified) {
           summary.status = 'synced';
@@ -402,8 +476,18 @@ function sameTimer(a, b) {
   );
 }
 
+// DEV-ONLY (Phase 6.5): manual sync trigger for the real device. Wraps
+// syncDevice and returns the full dry-run/sync report (plan, allocation,
+// protected resources, intended/published writes, verification). This function
+// is intentionally exported so the dev route and its tests share it; it is a
+// thin pass-through and adds no behavior of its own.
+function manualSync(deviceId, options) {
+  return syncDevice(deviceId, options);
+}
+
 module.exports = {
   syncDevice,
+  manualSync,
   readDeviceScheduleState,
   computeWrites,
   normalizeTimer,
@@ -412,6 +496,9 @@ module.exports = {
   timerPayload,
   buildRuleText,
   allocateSlots,
+  protectedResources,
+  planView,
+  allocationView,
   syncEnabled,
   SYNC_FLAG,
   MAX_SYNC_ATTEMPTS,

@@ -162,3 +162,102 @@ test('a write command is published with its JSON payload on the config command t
   client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer1: { Enable: 1 } }));
   await p;
 });
+
+test('empty read publish uses EXACT topic and empty payload', async () => {
+  const { cfg, client } = configClient();
+  const p = cfg.requestTasmotaConfig('34987AC30304', 'Timer1', '', { expectedResponseKey: 'Timer1' });
+  const { topic, payload } = client.published[0];
+  assert.strictEqual(topic, 'cmnd/34987AC30304/Timer1');
+  assert.strictEqual(payload, '');
+  client.emit('message', 'stat/34987AC30304/RESULT', JSON.stringify({ Timer1: { Enable: 0 } }));
+  await p;
+});
+
+test('timer write publish uses EXACT topic and EXACT payload', async () => {
+  const { cfg, client } = configClient();
+  const config = '{"Enable":1,"Mode":0,"Time":"23:30","Window":0,"Days":"1111111","Repeat":1,"Output":1,"Action":1}';
+  const p = cfg.requestTasmotaConfig('34987AC30304', 'Timer2', config, { expectedResponseKey: 'Timer2' });
+  const { topic, payload } = client.published[0];
+  assert.strictEqual(topic, 'cmnd/34987AC30304/Timer2');
+  assert.strictEqual(payload, config);
+  client.emit('message', 'stat/34987AC30304/RESULT', JSON.stringify({ Timer2: JSON.parse(config) }));
+  await p;
+});
+
+test('rule read publish uses EXACT topic and empty payload', async () => {
+  const { cfg, client } = configClient();
+  const p = cfg.requestTasmotaConfig('34987AC30304', 'Rule1', '', { expectedResponseKey: 'Rule1' });
+  const { topic, payload } = client.published[0];
+  assert.strictEqual(topic, 'cmnd/34987AC30304/Rule1');
+  assert.strictEqual(payload, '');
+  client.emit('message', 'stat/34987AC30304/RESULT', JSON.stringify({ Rule1: { State: 'OFF' } }));
+  await p;
+});
+
+test('verbose timer read publish uses EXACT topic and empty payload', async () => {
+  const { cfg, client } = configClient();
+  const p = cfg.requestTasmotaConfig('34987AC30304', 'Timer5', '', { expectedResponseKey: 'Timer5' });
+  const { topic, payload } = client.published[0];
+  assert.strictEqual(topic, 'cmnd/34987AC30304/Timer5');
+  assert.strictEqual(payload, '');
+  client.emit('message', 'stat/34987AC30304/RESULT', JSON.stringify({ Timer5: { Enable: 0 } }));
+  await p;
+});
+
+test('no debug label or payload description can ever become part of the topic', async () => {
+  const { cfg, client } = configClient();
+  const labelStrings = [
+    'Timer1 | Payload: (empty)',
+    'cmnd/34987AC30304/Timer1 | Payload: (empty)',
+    'Timer1 Payload: (empty)',
+    'Timer1 | Payload',
+    'Rule2 Payload: (empty)',
+    'Timer1 | |\n',
+    'Timer1 | Payload: {"Enable":1}',
+  ];
+  for (const labeled of labelStrings) {
+    await assert.rejects(
+      () => cfg.requestTasmotaConfig('34987AC30304', labeled, '', { expectedResponseKey: labeled }),
+      (err) => err.code === 'BAD_TOPIC_PART',
+      `labeled command ${JSON.stringify(labeled)} must be rejected`,
+    );
+  }
+  // Every actual publish must consist of exactly two clean parts under cmnd/.
+  for (const m of client.published) {
+    assert.match(m.topic, /^cmnd\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/);
+    assert.ok(!m.topic.includes('Payload'), 'topic must never contain the Payload label');
+    assert.ok(!m.topic.includes('|'), 'topic must never contain a pipe');
+    assert.ok(!m.topic.includes('(') && !m.topic.includes(')'), 'topic must never contain parens');
+    assert.ok(!m.topic.includes('cmnd/34987AC30304/cmnd'), 'topic must never double-nest cmnd/');
+    assert.strictEqual(m.topic.split('/').length, 3, 'topic must be exactly cmnd/<dev>/<command>');
+  }
+});
+
+test('labeled deviceId is also rejected before any publish', async () => {
+  const { cfg, client } = configClient();
+  await assert.rejects(
+    () =>
+      cfg.requestTasmotaConfig('34987AC30304 | Payload: (empty)', 'Timer1', '', {
+        expectedResponseKey: 'Timer1',
+      }),
+    (err) => err.code === 'BAD_TOPIC_PART',
+  );
+  assert.deepStrictEqual(client.published, []);
+});
+
+test('a queued op whose command becomes labeled is rejected before ever being published', async () => {
+  const { cfg, client } = configClient();
+  const p1 = cfg.requestTasmotaConfig('dev-x', 'Timer10', '', { expectedResponseKey: 'Timer10' });
+  assert.deepStrictEqual(client.published.map((m) => m.topic), ['cmnd/dev-x/Timer10']);
+  // Timer3 is queued behind Timer10; corrupt its queued command to mimic a
+  // label leaking into the op after it was accepted.
+  const p3 = cfg.requestTasmotaConfig('dev-x', 'Timer3', '', { expectedResponseKey: 'Timer3' });
+  const queued = cfg.queues.get('dev-x').find((op) => op.command === 'Timer3');
+  queued.command = 'Timer3 | Payload: (empty)';
+  // Settle Timer10 so the pump moves to the corrupted queued op.
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer10: { Enable: 1 } }));
+  await p1;
+  await assert.rejects(() => p3, (err) => err.code === 'BAD_TOPIC_PART');
+  // The corrupted op was rejected at the pump and never reached the wire.
+  assert.deepStrictEqual(client.published.map((m) => m.topic), ['cmnd/dev-x/Timer10']);
+});
