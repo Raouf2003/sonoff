@@ -65,6 +65,24 @@ const deviceSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  // ADDITIVE PHASE 6 METADATA (hidden from normal queries/JSON via
+  // `select: false`). Owned solely by scheduleSyncService. Records which
+  // Tasmota timer slots and rules STEES-managed on the last successful sync,
+  // plus the last sync outcome. Backward-compatible: nothing else reads it,
+  // and it is never included in find()/toJSON unless explicitly selected.
+  scheduleSyncInfo: {
+    type: new mongoose.Schema(
+      {
+        managedTimerIndexes: { type: [Number], default: [] },
+        status: { type: String, default: null },
+        lastSyncedAt: { type: Date, default: null },
+        error: { type: String, default: null },
+      },
+      { _id: false },
+    ),
+    default: null,
+    select: false,
+  },
 });
 
 deviceSchema.set('toJSON', {

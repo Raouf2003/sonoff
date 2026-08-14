@@ -95,6 +95,24 @@ const scheduleSchema = new mongoose.Schema(
       of: String,
       default: {},
     },
+    // ADDITIVE PHASE 6 SYNC METADATA (hidden from JSON via the toJSON
+    // transform below). Owned by scheduleSyncService only. Backward-
+    // compatible: existing schedule reads/writes never touch these fields.
+    syncStatus: {
+      type: String,
+      default: 'pending',
+      select: false,
+    },
+    lastSyncedAt: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+    syncError: {
+      type: String,
+      default: null,
+      select: false,
+    },
   },
   { timestamps: true },
 );
@@ -114,6 +132,9 @@ scheduleSchema.set('toJSON', {
     delete ret.__v;
     // Strip internal state from all API responses.
     delete ret.lastAppliedState;
+    delete ret.syncStatus;
+    delete ret.lastSyncedAt;
+    delete ret.syncError;
     return ret;
   },
 });
