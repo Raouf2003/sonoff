@@ -92,13 +92,85 @@ test('publish callback error rejects with CFG_PUBLISH_FAILED', async () => {
   );
 });
 
-test('rejects with MQTT_DISCONNECTED when the client is not connected', async () => {
+test('a first request while the lazy connection is down waits for connect and succeeds', async () => {
   const { cfg, client } = configClient();
   client.connected = false;
-  await assert.rejects(
-    () => cfg.requestTasmotaConfig('dev-x', 'Timer5', '', { expectedResponseKey: 'Timer5' }),
-    (err) => err.code === 'MQTT_DISCONNECTED',
-  );
+  const p = cfg.requestTasmotaConfig('dev-x', 'Timer5', '', {
+    expectedResponseKey: 'Timer5',
+    timeoutMs: 1000,
+  });
+  // Not connected: nothing may be published until 'connect'.
+  assert.deepStrictEqual(client.published, []);
+  client.connected = true;
+  client.emit('connect');
+  assert.deepStrictEqual(client.published.map((m) => m.topic), ['cmnd/dev-x/Timer5']);
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer5: { Enable: 1 } }));
+  assert.deepStrictEqual(await p, { Timer5: { Enable: 1 } });
+  assert.strictEqual(cfg.inflight.has('dev-x'), false);
+});
+
+test('multiple concurrent requests while connecting share ONE connect attempt', async () => {
+  const { cfg, client } = configClient();
+  client.connected = false;
+  const p1 = cfg.requestTasmotaConfig('dev-a', 'Timer1', '', { expectedResponseKey: 'Timer1', timeoutMs: 1000 });
+  const p2 = cfg.requestTasmotaConfig('dev-b', 'Timer1', '', { expectedResponseKey: 'Timer1', timeoutMs: 1000 });
+  // Both parked on the same shared connectAttempt; single client instance.
+  assert.strictEqual(cfg.connecting.has('dev-a'), true);
+  assert.strictEqual(cfg.connecting.has('dev-b'), true);
+  assert.strictEqual(cfg.connectAttempt.length, 2);
+  assert.deepStrictEqual(client.published, [], 'no publish before connect');
+  client.connected = true;
+  client.emit('connect');
+  assert.deepStrictEqual(new Set(client.published.map((m) => m.topic)), new Set(['cmnd/dev-a/Timer1', 'cmnd/dev-b/Timer1']));
+  client.emit('message', 'stat/dev-a/RESULT', JSON.stringify({ Timer1: { Enable: 1 } }));
+  client.emit('message', 'stat/dev-b/RESULT', JSON.stringify({ Timer1: { Enable: 0 } }));
+  assert.deepStrictEqual(await p1, { Timer1: { Enable: 1 } });
+  assert.deepStrictEqual(await p2, { Timer1: { Enable: 0 } });
+  assert.strictEqual(cfg.connectAttempt.length, 0);
+});
+
+test('a connection that never comes up times out cleanly with CFG_CONNECT_TIMEOUT', async () => {
+  const { cfg, client } = configClient();
+  client.connected = false;
+  const p = cfg.requestTasmotaConfig('dev-x', 'Timer6', '', {
+    expectedResponseKey: 'Timer6',
+    timeoutMs: 10,
+  });
+  await assert.rejects(() => p, (err) => err.code === 'CFG_CONNECT_TIMEOUT');
+  assert.deepStrictEqual(client.published, [], 'timeout must not publish anything');
+  assert.strictEqual(cfg.connecting.has('dev-x'), false);
+  assert.strictEqual(cfg.connectAttempt.length, 0);
+  assert.strictEqual(cfg.inflight.has('dev-x'), false);
+  assert.strictEqual(cfg.queues.has('dev-x'), false);
+});
+
+test('a failed connection cleans up and a later request can connect again', async () => {
+  const { cfg, client } = configClient();
+  client.connected = false;
+  const p1 = cfg.requestTasmotaConfig('dev-x', 'Timer7', '', { expectedResponseKey: 'Timer7', timeoutMs: 200 });
+  // Simulate a genuine connection failure: broker rejects the connect.
+  client.emit('close');
+  await assert.rejects(() => p1, (err) => err.code === 'MQTT_DISCONNECTED');
+  assert.deepStrictEqual(client.published, []);
+  assert.strictEqual(cfg.connectAttempt.length, 0);
+  // Later request: a fresh connection is allowed (a NEW client object would be
+  // created for a real broker; here the injected client comes back up).
+  const p2 = cfg.requestTasmotaConfig('dev-x', 'Timer8', '', { expectedResponseKey: 'Timer8', timeoutMs: 1000 });
+  client.connected = true;
+  client.emit('connect');
+  assert.deepStrictEqual(client.published.map((m) => m.topic), ['cmnd/dev-x/Timer8']);
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer8: { Enable: 0 } }));
+  assert.deepStrictEqual(await p2, { Timer8: { Enable: 0 } });
+});
+
+test('no publish ever occurs while the connection is not ready after a failed attempt', async () => {
+  const { cfg, client } = configClient();
+  client.connected = false;
+  const p = cfg.requestTasmotaConfig('dev-x', 'Timer9', '', { expectedResponseKey: 'Timer9', timeoutMs: 10 });
+  // Close while parked: rejects and still nothing was published.
+  client.emit('close');
+  await assert.rejects(() => p, (err) => err.code === 'MQTT_DISCONNECTED');
+  assert.deepStrictEqual(client.published, []);
 });
 
 test('a disconnect while pending rejects the outstanding request with MQTT_DISCONNECTED', async () => {

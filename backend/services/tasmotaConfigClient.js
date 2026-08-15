@@ -38,6 +38,11 @@ class TasmotaConfigClient {
     this.queues = new Map();
     // deviceId -> currently in-flight op
     this.inflight = new Map();
+    // deviceId -> op waiting for the shared connection attempt to come up
+    this.connecting = new Map();
+    // deviceIds waiting on the current shared connect attempt (single attempt
+    // for every concurrent waiter; one 'connect' resume for all of them)
+    this.connectAttempt = [];
   }
 
   isConnected() {
@@ -85,6 +90,12 @@ class TasmotaConfigClient {
         console.error(`[tasmotaConfig] ignored message on ${topic}:`, err.message);
       }
     });
+    // Lazily-created connection: every request that arrives before the 'connect'
+    // event is parked on this._connectAttempt and resumed here in one pass. A
+    // single client therefore serves any number of concurrent early requests.
+    this.client.on('connect', () => {
+      this._resumeConnecting();
+    });
     this.client.on('close', () => this._failAll(new Error('MQTT connection closed')));
     this.client.on('error', (err) => console.error('[tasmotaConfig] MQTT error:', err.message));
   }
@@ -125,7 +136,7 @@ class TasmotaConfigClient {
   }
 
   _pump(deviceId) {
-    if (this.inflight.has(deviceId)) return;
+    if (this.inflight.has(deviceId) || this.connecting.has(deviceId)) return;
     const queue = this.queues.get(deviceId);
     const op = queue && queue.shift();
     if (!op) {
@@ -141,12 +152,55 @@ class TasmotaConfigClient {
       return;
     }
 
-    const client = this.client;
-    if (!client || !client.connected) {
-      const err = new Error('MQTT not connected for Tasmota config channel');
-      err.code = 'MQTT_DISCONNECTED';
-      op.reject(err);
-      this._pump(deviceId);
+    if (!this.client || !this.client.connected) {
+      // Lazy connection not established yet. Park this op on the shared
+      // connect attempt instead of failing: the single 'connect' handler
+      // resumes every parked op, and the wait is bounded by op.timeoutMs.
+      this._parkForConnect(deviceId, op);
+      return;
+    }
+
+    this._publishOp(deviceId, op);
+  }
+
+  // Park an op that arrived before the lazy connection was ready. All parked
+  // ops share ONE connection attempt (this.connectAttempt); a single 'connect'
+  // event resumes all of them, so concurrent early requests never create
+  // multiple MQTT clients/connections.
+  _parkForConnect(deviceId, op) {
+    if (this.connecting.has(deviceId)) return;
+    this.connecting.set(deviceId, op);
+    this.connectAttempt.push(deviceId);
+    op.connectTimer = setTimeout(() => {
+      const err = new Error(`MQTT connect timeout for Tasmota config channel (${deviceId} ${op.command})`);
+      err.code = 'CFG_CONNECT_TIMEOUT';
+      this._fail(deviceId, op, err);
+    }, op.timeoutMs);
+  }
+
+  // Invoked once per 'connect'. Every op parked while the connection was
+  // coming up is moved into the normal publish path in a single pass.
+  _resumeConnecting() {
+    const waiters = this.connectAttempt;
+    this.connectAttempt = [];
+    for (const deviceId of waiters) {
+      const op = this.connecting.get(deviceId);
+      if (!op) continue;
+      this.connecting.delete(deviceId);
+      if (op.connectTimer) {
+        clearTimeout(op.connectTimer);
+        op.connectTimer = null;
+      }
+      this._publishOp(deviceId, op);
+    }
+  }
+
+  _publishOp(deviceId, op) {
+    if (!this.client || !this.client.connected) {
+      // Connection dropped between resume and publish: park again rather than
+      // publish on a dead connection. A later 'connect' or the bounded timeout
+      // will settle the op.
+      this._parkForConnect(deviceId, op);
       return;
     }
 
@@ -154,8 +208,7 @@ class TasmotaConfigClient {
     // command, never publish a topic that is not exactly cmnd/<dev>/<command>.
     const partErr = this._validateTopicParts(op.deviceId, op.command);
     if (partErr) {
-      op.reject(partErr);
-      this._pump(deviceId);
+      this._fail(deviceId, op, partErr);
       return;
     }
 
@@ -169,7 +222,7 @@ class TasmotaConfigClient {
     }, op.timeoutMs);
 
     const topic = CONFIG_CMD_TOPIC(op.deviceId, op.command);
-    client.publish(topic, op.payload, { qos: 1, retain: false }, (err) => {
+    this.client.publish(topic, op.payload, { qos: 1, retain: false }, (err) => {
       if (err) {
         const e = new Error(`Tasmota config publish failed for ${deviceId} ${op.command}: ${err.message}`);
         e.code = 'CFG_PUBLISH_FAILED';
@@ -207,6 +260,7 @@ class TasmotaConfigClient {
 
   _settle(deviceId, op, value) {
     if (this.inflight.get(deviceId) === op) this.inflight.delete(deviceId);
+    if (op.connectTimer) clearTimeout(op.connectTimer);
     if (op.timer) clearTimeout(op.timer);
     op.resolve(value);
     this._pump(deviceId);
@@ -214,6 +268,12 @@ class TasmotaConfigClient {
 
   _fail(deviceId, op, err) {
     if (this.inflight.get(deviceId) === op) this.inflight.delete(deviceId);
+    if (this.connecting.get(deviceId) === op) {
+      this.connecting.delete(deviceId);
+      const idx = this.connectAttempt.indexOf(deviceId);
+      if (idx !== -1) this.connectAttempt.splice(idx, 1);
+    }
+    if (op.connectTimer) clearTimeout(op.connectTimer);
     if (op.timer) clearTimeout(op.timer);
     op.reject(err);
     this._pump(deviceId);
@@ -223,12 +283,20 @@ class TasmotaConfigClient {
     const errCopy = new Error(err.message);
     errCopy.code = 'MQTT_DISCONNECTED';
     for (const [deviceId, op] of this.inflight) {
+      if (op.connectTimer) clearTimeout(op.connectTimer);
       if (op.timer) clearTimeout(op.timer);
       op.reject(errCopy);
     }
     this.inflight.clear();
+    for (const [deviceId, op] of this.connecting) {
+      if (op.connectTimer) clearTimeout(op.connectTimer);
+      op.reject(errCopy);
+    }
+    this.connecting.clear();
+    this.connectAttempt = [];
     for (const [deviceId, queue] of this.queues) {
       for (const op of queue) {
+        if (op.connectTimer) clearTimeout(op.connectTimer);
         if (op.timer) clearTimeout(op.timer);
         op.reject(errCopy);
       }
