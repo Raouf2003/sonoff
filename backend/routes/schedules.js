@@ -5,6 +5,22 @@ const Device = require('../models/Device');
 const router = express.Router();
 
 const scheduleEngine = require('../services/scheduleEngine');
+const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
+
+// Phase 7A: automatic schedule->Tasmota sync on every successful schedule CRUD.
+// Fire-and-forget: the DB operation has already succeeded by the time this runs,
+// so an MQTT/device failure can never roll back or fail the saved schedule. The
+// sync service itself respects TASMOTA_SCHEDULE_SYNC_ENABLED (dry-run vs real).
+function triggerDeviceSync(deviceId) {
+  if (!deviceId) return { status: 'skipped', deviceId: null, error: 'no deviceId' };
+  try {
+    return scheduleSyncTrigger.trigger(deviceId);
+  } catch (err) {
+    // Never let a trigger-side failure break the CRUD response.
+    console.error(`[schedules] sync trigger error for ${deviceId}:`, err.message);
+    return { status: 'failed', deviceId, error: err.message };
+  }
+}
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -135,7 +151,8 @@ router.post('/', async (req, res) => {
     const data = validation.data;
 
     const schedule = await Schedule.create({ ownerId: req.userId, ...data });
-    res.status(201).json(schedule.toJSON());
+    const sync = triggerDeviceSync(schedule.deviceId);
+    res.status(201).json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Create schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -171,7 +188,8 @@ router.patch('/:id', async (req, res) => {
     // sees the pre-edit applied state and may skip firing the changed window.
     scheduleEngine.invalidate(schedule._id);
 
-    res.json(schedule.toJSON());
+    const sync = triggerDeviceSync(schedule.deviceId);
+    res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Update schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -202,7 +220,8 @@ router.patch('/:id/enable', async (req, res) => {
         console.error('[schedules] release on disable error:', err.message);
       });
     }
-    res.json(schedule.toJSON());
+    const sync = triggerDeviceSync(schedule.deviceId);
+    res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Toggle schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -215,12 +234,16 @@ router.delete('/:id', async (req, res) => {
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
+    // Capture the affected device BEFORE deleting: after deleteOne() the
+    // schedule document no longer exists, but sync still needs the deviceId.
+    const deviceId = schedule.deviceId;
     // Release channels the schedule was holding ON before removing it.
     scheduleEngine.release(schedule).catch((err) => {
       console.error('[schedules] release on delete error:', err.message);
     });
     await schedule.deleteOne();
-    res.json({ ok: true });
+    const sync = triggerDeviceSync(deviceId);
+    res.json({ ok: true, sync });
   } catch (err) {
     console.error('Delete schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });
