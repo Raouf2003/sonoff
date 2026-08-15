@@ -20,9 +20,11 @@ after(() => {
   Device.findOne = originals.findOne;
 });
 
-function makeApp({ production } = {}) {
-  const prev = process.env.NODE_ENV;
+function makeApp({ production, enableSyncRoute } = {}) {
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevFlag = process.env.ENABLE_SCHEDULE_SYNC_ROUTE;
   if (production !== undefined) process.env.NODE_ENV = production;
+  if (enableSyncRoute !== undefined) process.env.ENABLE_SCHEDULE_SYNC_ROUTE = enableSyncRoute;
   const app = express();
   app.use(express.json());
   app.use((req, res, next) => {
@@ -33,7 +35,8 @@ function makeApp({ production } = {}) {
   return {
     server: app.listen(0),
     restoreEnv: () => {
-      if (production !== undefined) process.env.NODE_ENV = prev;
+      if (production !== undefined) process.env.NODE_ENV = prevNodeEnv;
+      if (enableSyncRoute !== undefined) process.env.ENABLE_SCHEDULE_SYNC_ROUTE = prevFlag;
     },
   };
 }
@@ -124,6 +127,32 @@ test('POST /api/dev/sync/:deviceId returns 404 when NODE_ENV=production', async 
     assert.strictEqual(res.status, 404);
   } finally {
     await close();
+  }
+});
+
+test('POST /api/dev/sync/:deviceId reaches the handler when production but ENABLE_SCHEDULE_SYNC_ROUTE=true', async () => {
+  const manualSync = scheduleSyncService.manualSync;
+  scheduleSyncService.manualSync = async (deviceId) => ({
+    status: 'pending',
+    deviceId,
+    enabled: false,
+    plan: { requiredTimerCount: 2, timers: [], rules: [] },
+    allocation: [],
+    protected: { timers: [], rules: [] },
+    intendedWrites: [],
+    publishedWrites: [],
+    verification: [],
+  });
+  const { base, close } = await start({ production: 'production', enableSyncRoute: 'true' });
+  try {
+    const res = await fetch(`${base}/sync/${DEVICE.deviceId}`, { method: 'POST' });
+    const body = await res.json();
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.deviceId, DEVICE.deviceId);
+    assert.deepStrictEqual(body.publishedWrites, []);
+  } finally {
+    await close();
+    scheduleSyncService.manualSync = manualSync;
   }
 });
 

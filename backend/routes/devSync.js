@@ -15,7 +15,10 @@ const router = express.Router();
 // control routes. Timer3, Rule1 and Rule3 are never touched (see
 // scheduleSyncService protectedResources/allocateSlots).
 router.post('/sync/:deviceId', async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.ENABLE_SCHEDULE_SYNC_ROUTE !== 'true'
+  ) {
     return res.status(404).json({ error: 'Not found' });
   }
   try {
