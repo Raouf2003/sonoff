@@ -411,6 +411,70 @@ test('a multi-channel plan with Action:3 timers verifies on the first attempt (n
   }
 });
 
+test('verification re-reads ONLY the written slots (Timer1, Timer2, Rule2), not all 19', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  const calls = installFakeConfigChannel(state);
+  schedulesFixture = () => [
+    dailySchedule({ name: 'multi', channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] }),
+  ];
+  const out = await syncService.syncDevice('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+  assert.strictEqual(out.status, 'synced');
+  assert.deepStrictEqual(out.changedTimers.sort(), [1, 2]);
+  assert.deepStrictEqual(out.changedRules, [2]);
+
+  const reads = calls.filter((c) => c.payload === '').map((c) => c.command);
+  const count = (name) => reads.filter((cmd) => cmd === name).length;
+
+  // The full-state snapshot (initial read + allocation/diff) touches every slot exactly once.
+  // Verification adds a SECOND read ONLY for the two written timers and Rule2.
+  assert.strictEqual(count('Timer1'), 2, 'Timer1 read once for initial snapshot + once for verification');
+  assert.strictEqual(count('Timer2'), 2, 'Timer2 read once for initial snapshot + once for verification');
+  assert.strictEqual(count('Rule2'), 2, 'Rule2 read once for initial snapshot + once for verification');
+  for (let i = 3; i <= 16; i++) {
+    assert.strictEqual(count(`Timer${i}`), 1, `unchanged Timer${i} must only appear in the initial snapshot`);
+  }
+  assert.strictEqual(count('Rule1'), 1, 'unchanged Rule1 must only appear in the initial snapshot');
+  assert.strictEqual(count('Rule3'), 1, 'unchanged Rule3 must only appear in the initial snapshot');
+  // 19 initial + exactly 3 verification reads; nothing beyond the changed slots was re-read.
+  assert.strictEqual(reads.length, 22, '19 initial reads + 3 changed-slot verification reads');
+});
+
+test('verification for a direct-only plan re-reads ONLY the written timers (no rule reads)', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  const calls = installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const out = await syncService.syncDevice('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+  assert.strictEqual(out.status, 'synced');
+  assert.deepStrictEqual(out.changedTimers.sort(), [1, 2]);
+  assert.deepStrictEqual(out.changedRules, []);
+
+  const reads = calls.filter((c) => c.payload === '').map((c) => c.command);
+  const count = (name) => reads.filter((cmd) => cmd === name).length;
+
+  assert.strictEqual(count('Timer1'), 2);
+  assert.strictEqual(count('Timer2'), 2);
+  assert.strictEqual(count('Rule2'), 1, 'Rule2 unchanged and never re-read during verification');
+  for (let i = 3; i <= 16; i++) {
+    assert.strictEqual(count(`Timer${i}`), 1, `unchanged Timer${i} read only in the initial snapshot`);
+  }
+  assert.strictEqual(reads.length, 21, '19 initial reads + 2 changed-timer verification reads');
+});
+
+test('readDeviceScheduleState can fetch a named subset without the full-state snapshot', async () => {
+  const state = deviceState();
+  const calls = installFakeConfigChannel(state);
+  const out = await syncService.readDeviceScheduleState('34987AC30304', { timerIndexes: [1, 2], ruleIndexes: [2] });
+  assert.strictEqual(out.timers.length, 2);
+  assert.strictEqual(out.timers[0].index, 1);
+  assert.strictEqual(out.timers[1].index, 2);
+  assert.strictEqual(out.rules.length, 1);
+  assert.strictEqual(out.rules[0].index, 2);
+  const readCommands = calls.filter((c) => c.payload === '').map((c) => c.command).sort();
+  assert.deepStrictEqual(readCommands, ['Rule2', 'Timer1', 'Timer2']);
+});
+
 test('syncDevice no-op: unchanged device yields synced with zero changes', async () => {
   process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
   const state = deviceState();

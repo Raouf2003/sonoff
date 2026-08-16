@@ -99,31 +99,44 @@ function timerPayload(t) {
   });
 }
 
-// Read all 16 timers and 3 rules individually (never the bulk `Timers`
-// response). Reads are best-effort: a missing timer/rule response normalizes to
-// its default so the sync can still proceed with what it could verify.
-async function readDeviceScheduleState(deviceId, { traceId } = {}) {
-  const timerNames = [];
-  const ruleNames = [];
-  for (let i = 1; i <= 16; i++) timerNames.push(`Timer${i}`);
-  for (let i = 1; i <= 3; i++) ruleNames.push(`Rule${i}`);
+// Read timers and rules individually (never the bulk `Timers` response). By
+// default reads all 16 timers and 3 rules (the full state snapshot used for the
+// initial read and diffing). Pass explicit `timerIndexes`/`ruleIndexes` to read
+// only a subset - the verification phase uses exactly the slots that were
+// written, so unchanged slots are never re-fetched. Reads are best-effort: a
+// missing timer/rule response normalizes to its default so the sync can still
+// proceed with what it could verify.
+async function readDeviceScheduleState(deviceId, { traceId, timerIndexes, ruleIndexes } = {}) {
+  const readTimers = timerIndexes === undefined ? Array.from({ length: 16 }, (_, i) => i + 1) : timerIndexes;
+  const readRules = ruleIndexes === undefined ? [1, 2, 3] : ruleIndexes;
 
-  const responses = await Promise.all([
-    ...timerNames.map((name) =>
-      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name, traceId }),
-    ),
-    ...ruleNames.map((name) =>
-      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name, traceId }),
-    ),
-  ]);
+  const requests = [];
+  for (const index of readTimers) {
+    requests.push({
+      kind: 'timer',
+      index,
+      pending: tasmotaConfigClient.requestTasmotaConfig(deviceId, `Timer${index}`, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: `Timer${index}`, traceId }),
+    });
+  }
+  for (const index of readRules) {
+    requests.push({
+      kind: 'rule',
+      index,
+      pending: tasmotaConfigClient.requestTasmotaConfig(deviceId, `Rule${index}`, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: `Rule${index}`, traceId }),
+    });
+  }
 
-  const timers = timerNames.map((name, i) => {
+  const responses = await Promise.all(requests.map((r) => r.pending));
+
+  const timers = [];
+  const rules = [];
+  requests.forEach((r, i) => {
     const payload = responses[i];
-    return { index: i + 1, ...normalizeTimer(payload && payload[name]) };
-  });
-  const rules = ruleNames.map((name, i) => {
-    const payload = responses[i + 16];
-    return normalizeRule(i + 1, payload && payload[name]);
+    if (r.kind === 'timer') {
+      timers.push({ index: r.index, ...normalizeTimer(payload && payload[`Timer${r.index}`]) });
+    } else {
+      rules.push(normalizeRule(r.index, payload && payload[`Rule${r.index}`]));
+    }
   });
   return { timers, rules };
 }
@@ -454,7 +467,11 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
         summary.publishedWrites = summary.intendedWrites.slice();
 
         logger.log(`[SYNC VERIFY READ] traceId=${traceId} attempt=${attempts}`);
-        const after = await readDeviceScheduleState(deviceId, { traceId });
+        const after = await readDeviceScheduleState(deviceId, {
+          traceId,
+          timerIndexes: writes.filter((w) => w.kind === 'timer').map((w) => w.index),
+          ruleIndexes: writes.filter((w) => w.kind === 'rule').map((w) => w.index),
+        });
         let verified = true;
         const verification = [];
         for (const w of writes) {
