@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const Device = require('../models/Device');
 const Schedule = require('../models/Schedule');
 const { compile, MAX_TIMERS, MAX_RULE_LENGTH } = require('./scheduleCompiler');
@@ -101,7 +102,7 @@ function timerPayload(t) {
 // Read all 16 timers and 3 rules individually (never the bulk `Timers`
 // response). Reads are best-effort: a missing timer/rule response normalizes to
 // its default so the sync can still proceed with what it could verify.
-async function readDeviceScheduleState(deviceId) {
+async function readDeviceScheduleState(deviceId, { traceId } = {}) {
   const timerNames = [];
   const ruleNames = [];
   for (let i = 1; i <= 16; i++) timerNames.push(`Timer${i}`);
@@ -109,10 +110,10 @@ async function readDeviceScheduleState(deviceId) {
 
   const responses = await Promise.all([
     ...timerNames.map((name) =>
-      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name }),
+      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name, traceId }),
     ),
     ...ruleNames.map((name) =>
-      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name }),
+      tasmotaConfigClient.requestTasmotaConfig(deviceId, name, '', { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: name, traceId }),
     ),
   ]);
 
@@ -303,8 +304,22 @@ function allocationView(allocation) {
 // gates, never a global lock).
 const deviceSyncGates = new Map();
 
+// Diagnostic trace channel (observability only - no behavior change). Every
+// top-level syncDevice invocation gets a fresh traceId; it is logged at every
+// phase boundary so a Tasmota console capture can be correlated to exactly one
+// invocation and to each internal retry/readback cycle.
+function syncLogger(options) {
+  return (options && options.logger) || console;
+}
+
 function syncDevice(deviceId, options) {
   const id = String(deviceId || '');
+  const traceId = (options && options.traceId) || crypto.randomUUID();
+  const source = (options && options.source) || 'unknown';
+  const logger = syncLogger(options);
+  const startedAt = Date.now();
+  logger.log(`[SYNC ENTER] traceId=${traceId} device=${id} source=${source}`);
+
   const prev = deviceSyncGates.get(id) || Promise.resolve();
   let release;
   const completed = new Promise((resolve) => {
@@ -313,14 +328,18 @@ function syncDevice(deviceId, options) {
   const tail = prev.catch(() => {}).then(() => completed);
   deviceSyncGates.set(id, tail);
   return (async () => {
+    logger.log(`[SYNC GATE WAIT] traceId=${traceId} device=${id}`);
     try {
       await prev;
     } catch (err) {
       // runSyncDevice always resolves a summary (never rejects), so this arm is
       // purely defensive against a genuinely rejected gate predecessor.
     }
+    logger.log(`[SYNC GATE ACQUIRED] traceId=${traceId} device=${id}`);
     try {
-      return await runSyncDevice(id, options || {});
+      const result = await runSyncDevice(id, { ...(options || {}), traceId, source, logger });
+      logger.log(`[SYNC EXIT] traceId=${traceId} device=${id} status=${result && result.status} durationMs=${Date.now() - startedAt}`);
+      return result;
     } finally {
       release();
       if (deviceSyncGates.get(id) === tail) deviceSyncGates.delete(id);
@@ -331,7 +350,7 @@ function syncDevice(deviceId, options) {
 // Sync one device: read -> compile -> allocate -> diff -> apply (if enabled)
 // -> readback verify with bounded retries. Never throws for expected conditions.
 // Returns a structured result ({ status, changedTimers, changedRules, ... }).
-async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule } = {}) {
+async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule, traceId = '?', source = 'unknown', logger = console } = {}) {
   const summary = {
     status: 'pending',
     deviceId,
@@ -376,7 +395,8 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
       return summary;
     }
 
-    const actual = await readDeviceScheduleState(deviceId);
+    logger.log(`[SYNC INITIAL READ] traceId=${traceId}`);
+    const actual = await readDeviceScheduleState(deviceId, { traceId });
     const managedIndexes = (device && device.scheduleSyncInfo && device.scheduleSyncInfo.managedTimerIndexes) || [];
     summary.protected = protectedResources(actual, managedIndexes);
     const result = computeWrites(plan, actual, managedIndexes);
@@ -412,23 +432,29 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     while (attempts < MAX_SYNC_ATTEMPTS) {
       attempts += 1;
       summary.attempts = attempts;
+      logger.log(`[SYNC ATTEMPT] traceId=${traceId} attempt=${attempts}/${MAX_SYNC_ATTEMPTS}`);
       try {
         for (const w of writes) {
           if (w.kind === 'timer') {
+            logger.log(`[SYNC WRITE] traceId=${traceId} type=Timer slot=${w.index}`);
             await tasmotaConfigClient.requestTasmotaConfig(deviceId, `Timer${w.index}`, timerPayload(w.desired), {
               timeoutMs: DEFAULT_TIMEOUT_MS,
               expectedResponseKey: `Timer${w.index}`,
+              traceId,
             });
           } else {
+            logger.log(`[SYNC WRITE] traceId=${traceId} type=Rule slot=${w.index}`);
             await tasmotaConfigClient.requestTasmotaConfig(deviceId, `Rule2`, w.text, {
               timeoutMs: DEFAULT_TIMEOUT_MS,
               expectedResponseKey: 'Rule2',
+              traceId,
             });
           }
         }
         summary.publishedWrites = summary.intendedWrites.slice();
 
-        const after = await readDeviceScheduleState(deviceId);
+        logger.log(`[SYNC VERIFY READ] traceId=${traceId} attempt=${attempts}`);
+        const after = await readDeviceScheduleState(deviceId, { traceId });
         let verified = true;
         const verification = [];
         for (const w of writes) {
@@ -444,6 +470,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
             if (!matches) {
               verified = false;
               lastError = new Error(`Timer${w.index} verification failed on attempt ${attempts}`);
+              logger.log(`[SYNC VERIFY MISMATCH] traceId=${traceId} attempt=${attempts} type=Timer slot=${w.index} desired=${JSON.stringify(w.desired)} actual=${JSON.stringify(current || null)} diff=${JSON.stringify(diffTimer(w.desired, current || {}))}`);
             }
           } else {
             const current = after.rules.find((r) => r.index === w.index);
@@ -457,10 +484,12 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
             if (!matches) {
               verified = false;
               lastError = new Error(`Rule2 verification failed on attempt ${attempts}`);
+              logger.log(`[SYNC VERIFY MISMATCH] traceId=${traceId} attempt=${attempts} type=Rule slot=${w.index} desired=${JSON.stringify({ State: 'ON', Rules: w.text })} actual=${JSON.stringify(current || null)} diff=${JSON.stringify(diffRule({ State: 'ON', Rules: w.text }, current || {}))}`);
             }
           }
         }
         summary.verification = verification;
+        logger.log(`[SYNC VERIFY RESULT] traceId=${traceId} attempt=${attempts} matched=${verified}`);
 
         if (verified) {
           summary.status = 'synced';
@@ -513,6 +542,26 @@ function sameTimer(a, b) {
     a.Output === b.Output &&
     a.Action === b.Action
   );
+}
+
+const TIMER_FIELDS = ['Enable', 'Mode', 'Time', 'Window', 'Days', 'Repeat', 'Output', 'Action'];
+
+// Field-level diff between desired and actual (diagnostic only). Only fields
+// that differ are reported, so the exact verification-failure cause is visible.
+function diffTimer(desired, actual) {
+  const diff = {};
+  for (const f of TIMER_FIELDS) {
+    if (desired[f] !== actual[f]) diff[f] = { desired: desired[f], actual: actual[f] };
+  }
+  return diff;
+}
+
+function diffRule(desired, actual) {
+  const diff = {};
+  for (const f of ['State', 'Once', 'StopOnError', 'Rules']) {
+    if (desired[f] !== actual[f]) diff[f] = { desired: desired[f], actual: actual[f] };
+  }
+  return diff;
 }
 
 // DEV-ONLY (Phase 6.5): manual sync trigger for the real device. Wraps

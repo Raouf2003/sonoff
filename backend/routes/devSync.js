@@ -35,7 +35,7 @@ router.post('/sync/:deviceId', async (req, res) => {
       return res.status(403).json({ error: 'You do not own this device' });
     }
 
-    const report = await scheduleSyncService.manualSync(deviceId);
+    const report = await scheduleSyncService.manualSync(deviceId, { source: 'manual-sync' });
     res.json(report);
   } catch (err) {
     console.error('Dev manual sync error:', err.message);

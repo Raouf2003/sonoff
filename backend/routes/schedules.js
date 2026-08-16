@@ -11,10 +11,12 @@ const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
 // Fire-and-forget: the DB operation has already succeeded by the time this runs,
 // so an MQTT/device failure can never roll back or fail the saved schedule. The
 // sync service itself respects TASMOTA_SCHEDULE_SYNC_ENABLED (dry-run vs real).
-function triggerDeviceSync(deviceId) {
+// `source` is diagnostic metadata for trace correlation (schedule-create /
+// schedule-update / schedule-enable / schedule-delete), never behavior.
+function triggerDeviceSync(deviceId, source) {
   if (!deviceId) return { status: 'skipped', deviceId: null, error: 'no deviceId' };
   try {
-    return scheduleSyncTrigger.trigger(deviceId);
+    return scheduleSyncTrigger.trigger(deviceId, { source });
   } catch (err) {
     // Never let a trigger-side failure break the CRUD response.
     console.error(`[schedules] sync trigger error for ${deviceId}:`, err.message);
@@ -151,7 +153,7 @@ router.post('/', async (req, res) => {
     const data = validation.data;
 
     const schedule = await Schedule.create({ ownerId: req.userId, ...data });
-    const sync = triggerDeviceSync(schedule.deviceId);
+    const sync = triggerDeviceSync(schedule.deviceId, 'schedule-create');
     res.status(201).json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Create schedule error:', err);
@@ -188,7 +190,7 @@ router.patch('/:id', async (req, res) => {
     // sees the pre-edit applied state and may skip firing the changed window.
     scheduleEngine.invalidate(schedule._id);
 
-    const sync = triggerDeviceSync(schedule.deviceId);
+    const sync = triggerDeviceSync(schedule.deviceId, 'schedule-update');
     res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Update schedule error:', err);
@@ -220,7 +222,7 @@ router.patch('/:id/enable', async (req, res) => {
         console.error('[schedules] release on disable error:', err.message);
       });
     }
-    const sync = triggerDeviceSync(schedule.deviceId);
+    const sync = triggerDeviceSync(schedule.deviceId, 'schedule-enable');
     res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Toggle schedule error:', err);
@@ -242,7 +244,7 @@ router.delete('/:id', async (req, res) => {
       console.error('[schedules] release on delete error:', err.message);
     });
     await schedule.deleteOne();
-    const sync = triggerDeviceSync(deviceId);
+    const sync = triggerDeviceSync(deviceId, 'schedule-delete');
     res.json({ ok: true, sync });
   } catch (err) {
     console.error('Delete schedule error:', err);

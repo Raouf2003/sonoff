@@ -148,6 +148,21 @@ test('lastResult carries the successful sync report after drain', async () => {
   assert.deepStrictEqual(trigger.lastResult('34987AC30304'), { status: 'synced', deviceId: '34987AC30304' });
 });
 
+test('trigger forwards the source option into the sync service call (diagnostic metadata only)', async () => {
+  const seen = [];
+  trigger = new ScheduleSyncTrigger({
+    syncFn: (deviceId, options) => {
+      seen.push({ deviceId, options });
+      return Promise.resolve({ status: 'synced', deviceId });
+    },
+    logger: console,
+  });
+  trigger.trigger('DEV-A', { source: 'schedule-create' });
+  await trigger.whenIdle('DEV-A');
+  assert.strictEqual(seen.length, 1);
+  assert.strictEqual(seen[0].options.source, 'schedule-create');
+});
+
 test('environment safety: with TASMOTA_SCHEDULE_SYNC_ENABLED=false the integration path stays a dry-run and never enables writes', async () => {
   process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
   let syncedDeviceId = null;

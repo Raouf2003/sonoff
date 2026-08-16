@@ -18,16 +18,18 @@ const scheduleSyncService = require('./scheduleSyncService');
 //    roll back or fail an already-saved schedule.
 class ScheduleSyncTrigger {
   constructor({ syncFn, logger } = {}) {
-    this.syncFn = syncFn || ((deviceId) => scheduleSyncService.syncDevice(deviceId));
+    this.syncFn = syncFn || ((deviceId, options) => scheduleSyncService.syncDevice(deviceId, options));
     this.logger = logger || console;
-    // deviceId -> { running, pending, tail, resolveTail, lastResult }
+    // deviceId -> { running, pending, tail, resolveTail, lastResult, source }
     this.states = new Map();
   }
 
   // Fire-and-forget trigger. Synchronously returns a queued indication so the
   // schedule CRUD response is never delayed; the actual sync happens on the
-  // per-device serialized queue in the background.
-  trigger(deviceId) {
+  // per-device serialized queue in the background. options.source is diagnostic
+  // metadata (schedule-create / schedule-update / ...) forwarded to syncDevice
+  // for trace correlation - it never changes sync behavior.
+  trigger(deviceId, options) {
     const id = String(deviceId || '').trim();
     if (!id) {
       this.logger.error(`[scheduleSyncTrigger] trigger skipped: invalid deviceId=${JSON.stringify(deviceId)}`);
@@ -35,9 +37,10 @@ class ScheduleSyncTrigger {
     }
     let st = this.states.get(id);
     if (!st) {
-      st = { running: false, pending: false, tail: null, resolveTail: null, lastResult: null };
+      st = { running: false, pending: false, tail: null, resolveTail: null, lastResult: null, source: null };
       this.states.set(id, st);
     }
+    if (options && options.source) st.source = options.source;
     if (st.running) {
       // A sync is already executing for this device: mark that a fresh run is
       // required after it finishes (coalescing), and report queued.
@@ -68,7 +71,7 @@ class ScheduleSyncTrigger {
         st.pending = false;
         let result;
         try {
-          result = await this.syncFn(deviceId);
+          result = await this.syncFn(deviceId, { source: st.source });
         } catch (err) {
           // A sync failure must never propagate into the CRUD caller. Capture
           // and log it, and let a pending follow-up still run.

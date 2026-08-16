@@ -27,11 +27,15 @@ const CONFIG_CMD_TOPIC = (deviceId, command) => `cmnd/${deviceId}/${command}`;
 // Each request has a bounded timeout; on timeout/error/disconnect every
 // pending entry is cleaned up (no orphan promises, no leaked timers).
 class TasmotaConfigClient {
-  constructor({ mqttClient, brokerUrl, username, password } = {}) {
+  constructor({ mqttClient, brokerUrl, username, password, logger } = {}) {
     this.client = mqttClient || null;
     this.brokerUrl = brokerUrl || process.env.MQTT_BROKER_URL;
     this.username = username !== undefined ? username : process.env.MQTT_USERNAME;
     this.password = password !== undefined ? password : process.env.MQTT_PASSWORD;
+    // Diagnostic trace channel (observability only). When a request carries a
+    // traceId the publish and its matched RESULT are logged so the Tasmota
+    // console timeline can be correlated to a single sync invocation.
+    this.logger = logger || console;
     // deviceId -> Set of topics already subscribed (idempotent subscribe)
     this.subscribed = new Set();
     // deviceId -> queue of pending ops (FIFO), one pumped at a time
@@ -112,7 +116,7 @@ class TasmotaConfigClient {
   // Public API: issue one Tasmota configuration command and resolve with the
   // parsed `stat/<deviceId>/RESULT` payload once the expectedResponseKey is
   // present. Rejects on timeout / publish failure / disconnect.
-  requestTasmotaConfig(deviceId, command, payload = '', { timeoutMs = DEFAULT_TIMEOUT_MS, expectedResponseKey } = {}) {
+  requestTasmotaConfig(deviceId, command, payload = '', { timeoutMs = DEFAULT_TIMEOUT_MS, expectedResponseKey, traceId } = {}) {
     return new Promise((resolve, reject) => {
       const partErr = this._validateTopicParts(deviceId, command);
       if (partErr) {
@@ -124,6 +128,7 @@ class TasmotaConfigClient {
         command,
         payload: String(payload),
         expectedResponseKey,
+        traceId,
         timeoutMs,
         resolve,
         reject,
@@ -222,6 +227,9 @@ class TasmotaConfigClient {
     }, op.timeoutMs);
 
     const topic = CONFIG_CMD_TOPIC(op.deviceId, op.command);
+    if (op.traceId) {
+      this.logger.log(`[SYNC MQTT COMMAND] traceId=${op.traceId} command=${op.command} payload=${op.payload}`);
+    }
     this.client.publish(topic, op.payload, { qos: 1, retain: false }, (err) => {
       if (err) {
         const e = new Error(`Tasmota config publish failed for ${deviceId} ${op.command}: ${err.message}`);
@@ -254,6 +262,9 @@ class TasmotaConfigClient {
       if (!Object.prototype.hasOwnProperty.call(parsed, expected)) return;
     } else if (!Object.keys(parsed).some((k) => k.startsWith('Timer') || k.startsWith('Rule'))) {
       return;
+    }
+    if (op.traceId) {
+      this.logger.log(`[SYNC MQTT RESULT] traceId=${op.traceId} command=${op.command} payload=${message}`);
     }
     this._settle(deviceId, op, parsed);
   }

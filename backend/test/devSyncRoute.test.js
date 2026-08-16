@@ -57,17 +57,20 @@ async function start(opts) {
 
 test('POST /api/dev/sync/:deviceId returns the full manual sync report', async () => {
   const manualSync = scheduleSyncService.manualSync;
-  scheduleSyncService.manualSync = async (deviceId) => ({
-    status: 'pending',
-    deviceId,
-    enabled: false,
-    plan: { requiredTimerCount: 2, timers: [], rules: [] },
-    allocation: [{ logical: 1, physical: 1 }, { logical: 2, physical: 2 }],
-    protected: { timers: [{ index: 3, reason: 'user Rule1 trigger' }], rules: [{ index: 1, reason: 'user rule' }, { index: 3, reason: 'user rule' }] },
-    intendedWrites: [{ kind: 'timer', index: 1, config: '{}' }, { kind: 'timer', index: 2, config: '{}' }],
-    publishedWrites: [],
-    verification: [],
-  });
+  scheduleSyncService.manualSync = async (deviceId, options) => {
+    assert.strictEqual(options.source, 'manual-sync', 'manual route must label the sync source');
+    return {
+      status: 'pending',
+      deviceId,
+      enabled: false,
+      plan: { requiredTimerCount: 2, timers: [], rules: [] },
+      allocation: [{ logical: 1, physical: 1 }, { logical: 2, physical: 2 }],
+      protected: { timers: [{ index: 3, reason: 'user Rule1 trigger' }], rules: [{ index: 1, reason: 'user rule' }, { index: 3, reason: 'user rule' }] },
+      intendedWrites: [{ kind: 'timer', index: 1, config: '{}' }, { kind: 'timer', index: 2, config: '{}' }],
+      publishedWrites: [],
+      verification: [],
+    };
+  };
 
   const { base, close } = await start();
   try {

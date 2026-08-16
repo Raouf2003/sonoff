@@ -352,6 +352,25 @@ test('labeled deviceId is also rejected before any publish', async () => {
   assert.deepStrictEqual(client.published, []);
 });
 
+test('a request with a traceId logs the MQTT command and its matching RESULT with that traceId', async () => {
+  const client = makeClient();
+  const logLines = [];
+  const cfg = new TasmotaConfigClient({ mqttClient: client, logger: { log: (m) => logLines.push(String(m)) } });
+  const p = cfg.requestTasmotaConfig('34987AC30304', 'Timer1', '{"Enable":1}', {
+    expectedResponseKey: 'Timer1',
+    traceId: 'TRACE-1',
+  });
+  assert.ok(logLines.some((l) => l.includes('[SYNC MQTT COMMAND]') && l.includes('traceId=TRACE-1') && l.includes('command=Timer1')));
+  client.emit('message', 'stat/34987AC30304/RESULT', JSON.stringify({ Timer1: { Enable: 1 } }));
+  assert.deepStrictEqual(await p, { Timer1: { Enable: 1 } });
+  assert.ok(logLines.some((l) => l.includes('[SYNC MQTT RESULT]') && l.includes('traceId=TRACE-1') && l.includes('command=Timer1')));
+  // A request WITHOUT a traceId must stay silent (diagnostic channel off).
+  const silent = cfg.requestTasmotaConfig('dev-x', 'Rule1', '', { expectedResponseKey: 'Rule1' });
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Rule1: { State: 'OFF' } }));
+  await silent;
+  assert.strictEqual(logLines.some((l) => l.includes('[SYNC MQTT COMMAND]') && l.includes('command=Rule1')), false, 'no traceId => no MQTT trace log');
+});
+
 test('a queued op whose command becomes labeled is rejected before ever being published', async () => {
   const { cfg, client } = configClient();
   const p1 = cfg.requestTasmotaConfig('dev-x', 'Timer10', '', { expectedResponseKey: 'Timer10' });

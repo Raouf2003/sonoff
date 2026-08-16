@@ -536,6 +536,103 @@ test('different devices sync fully in parallel: one device never blocks another'
   assert.strictEqual(rB.status, 'pending');
 });
 
+// ---------------------------------------------------------------------------
+// Diagnostic trace (observability only - no behavior change)
+// ---------------------------------------------------------------------------
+
+// Capture the diagnostic [SYNC ...] log lines emitted by syncDevice while the
+// trace is enabled. A capture logger is injected via options.logger so tests
+// assert on traceIds WITHOUT touching the real console.
+function makeCaptureLogger() {
+  const lines = [];
+  const logger = {
+    log: (m) => lines.push(String(m)),
+    error: () => {},
+    warn: () => {},
+    info: () => {},
+  };
+  return { lines, logger };
+}
+
+test('three independent syncDevice invocations receive distinct traceIds', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const { lines, logger } = makeCaptureLogger();
+  const opts = { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel, logger };
+  await Promise.all([
+    syncService.syncDevice('34987AC30304', opts),
+    syncService.syncDevice('34987AC30304', opts),
+    syncService.syncDevice('34987AC30304', opts),
+  ]);
+  const enters = lines.filter((l) => l.includes('[SYNC ENTER]'));
+  assert.strictEqual(enters.length, 3, 'one ENTER per invocation');
+  const ids = enters.map((l) => /traceId=(\S+)/.exec(l)[1]);
+  assert.strictEqual(new Set(ids).size, 3, 'each invocation must get a distinct traceId');
+});
+
+test('retries inside one invocation share a single traceId across all attempts', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  // Sabotage readback: any Timer write returns an Enable:0 (verification fails),
+  // forcing the bounded retry loop to run all MAX_SYNC_ATTEMPTS attempts.
+  mock.method(tasmotaConfigClient, 'requestTasmotaConfig', (deviceId, command, payload, opts) => {
+    const key = opts && opts.expectedResponseKey ? opts.expectedResponseKey : command;
+    if (/^Timer(\d+)$/.test(key)) {
+      const idx = Number(key.slice(5));
+      const body = payload === '' || payload === undefined ? null : JSON.parse(payload);
+      if (body) state.timers[idx - 1] = { ...state.timers[idx - 1], ...body, Enable: 0 };
+      return Promise.resolve({ [key]: state.timers[idx - 1] });
+    }
+    if (/^Rule(\d+)$/.test(key)) {
+      const idx = Number(key.slice(4));
+      if (payload !== '' && payload !== undefined) state.rules[idx - 1] = { ...state.rules[idx - 1], Rules: String(payload) };
+      return Promise.resolve({ [key]: state.rules[idx - 1] });
+    }
+    return Promise.reject(new Error(`unhandled ${key}`));
+  });
+  schedulesFixture = () => [dailySchedule()];
+  const { lines, logger } = makeCaptureLogger();
+  const out = await syncService.syncDevice('34987AC30304', {
+    deviceModel: fakeDeviceModel,
+    scheduleModel: fakeScheduleModel,
+    logger,
+  });
+  assert.strictEqual(out.status, 'failed');
+  assert.strictEqual(out.attempts, syncService.MAX_SYNC_ATTEMPTS);
+  const enters = lines.filter((l) => l.includes('[SYNC ENTER]'));
+  const exits = lines.filter((l) => l.includes('[SYNC EXIT]'));
+  const attempts = lines.filter((l) => l.includes('[SYNC ATTEMPT]'));
+  assert.strictEqual(enters.length, 1, 'exactly ONE invocation');
+  assert.strictEqual(exits.length, 1, 'exactly ONE exit');
+  assert.strictEqual(attempts.length, syncService.MAX_SYNC_ATTEMPTS, 'all retry attempts logged');
+  const enterId = /traceId=(\S+)/.exec(enters[0])[1];
+  for (const a of attempts) {
+    assert.strictEqual(/traceId=(\S+)/.exec(a)[1], enterId, 'every attempt shares the invocation traceId');
+  }
+  const mismatch = lines.filter((l) => l.includes('[SYNC VERIFY MISMATCH]'));
+  assert.ok(mismatch.length > 0, 'verification mismatches must be logged with a field-level diff');
+  assert.ok(mismatch.every((l) => l.includes('diff={')), 'mismatch logs must include the exact field diff');
+});
+
+test('manualSync forwards source=manual-sync into the trace log', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule()];
+  const { lines, logger } = makeCaptureLogger();
+  await syncService.manualSync('34987AC30304', {
+    deviceModel: fakeDeviceModel,
+    scheduleModel: fakeScheduleModel,
+    logger,
+    source: 'manual-sync',
+  });
+  const enter = lines.find((l) => l.includes('[SYNC ENTER]'));
+  assert.ok(enter, 'ENTER log expected');
+  assert.ok(enter.includes('source=manual-sync'), 'manualSync must propagate source=manual-sync');
+});
+
 test('a failed sync in the middle of a same-device queue does not poison the next sync', async () => {
   process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
   const state = deviceState();
