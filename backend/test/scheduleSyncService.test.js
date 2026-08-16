@@ -32,7 +32,15 @@ function installFakeConfigChannel(state) {
     if (/^Timer(\d+)$/.test(key)) {
       const idx = Number(key.slice(5));
       const body = payload === '' || payload === undefined ? null : JSON.parse(payload);
-      if (body) state.timers[idx - 1] = { ...state.timers[idx - 1], ...body };
+      if (body) {
+        // Model the real firmware: an invalid or missing timer Output is not
+        // preserved verbatim - it normalizes to a valid output value (1 here).
+        const merged = { ...state.timers[idx - 1], ...body };
+        if (!Number.isInteger(merged.Output) || merged.Output < 1 || merged.Output > 16) {
+          merged.Output = 1;
+        }
+        state.timers[idx - 1] = merged;
+      }
       return Promise.resolve({ [key]: state.timers[idx - 1] });
     }
     if (/^Rule(\d+)$/.test(key)) {
@@ -111,6 +119,16 @@ test('normalizeRule tolerates the raw-text reply shape after a write', () => {
   assert.strictEqual(r.Length, 'ON Clock#Timer=4 DO Power1 ON ENDON'.length);
   const full = syncService.normalizeRule(1, { State: 'ON', Once: 'OFF', StopOnError: 'OFF', Length: 54, Free: 457, Rules: USER_RULE1_TEXT });
   assert.strictEqual(full.Rules, USER_RULE1_TEXT);
+});
+
+test('fake config channel models firmware: invalid timer Output (0) reads back as 1, not 0', async () => {
+  const state = deviceState();
+  installFakeConfigChannel(state);
+  const resp = await tasmotaConfigClient.requestTasmotaConfig('34987AC30304', 'Timer1', JSON.stringify({ ...defaultTimer(), Output: 0, Action: 3 }), { expectedResponseKey: 'Timer1' });
+  assert.strictEqual(resp.Timer1.Output, 1, 'firmware must never preserve an invalid Output 0');
+  // A valid Output (e.g. channel 2 on a direct timer) is preserved as-is.
+  const resp2 = await tasmotaConfigClient.requestTasmotaConfig('34987AC30304', 'Timer2', JSON.stringify({ ...defaultTimer(), Output: 2, Action: 1 }), { expectedResponseKey: 'Timer2' });
+  assert.strictEqual(resp2.Timer2.Output, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -372,6 +390,27 @@ test('syncDevice with a multi-channel plan writes Rule2 and remaps timer slots',
   // Rule2 now contains our text; a second sync is a no-op on the rule.
 });
 
+test('a multi-channel plan with Action:3 timers verifies on the first attempt (no retry)', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  const calls = installFakeConfigChannel(state);
+  schedulesFixture = () => [
+    dailySchedule({ name: 'multi', channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] }),
+  ];
+  const out = await syncService.syncDevice('34987AC30304', { deviceModel: fakeDeviceModel, scheduleModel: fakeScheduleModel });
+  assert.strictEqual(out.status, 'synced');
+  assert.strictEqual(out.verificationPassed, true);
+  assert.strictEqual(out.attempts, 1, 'Action:3 timers with canonical Output:1 must verify immediately');
+  for (const v of out.verification) {
+    assert.strictEqual(v.matches, true);
+    if (v.resource.startsWith('Timer')) assert.strictEqual(v.actual.Output, 1);
+  }
+  const timerWrites = calls.filter((c) => /^Timer[12]$/.test(c.command) && c.payload !== '');
+  for (const w of timerWrites) {
+    assert.strictEqual(JSON.parse(w.payload).Output, 1, 'writes must send canonical Output 1');
+  }
+});
+
 test('syncDevice no-op: unchanged device yields synced with zero changes', async () => {
   process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
   const state = deviceState();
@@ -461,7 +500,11 @@ function installDeferredConfigChannel(stateByDevice) {
     if (/^Timer(\d+)$/.test(key)) {
       const idx = Number(key.slice(5));
       if (payload !== '' && payload !== undefined && state) {
-        state.timers[idx - 1] = { ...state.timers[idx - 1], ...JSON.parse(payload) };
+        const merged = { ...state.timers[idx - 1], ...JSON.parse(payload) };
+        if (!Number.isInteger(merged.Output) || merged.Output < 1 || merged.Output > 16) {
+          merged.Output = 1;
+        }
+        state.timers[idx - 1] = merged;
       }
       return Promise.resolve({ [key]: state ? state.timers[idx - 1] : null });
     }

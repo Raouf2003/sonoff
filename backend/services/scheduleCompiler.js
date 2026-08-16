@@ -199,6 +199,7 @@ function compile({ deviceId, schedules, device }) {
         Window: 0,
         Days: mask,
         Repeat: 1,
+        Output: 1,
         Action: 3,
       };
     }

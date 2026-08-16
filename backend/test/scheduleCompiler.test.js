@@ -41,6 +41,9 @@ test('multiple channels in the same range are grouped into rule events', () => {
   assert.strictEqual(plan.requiredTimerCount, 2);
   assert.strictEqual(plan.timers[0].config.Action, 3);
   assert.strictEqual(plan.timers[1].config.Action, 3);
+  for (const timer of plan.timers) {
+    assert.strictEqual(timer.config.Output, 1, 'Action:3 rule timers must carry the valid canonical Output value 1');
+  }
   assert.deepStrictEqual(plan.timers[0].event.on, [1, 2]);
   assert.deepStrictEqual(plan.timers[1].event.off, [1, 2]);
   assert.strictEqual(plan.rules.length, 1);
