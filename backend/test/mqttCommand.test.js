@@ -1,7 +1,13 @@
-const { test } = require('node:test');
+const { test, mock, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { MqttGateway } = require('../services/mqttGateway');
 const runtimeState = require('../services/runtimeState');
+const syncService = require('../services/scheduleSyncService');
+const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
+
+afterEach(() => {
+  mock.restoreAll();
+});
 
 function makeClient() {
   const published = [];
@@ -267,4 +273,36 @@ test('a valid IP overrides a previous invalid lastIp', () => {
   assert.deepStrictEqual(saved, [
     { filter: { deviceId: 'dev-a' }, update: { $set: { lastIp: '192.168.1.42' } } },
   ]);
+});
+
+// A stat/<device>/RESULT is a POWER report (and ACK source). It must update
+// state exactly as before AND never cascade into a schedule sync - mqttGateway
+// has no sync wiring (that lives in scheduleSyncService / the devSync route).
+test('a stat/RESULT POWER payload resolves the ACK, feeds runtimeState, and never triggers schedule sync', async () => {
+  const gw = gateway();
+  const applied = [];
+  gw.runtimeState = {
+    ensureDeviceState() {},
+    touchDevice() {},
+    applyChannelState(deviceId, ch, st) {
+      applied.push({ deviceId, ch, st });
+      return { state: st, updatedAt: Date.now() };
+    },
+  };
+  const syncCalls = [];
+  mock.method(syncService, 'syncDevice', (...args) => {
+    syncCalls.push(args);
+    return Promise.resolve({ status: 'synced' });
+  });
+  mock.method(scheduleSyncTrigger, 'trigger', (...args) => {
+    syncCalls.push(args);
+    return { status: 'queued' };
+  });
+
+  const cmd = gw.publishCommand('dev-a', 1, 'ON');
+  gw._handle('stat/dev-a/RESULT', JSON.stringify({ POWER1: 'ON' }));
+  const outcome = await cmd;
+  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
+  assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
+  assert.strictEqual(syncCalls.length, 0, 'RESULT handling must never call schedule sync');
 });

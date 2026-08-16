@@ -289,10 +289,49 @@ function allocationView(allocation) {
   return out;
 }
 
+// Per-device serialization gate. Overlapping full syncs for the SAME device must
+// never interleave - an interleaved run reads the device's Timer/Rule config in
+// the middle of another run's writes, computes a stale-vs-desired diff against
+// that half-applied state, and re-issues the same writes (the Timer1-16 +
+// Rule1-3 echo observed on the console). EVERY caller funnels through this one
+// point:
+//   - the CRUD trigger's default syncFn (scheduleSyncTrigger -> this.syncDevice)
+//   - manualSync() / the devSync route, which otherwise bypass the trigger.
+// A call for a device waits until every earlier call for that device has fully
+// completed (apply + readback verification), then runs fresh so it re-reads the
+// latest DB + device state. Different devices run fully in parallel (per-device
+// gates, never a global lock).
+const deviceSyncGates = new Map();
+
+function syncDevice(deviceId, options) {
+  const id = String(deviceId || '');
+  const prev = deviceSyncGates.get(id) || Promise.resolve();
+  let release;
+  const completed = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.catch(() => {}).then(() => completed);
+  deviceSyncGates.set(id, tail);
+  return (async () => {
+    try {
+      await prev;
+    } catch (err) {
+      // runSyncDevice always resolves a summary (never rejects), so this arm is
+      // purely defensive against a genuinely rejected gate predecessor.
+    }
+    try {
+      return await runSyncDevice(id, options || {});
+    } finally {
+      release();
+      if (deviceSyncGates.get(id) === tail) deviceSyncGates.delete(id);
+    }
+  })();
+}
+
 // Sync one device: read -> compile -> allocate -> diff -> apply (if enabled)
 // -> readback verify with bounded retries. Never throws for expected conditions.
 // Returns a structured result ({ status, changedTimers, changedRules, ... }).
-async function syncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule } = {}) {
+async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule } = {}) {
   const summary = {
     status: 'pending',
     deviceId,

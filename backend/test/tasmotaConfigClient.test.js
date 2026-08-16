@@ -1,6 +1,12 @@
-const { test } = require('node:test');
+const { test, mock, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { TasmotaConfigClient } = require('../services/tasmotaConfigClient');
+const scheduleSyncService = require('../services/scheduleSyncService');
+const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
+
+afterEach(() => {
+  mock.restoreAll();
+});
 
 function makeClient() {
   const handlers = new Map();
@@ -142,6 +148,35 @@ test('a connection that never comes up times out cleanly with CFG_CONNECT_TIMEOU
   assert.strictEqual(cfg.connectAttempt.length, 0);
   assert.strictEqual(cfg.inflight.has('dev-x'), false);
   assert.strictEqual(cfg.queues.has('dev-x'), false);
+});
+
+// The config channel is a pure request/response pipe: a stat/<device>/RESULT
+// only ever settles the single pending config request for that device. It must
+// NEVER fan out into a new schedule sync, otherwise every RESULT would feed the
+// repeated Timer/Rule loop. syncDevice and the CRUD trigger are mocked so any
+// new wiring here would fail the test.
+test('a stat/RESULT message never triggers a schedule sync (config channel is request/response only)', async () => {
+  const { cfg, client } = configClient();
+  const syncCalls = [];
+  mock.method(scheduleSyncService, 'syncDevice', (...args) => {
+    syncCalls.push(args);
+    return Promise.resolve({ status: 'synced' });
+  });
+  mock.method(scheduleSyncTrigger, 'trigger', (...args) => {
+    syncCalls.push(args);
+    return { status: 'queued' };
+  });
+
+  // Stray RESULT with Timer/Rule keys while NO request is in flight: dropped
+  // with no new publishes and no sync.
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer1: { Enable: 1 }, Rule1: { State: 'OFF' } }));
+  // A RESULT settling a live request resolves ONLY that request.
+  const p = cfg.requestTasmotaConfig('dev-x', 'Timer1', '', { expectedResponseKey: 'Timer1' });
+  client.emit('message', 'stat/dev-x/RESULT', JSON.stringify({ Timer1: { Enable: 1 } }));
+  assert.deepStrictEqual(await p, { Timer1: { Enable: 1 } });
+
+  assert.strictEqual(syncCalls.length, 0, 'stat/RESULT handling must never call schedule sync');
+  assert.deepStrictEqual(client.published.map((m) => m.topic), ['cmnd/dev-x/Timer1']);
 });
 
 test('a failed connection cleans up and a later request can connect again', async () => {

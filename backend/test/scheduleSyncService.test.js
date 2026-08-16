@@ -427,3 +427,151 @@ test('syncDevice hides scheduleSyncInfo writes behind the disabled flag too', as
   assert.strictEqual(out.status, 'pending');
   assert.strictEqual(updated, false, 'no DB update should happen while the flag is off');
 });
+
+// ---------------------------------------------------------------------------
+// Per-device serialization gate (Phase 7B): overlapping full syncs for the same
+// device must never interleave, while different devices stay fully parallel.
+// ---------------------------------------------------------------------------
+
+// Injectable models for an arbitrary deviceId (the shared fixtures above pin
+// the device to 34987AC30304, which would collapse the two-device test).
+function modelsFor(deviceId) {
+  return {
+    deviceModel: {
+      findOne: async ({ deviceId: id }) => ({ deviceId: id, channels: 4 }),
+      updateOne: async () => ({ ok: 1 }),
+    },
+    scheduleModel: {
+      find: async ({ deviceId: id }) => [dailySchedule({ deviceId: id })],
+    },
+  };
+}
+
+// A Tasmota config channel whose replies are stalled until releaseAll(), so a
+// test can observe exactly how many sync runs are in flight at any moment.
+// Reads made before release are parked; reads made after release resolve
+// immediately (so later queued runs never hang on the released gate).
+function installDeferredConfigChannel(stateByDevice) {
+  const calls = [];
+  const waiters = [];
+  let released = false;
+  const reply = (deviceId, command, payload) => {
+    const key = command;
+    const state = stateByDevice[deviceId];
+    if (/^Timer(\d+)$/.test(key)) {
+      const idx = Number(key.slice(5));
+      if (payload !== '' && payload !== undefined && state) {
+        state.timers[idx - 1] = { ...state.timers[idx - 1], ...JSON.parse(payload) };
+      }
+      return Promise.resolve({ [key]: state ? state.timers[idx - 1] : null });
+    }
+    if (/^Rule(\d+)$/.test(key)) {
+      const idx = Number(key.slice(4));
+      if (payload !== '' && payload !== undefined && state) {
+        state.rules[idx - 1] = { ...state.rules[idx - 1], State: 'ON', Rules: String(payload), Length: String(payload).length };
+      }
+      return Promise.resolve({ [key]: state ? state.rules[idx - 1] : null });
+    }
+    return Promise.reject(new Error(`unhandled ${key}`));
+  };
+  mock.method(tasmotaConfigClient, 'requestTasmotaConfig', (deviceId, command, payload) => {
+    calls.push({ deviceId, command, payload });
+    if (released) return reply(deviceId, command, payload);
+    return new Promise((resolve) => waiters.push(() => resolve(reply(deviceId, command, payload))));
+  });
+  return {
+    calls,
+    reads: () => calls.filter((c) => c.payload === ''),
+    releaseAll: () => {
+      released = true;
+      const ws = waiters.splice(0);
+      for (const w of ws) w();
+    },
+  };
+}
+
+test('rapid syncDevice calls for the same device serialize: one full run in flight until the prior finishes', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  const ch = installDeferredConfigChannel({ 'DEV-SER': state });
+
+  const pA = syncService.syncDevice('DEV-SER', modelsFor('DEV-SER'));
+  const pB = syncService.syncDevice('DEV-SER', modelsFor('DEV-SER'));
+  const pC = syncService.syncDevice('DEV-SER', modelsFor('DEV-SER'));
+  // Let the gate settle: only the FIRST run may be mid-read (19 Timer/Rule
+  // reads). B and C are queued on the gate, not reading.
+  await new Promise((r) => setTimeout(r, 0));
+  assert.strictEqual(
+    ch.reads().every((c) => c.deviceId === 'DEV-SER') ? ch.reads().length : 0,
+    19,
+    'exactly one full read pass is in flight; the later runs are gated',
+  );
+
+  ch.releaseAll();
+  const [rA, rB, rC] = await Promise.all([pA, pB, pC]);
+  for (const r of [rA, rB, rC]) {
+    assert.strictEqual(r.status, 'pending');
+  }
+  // All three runs completed serially, never overlapping: 19 reads x 3 runs.
+  assert.strictEqual(ch.reads().length, 19 * 3, 'all three runs ran to completion with no interleaving');
+});
+
+test('different devices sync fully in parallel: one device never blocks another', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const stateA = deviceState();
+  const stateB = deviceState();
+  const ch = installDeferredConfigChannel({ 'DEV-A': stateA, 'DEV-B': stateB });
+
+  const pA = syncService.syncDevice('DEV-A', modelsFor('DEV-A'));
+  const pB = syncService.syncDevice('DEV-B', modelsFor('DEV-B'));
+  await new Promise((r) => setTimeout(r, 0));
+  // Both devices' full 19-read passes are in flight simultaneously: there is
+  // no global lock and DEV-A's sync never queues behind DEV-B's.
+  assert.strictEqual(ch.reads().filter((c) => c.deviceId === 'DEV-A').length, 19, 'DEV-A reads underway');
+  assert.strictEqual(ch.reads().filter((c) => c.deviceId === 'DEV-B').length, 19, 'DEV-B reads underway in parallel');
+
+  ch.releaseAll();
+  const [rA, rB] = await Promise.all([pA, pB]);
+  assert.strictEqual(rA.status, 'pending');
+  assert.strictEqual(rB.status, 'pending');
+});
+
+test('a failed sync in the middle of a same-device queue does not poison the next sync', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'false';
+  const state = deviceState();
+  const calls = [];
+  let readNumber = 0;
+  mock.method(tasmotaConfigClient, 'requestTasmotaConfig', (deviceId, command, payload) => {
+    const key = command;
+    calls.push({ deviceId, command, payload });
+    const respond = () => {
+      if (/^Timer(\d+)$/.test(key)) return Promise.resolve({ [key]: state.timers[Number(key.slice(5)) - 1] });
+      if (/^Rule(\d+)$/.test(key)) return Promise.resolve({ [key]: state.rules[Number(key.slice(4)) - 1] });
+      return Promise.reject(new Error(`unhandled ${key}`));
+    };
+    if (payload === '' || payload === undefined) {
+      readNumber += 1;
+      // Fail the ENTIRE SECOND run (read pass #20..38); runs 1 and 3 stay intact.
+      if (readNumber > 19 && readNumber <= 38) {
+        return Promise.reject(new Error('simulated read failure'));
+      }
+    }
+    return respond();
+  });
+
+  const m = modelsFor('DEV-FAIL');
+  const pA = syncService.syncDevice('DEV-FAIL', m);
+  const pB = syncService.syncDevice('DEV-FAIL', m);
+  const pC = syncService.syncDevice('DEV-FAIL', m);
+  const [rA, rB, rC] = await Promise.all([pA, pB, pC]);
+
+  assert.strictEqual(rA.status, 'pending', 'first sync succeeds');
+  assert.strictEqual(rB.status, 'failed', 'middle sync fails');
+  assert.match(rB.error, /simulated read failure/);
+  assert.strictEqual(rC.status, 'pending', 'third sync must still run despite the middle failure');
+  assert.strictEqual(calls.filter((c) => c.payload === '').length, 19 * 3, 'all three runs completed in order');
+
+  // The queue must remain usable for the NEXT sync after a failure.
+  const rD = await syncService.syncDevice('DEV-FAIL', m);
+  assert.strictEqual(rD.status, 'pending', 'future sync works after a previous failure');
+});
