@@ -100,6 +100,16 @@ class DeviceRepositoryService {
   /// the first result or when the last attempt failed everywhere.
   DeviceTransportSource? get lastSource => _lastSource;
 
+  /// Whether a verified local endpoint is cached and still fresh for the given
+  /// device. This indicates the device can be controlled locally without mDNS.
+  bool hasVerifiedLocalIp(String deviceId) {
+    final transport = _warmCache[deviceId];
+    final verifiedAt = _warmVerifiedAt[deviceId];
+    if (transport == null || verifiedAt == null) return false;
+    if (!isUsableHttpHost(transport.address)) return false;
+    return DateTime.now().difference(verifiedAt) < kVerifiedIpTtl;
+  }
+
   /// Background discovery warm-up for every registered device: cached verified
   /// IP first, then bounded mDNS, each endpoint MAC-verified before caching.
   /// Bounded, single-flight per device, and never blocks the UI.

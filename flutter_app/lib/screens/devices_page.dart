@@ -94,6 +94,11 @@ class _DevicesPageState extends State<DevicesPage>
   // an unknown, still-connecting state keeps the safe cloud-first default; it
   // is only flipped `false` on a confirmed disconnect / connect error.
   bool _socketConnected = true;
+
+  // Whether the socket has EVER successfully connected. Used to allow instant
+  // local control when the phone is on the same WiFi but has no internet —
+  // the socket will never connect, but a verified local IP may be cached.
+  bool _socketEverConnected = false;
   _DeviceConnectivity _connectivity = _DeviceConnectivity.unknown;
 
   // When the DEVICE last produced positive evidence (confirmed channel report,
@@ -512,6 +517,7 @@ class _DevicesPageState extends State<DevicesPage>
 
     _socket?.onConnect((_) {
       _socketConnected = true;
+      _socketEverConnected = true;
       // Reconnect: reconcile instead of waiting for the next 15s poll.
       _syncAfterReconnect();
       if (mounted) setState(() {});
@@ -773,6 +779,14 @@ class _DevicesPageState extends State<DevicesPage>
     HapticFeedback.lightImpact();
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Optimistic UI applied');
 
+// If we have a verified local IP cached and the socket has never connected,
+// route the command to the LAN immediately. This enables instant local control
+// when the phone is on the same WiFi but has no internet (socket never connects).
+// Also use local-first when the socket was connected but is now disconnected
+// (confirmed cloud outage).
+final hasLocalIp = _repository.hasVerifiedLocalIp(_selectedDeviceId!);
+final useLocalFirst = !_socketConnected || (!_socketEverConnected && hasLocalIp);
+
     // Start a delayed timer to show the pending indicator if the command
     // hasn't resolved by then. The timer is tied to this specific operation
     // via the key, so a newer command on the same channel won't be affected.
@@ -799,8 +813,9 @@ class _DevicesPageState extends State<DevicesPage>
         targetState ? 'ON' : 'OFF',
         opId: opId,
         // Route the tap immediately: when the Socket.IO cloud monitor has
-        // confirmed the cloud is unreachable, the LAN gets the command first.
-        cloudDown: !_socketConnected,
+        // confirmed the cloud is unreachable, OR when we have a verified local
+        // IP and the socket is not connected, the LAN gets the command first.
+        cloudDown: useLocalFirst,
       );
       if (!mounted) {
         ControlTimeline.end(opId);
