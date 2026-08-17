@@ -65,9 +65,13 @@ test('a concurrent command for the same device+channel SUPERSEDES the previous p
 test('a device report resolves the pending command with acked/observed', async () => {
   const gw = gateway();
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
-  gw._resolvePending('dev-a', 1, 'OFF');
+  // Mismatched report should NOT resolve - keep waiting
+  const result = gw._resolvePending('dev-a', 1, 'OFF');
+  assert.strictEqual(result, null, 'mismatched report does not resolve');
+  // Matching report should resolve
+  gw._resolvePending('dev-a', 1, 'ON');
   const outcome = await cmd;
-  assert.deepStrictEqual(outcome, { acked: false, observed: 'OFF' });
+  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
 });
 
 test('a matching report resolves with acked true', async () => {
@@ -78,7 +82,7 @@ test('a matching report resolves with acked true', async () => {
   assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
 });
 
-test('a raw stat/POWERn payload resolves the pending ACK and feeds runtimeState', async () => {
+test('a stat/RESULT payload resolves the pending ACK and feeds runtimeState', async () => {
   const gw = gateway();
   const applied = [];
   gw.runtimeState = {
@@ -90,7 +94,7 @@ test('a raw stat/POWERn payload resolves the pending ACK and feeds runtimeState'
     },
   };
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
-  gw._handle('stat/dev-a/POWER1', 'ON');
+  gw._handle('stat/dev-a/RESULT', JSON.stringify({ POWER1: 'ON' }));
   const outcome = await cmd;
   assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
   assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
@@ -146,6 +150,7 @@ function ipStateGateway({ lastIp }) {
       applied.push({ deviceId, ch, st });
       return { state: st, updatedAt: Date.now() };
     },
+    isOnline() { return true; },
   };
   gw.deviceRegistry = {
     get: () => ({ deviceId: 'dev-a', lastIp }),

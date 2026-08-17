@@ -145,7 +145,6 @@ class MqttGateway {
     // transient broker gap is less likely to lose a state report; SENSOR
     // telemetry stays qos0 to bound the load from a shared public broker.
     this.client.subscribe('stat/+/RESULT', { qos: 1 });
-    this.client.subscribe('stat/+/POWER+', { qos: 1 });
     this.client.subscribe('tele/+/STATE', { qos: 1 });
     this.client.subscribe('tele/+/LWT', { qos: 1 });
     this.client.subscribe('tele/+/SENSOR', { qos: 0 });
@@ -318,12 +317,21 @@ class MqttGateway {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);
     if (!p) return null;
+    const observedUpper = String(observed).toUpperCase();
+    const expectedUpper = p.state;
+    // For TOGGLE commands, resolve on any valid ON/OFF response
+    // For ON/OFF commands, only resolve if observed matches expected
+    const isToggle = expectedUpper === 'TOGGLE';
+    const matches = isToggle ? (observedUpper === 'ON' || observedUpper === 'OFF') : (observedUpper === expectedUpper);
+    if (!matches) {
+      console.log(`[ACK DEBUG] opId=${p.opId} channel=${channel} observed=${observedUpper} expected=${expectedUpper} -> no match, keep waiting`);
+      return null;
+    }
     clearTimeout(p.timer);
     this.pending.delete(key);
-    const acked = String(observed).toUpperCase() === p.state;
     timeline(deviceId, channel, p.opId, 'Device RESULT received');
-    console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic} payload=${JSON.stringify({ observed, expected: p.state })} channel=${channel} pendingExisted=true resolvePending=true acked=${acked}`);
-    if (p.resolve) p.resolve({ acked, observed: String(observed).toUpperCase() });
+    console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic} payload=${JSON.stringify({ observed: observedUpper, expected: expectedUpper })} channel=${channel} pendingExisted=true resolvePending=true acked=true`);
+    if (p.resolve) p.resolve({ acked: true, observed: observedUpper });
     return p.opId;
   }
 
@@ -404,11 +412,13 @@ class MqttGateway {
     if (parts[0] === 'tele' && parts[2] === 'LWT') {
       const up = payload.trim().toLowerCase() === 'online';
       this.runtimeState.ensureDeviceState(deviceId, channelCount);
+      const prevOnline = this.runtimeState.isOnline(deviceId);
       this.runtimeState.setOnline(deviceId, up);
-      if (this.io && ownerId) {
+      const newOnline = this.runtimeState.isOnline(deviceId);
+      if (this.io && ownerId && prevOnline !== newOnline) {
         this.io.to(`user:${ownerId}`).emit('device_status', {
           deviceId,
-          online: this.runtimeState.isOnline(deviceId),
+          online: newOnline,
         });
       }
       return;
@@ -421,110 +431,89 @@ class MqttGateway {
       parsed = null;
     }
 
-    // ACK DEBUG: Log every incoming MQTT message for pending command correlation
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
-    const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER(\d*)$/.test(parts[2]));
-    const pendingKey = `${deviceId}:${(() => {
-      if (isState && parsed) {
-        for (const key of Object.keys(parsed)) {
-          const m = key.match(/^POWER(\d*)$/);
-          if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
-            return m[1] ? parseInt(m[1], 10) : 1;
-          }
-        }
-      } else if (isResult && parsed) {
-        for (const key of Object.keys(parsed)) {
-          const m = key.match(/^POWER(\d*)$/);
-          if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
-            return m[1] ? parseInt(m[1], 10) : 1;
-          }
-        }
-      } else if (isResult) {
-        const m = topic.match(/POWER(\d*)$/);
-        if (m) {
-          return channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
-        }
+    const isResult = parts[0] === 'stat' && parts[2] === 'RESULT';
+
+    // Gate: skip processing for unrelated shared-broker devices
+    // Only process if we have a claimed device OR a pending command for this deviceId
+    const hasPending = this._hasPendingFor(deviceId);
+    if (!device && !hasPending) {
+      // Still record IP for unclaimed devices if STATE arrives
+      if (isState && parsed && parsed.IPAddress) {
+        this._recordDeviceIp(deviceId, parsed.IPAddress);
       }
-      return null;
-    })()}`;
-    if (isResult || isState) {
-      console.log(`[ACK DEBUG] MQTT message received: topic=${topic} payload=${payload} deviceId=${deviceId} isState=${isState} isResult=${isResult} parsed=${JSON.stringify(parsed)} pendingKey=${pendingKey} pendingExists=${this.pending.has(pendingKey)}`);
+      return;
     }
 
-    const channelUpdates = {};
-    // channel -> opId resolved by this message. Captured BEFORE the pending
-    // entry is deleted so the socket emit can correlate to the original tap.
-    const resolvedOps = {};
+    // Passive STATE handling: update runtimeState, emit only on actual change
     if (isState && parsed) {
-      Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed, topic));
-      // tele/STATE carries the device's current LAN IP; learn it as the
-      // local-first discovery hint exposed via GET /api/devices.
+      // Record LAN IP from telemetry
       this._recordDeviceIp(deviceId, parsed.IPAddress);
-    } else if (isResult && parsed) {
-      Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed, topic));
-    } else if (isResult) {
-      // Raw stat/<deviceId>/POWERn = "ON"/"OFF" (non-JSON payload). It is both
-      // a device state report AND the direct reply to a command, so it updates
-      // state and resolves any pending ACK for that channel.
-      const m = topic.match(/POWER(\d*)$/);
-      if (m) {
-        const ch = channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
-        const st = payload.trim().toUpperCase();
-        if (st === 'ON' || st === 'OFF') {
-          channelUpdates[ch] = st;
-          const opId = this._resolvePending(deviceId, ch, st, topic);
-          if (opId) resolvedOps[ch] = opId;
+      const prevOnline = this.runtimeState.isOnline(deviceId);
+      const updates = powerUpdatesFrom(parsed, channelCount);
+      if (Object.keys(updates).length) {
+        this.runtimeState.ensureDeviceState(deviceId, channelCount);
+        this.runtimeState.touchDevice(deviceId);
+        for (const [ch, st] of Object.entries(updates)) {
+          const entry = this.runtimeState.applyChannelState(deviceId, Number(ch), st);
+          // Only emit if state actually changed
+          if (entry && entry.state === st) {
+            this._emitDeviceUpdate(deviceId, Number(ch), st, null, 'state', ownerId);
+          }
         }
       }
+      // Emit device_status if online state changed (touchDevice may have restored it)
+      const newOnline = this.runtimeState.isOnline(deviceId);
+      if (this.io && ownerId && prevOnline !== newOnline) {
+        this.io.to(`user:${ownerId}`).emit('device_status', {
+          deviceId,
+          online: newOnline,
+        });
+      }
+      return;
     }
 
-    if (Object.keys(channelUpdates).length) {
-      this.runtimeState.ensureDeviceState(deviceId, channelCount);
-      this.runtimeState.touchDevice(deviceId);
-      for (const [ch, st] of Object.entries(channelUpdates)) {
-        const entry = this.runtimeState.applyChannelState(deviceId, Number(ch), st);
-        if (this.io && ownerId) {
-          const room = `user:${ownerId}`;
+    // RESULT handling: resolve pending commands AND update state
+    if (isResult && parsed) {
+      const updates = powerUpdatesFrom(parsed, channelCount);
+      const resolvedOps = {};
+      for (const [ch, st] of Object.entries(updates)) {
+        const opId = this._resolvePending(deviceId, Number(ch), st, topic);
+        if (opId) resolvedOps[ch] = opId;
+      }
+      // Update runtimeState for all channels in RESULT (whether or not they resolved a pending)
+      if (Object.keys(updates).length) {
+        this.runtimeState.ensureDeviceState(deviceId, channelCount);
+        this.runtimeState.touchDevice(deviceId);
+        for (const [ch, st] of Object.entries(updates)) {
+          const entry = this.runtimeState.applyChannelState(deviceId, Number(ch), st);
           const opId = resolvedOps[ch] || null;
-          timeline(deviceId, Number(ch), opId, 'Socket.IO emitted');
-          this.io.to(room).emit('device_update', {
-            deviceId,
-            channel: Number(ch),
-            state: st,
-            updatedAt: entry.updatedAt
-              ? new Date(entry.updatedAt).toISOString()
-              : null,
-            opId,
-          });
-          // SOCKET DEBUG: Log Socket.IO emission with source topic
-          console.log(`[SOCKET DEBUG] device_update emitted: deviceId=${deviceId} channel=${ch} state=${st} opId=${opId} sourceTopic=${topic} sourceType=${isState ? 'STATE' : isResult ? 'RESULT/POWER' : 'unknown'} elapsed=${opId ? (Date.now() - (this.pending.get(`${deviceId}:${ch}`)?.timestamp || 0)) : 'N/A'}ms`);
-          // A positive device report restores ONLINE (touchDevice already
-          // cleared any LWT Offline); emit the resolved verdict, never a
-          // hardcoded true, so all consumers share one truth.
-          this.io.to(room).emit('device_status', {
-            deviceId,
-            online: this.runtimeState.isOnline(deviceId),
-          });
+          this._emitDeviceUpdate(deviceId, Number(ch), st, opId, 'result', ownerId);
         }
       }
+      return;
     }
   }
 
-  _resolveAcks(deviceId, parsed, topic) {
-    if (!parsed || typeof parsed !== 'object') return {};
-    const resolved = {};
-    for (const key of Object.keys(parsed)) {
-      const m = key.match(/^POWER(\d*)$/);
-      if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
-        const ch = m[1] ? parseInt(m[1], 10) : 1;
-        console.log(`[ACK DEBUG] _resolveAcks: deviceId=${deviceId} key=${key} value=${parsed[key]} channel=${ch}`);
-        const opId = this._resolvePending(deviceId, ch, parsed[key], topic);
-        if (opId) resolved[ch] = opId;
-      }
+  _hasPendingFor(deviceId) {
+    for (const key of this.pending.keys()) {
+      if (key.startsWith(deviceId + ':')) return true;
     }
-    return resolved;
+    return false;
+  }
+
+  _emitDeviceUpdate(deviceId, channel, state, opId, source, ownerId) {
+    if (!this.io || !ownerId) return;
+    const room = `user:${ownerId}`;
+    timeline(deviceId, channel, opId, 'Socket.IO emitted');
+    this.io.to(room).emit('device_update', {
+      deviceId,
+      channel,
+      state,
+      updatedAt: new Date().toISOString(),
+      opId,
+    });
+    console.log(`[SOCKET DEBUG] device_update emitted: deviceId=${deviceId} channel=${channel} state=${state} opId=${opId} source=${source}`);
   }
 
   _ingestSensor(sensorId, payload) {
