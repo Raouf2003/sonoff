@@ -314,7 +314,7 @@ class MqttGateway {
     return !!ts && Date.now() - ts < RECENT_WINDOW_MS;
   }
 
-  _resolvePending(deviceId, channel, observed) {
+  _resolvePending(deviceId, channel, observed, topic = 'unknown') {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);
     if (!p) return null;
@@ -322,7 +322,7 @@ class MqttGateway {
     this.pending.delete(key);
     const acked = String(observed).toUpperCase() === p.state;
     timeline(deviceId, channel, p.opId, 'Device RESULT received');
-    console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic || 'unknown'} payload=${JSON.stringify({ observed, expected: p.state })} channel=${channel} pendingExisted=true resolvePending=true acked=${acked}`);
+    console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic} payload=${JSON.stringify({ observed, expected: p.state })} channel=${channel} pendingExisted=true resolvePending=true acked=${acked}`);
     if (p.resolve) p.resolve({ acked, observed: String(observed).toUpperCase() });
     return p.opId;
   }
@@ -457,13 +457,13 @@ class MqttGateway {
     const resolvedOps = {};
     if (isState && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed));
+      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed, topic));
       // tele/STATE carries the device's current LAN IP; learn it as the
       // local-first discovery hint exposed via GET /api/devices.
       this._recordDeviceIp(deviceId, parsed.IPAddress);
     } else if (isResult && parsed) {
       Object.assign(channelUpdates, powerUpdatesFrom(parsed, channelCount));
-      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed));
+      Object.assign(resolvedOps, this._resolveAcks(deviceId, parsed, topic));
     } else if (isResult) {
       // Raw stat/<deviceId>/POWERn = "ON"/"OFF" (non-JSON payload). It is both
       // a device state report AND the direct reply to a command, so it updates
@@ -474,7 +474,7 @@ class MqttGateway {
         const st = payload.trim().toUpperCase();
         if (st === 'ON' || st === 'OFF') {
           channelUpdates[ch] = st;
-          const opId = this._resolvePending(deviceId, ch, st);
+          const opId = this._resolvePending(deviceId, ch, st, topic);
           if (opId) resolvedOps[ch] = opId;
         }
       }
@@ -512,7 +512,7 @@ class MqttGateway {
     }
   }
 
-  _resolveAcks(deviceId, parsed) {
+  _resolveAcks(deviceId, parsed, topic) {
     if (!parsed || typeof parsed !== 'object') return {};
     const resolved = {};
     for (const key of Object.keys(parsed)) {
@@ -520,7 +520,7 @@ class MqttGateway {
       if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
         const ch = m[1] ? parseInt(m[1], 10) : 1;
         console.log(`[ACK DEBUG] _resolveAcks: deviceId=${deviceId} key=${key} value=${parsed[key]} channel=${ch}`);
-        const opId = this._resolvePending(deviceId, ch, parsed[key]);
+        const opId = this._resolvePending(deviceId, ch, parsed[key], topic);
         if (opId) resolved[ch] = opId;
       }
     }
