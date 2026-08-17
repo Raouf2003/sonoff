@@ -232,6 +232,7 @@ class MqttGateway {
         opId,
       });
 
+      console.log(`[ACK DEBUG] publishCommand: deviceId=${deviceId} channel=${channel} expected=${expected} opId=${opId} key=${key} pendingSize=${this.pending.size}`);
       console.log(`MQTT command published: cmnd/${deviceId}/POWER${channel} = ${expected}`);
       console.log(`Waiting for ACK... (pending: ${this.pending.size})`);
 
@@ -321,8 +322,7 @@ class MqttGateway {
     this.pending.delete(key);
     const acked = String(observed).toUpperCase() === p.state;
     timeline(deviceId, channel, p.opId, 'Device RESULT received');
-    console.log(`ACK received: ${deviceId} POWER${channel} = ${observed} (expected ${p.state}, acked: ${acked})`);
-    console.log(`Pending commands: ${this.pending.size}`);
+    console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic || 'unknown'} payload=${JSON.stringify({ observed, expected: p.state })} channel=${channel} pendingExisted=true resolvePending=true acked=${acked}`);
     if (p.resolve) p.resolve({ acked, observed: String(observed).toUpperCase() });
     return p.opId;
   }
@@ -421,10 +421,37 @@ class MqttGateway {
       parsed = null;
     }
 
-    const channelUpdates = {};
+    // ACK DEBUG: Log every incoming MQTT message for pending command correlation
     const isState = parts[0] === 'tele' && parts[2] === 'STATE';
     const isResult = parts[0] === 'stat' && (parts[2] === 'RESULT' || /^POWER(\d*)$/.test(parts[2]));
+    const pendingKey = `${deviceId}:${(() => {
+      if (isState && parsed) {
+        for (const key of Object.keys(parsed)) {
+          const m = key.match(/^POWER(\d*)$/);
+          if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
+            return m[1] ? parseInt(m[1], 10) : 1;
+          }
+        }
+      } else if (isResult && parsed) {
+        for (const key of Object.keys(parsed)) {
+          const m = key.match(/^POWER(\d*)$/);
+          if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
+            return m[1] ? parseInt(m[1], 10) : 1;
+          }
+        }
+      } else if (isResult) {
+        const m = topic.match(/POWER(\d*)$/);
+        if (m) {
+          return channelCount === 1 ? 1 : parseInt(m[1], 10) || 1;
+        }
+      }
+      return null;
+    })()}`;
+    if (isResult || isState) {
+      console.log(`[ACK DEBUG] MQTT message received: topic=${topic} payload=${payload} deviceId=${deviceId} isState=${isState} isResult=${isResult} parsed=${JSON.stringify(parsed)} pendingKey=${pendingKey} pendingExists=${this.pending.has(pendingKey)}`);
+    }
 
+    const channelUpdates = {};
     // channel -> opId resolved by this message. Captured BEFORE the pending
     // entry is deleted so the socket emit can correlate to the original tap.
     const resolvedOps = {};
@@ -471,6 +498,8 @@ class MqttGateway {
               : null,
             opId,
           });
+          // SOCKET DEBUG: Log Socket.IO emission with source topic
+          console.log(`[SOCKET DEBUG] device_update emitted: deviceId=${deviceId} channel=${ch} state=${st} opId=${opId} sourceTopic=${topic} sourceType=${isState ? 'STATE' : isResult ? 'RESULT/POWER' : 'unknown'} elapsed=${opId ? (Date.now() - (this.pending.get(`${deviceId}:${ch}`)?.timestamp || 0)) : 'N/A'}ms`);
           // A positive device report restores ONLINE (touchDevice already
           // cleared any LWT Offline); emit the resolved verdict, never a
           // hardcoded true, so all consumers share one truth.
@@ -490,6 +519,7 @@ class MqttGateway {
       const m = key.match(/^POWER(\d*)$/);
       if (m && (parsed[key] === 'ON' || parsed[key] === 'OFF')) {
         const ch = m[1] ? parseInt(m[1], 10) : 1;
+        console.log(`[ACK DEBUG] _resolveAcks: deviceId=${deviceId} key=${key} value=${parsed[key]} channel=${ch}`);
         const opId = this._resolvePending(deviceId, ch, parsed[key]);
         if (opId) resolved[ch] = opId;
       }
