@@ -942,6 +942,40 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
+  /// Enables local HTTP API on the Tasmota device (SO128 1) so the app can
+  /// control it directly on the LAN without internet. Fire-and-forget; does
+  /// not throw. Runs on the setup AP (192.168.4.1) while the device is still
+  /// in provisioning mode, so it persists before the final restart.
+  Future<void> _enableLocalHttpApi(String deviceId) async {
+    try {
+      final uri = Uri.parse('$_deviceUrl/cm').replace(
+        queryParameters: {'cmnd': 'SetOption128 1'},
+      );
+      debugPrint('[PROVISION] enabling local HTTP API: $uri');
+      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      final body = res.body.trim();
+      debugPrint('[PROVISION] SO128 response status=${res.statusCode} body=$body');
+      if (res.statusCode != 200) {
+        debugPrint('[PROVISION] SO128 failed (non-fatal)');
+        return;
+      }
+      if (body.isEmpty) return;
+      try {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final cmd = decoded['Command'];
+          if (cmd is Map && cmd['Error'] is int && cmd['Error'] != 0) {
+            debugPrint('[PROVISION] SO128 REJECTED: $body');
+            return;
+          }
+        }
+      } catch (_) {}
+      debugPrint('[PROVISION] local HTTP API enabled successfully');
+    } catch (e) {
+      debugPrint('[PROVISION] SO128 exception (non-fatal): $e');
+    }
+  }
+
   // Queries a setting (cmnd with no argument) and requires the stored value to
   // equal the expected value. The device may be momentarily rebooting after a
   // config write, so a short retry loop absorbs the gap before declaring the
@@ -1276,6 +1310,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       debugPrint('[PROVISION] REGISTER_SUCCESS deviceId=$deviceId');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       await _cacheUpsertDevice(deviceId, name);
+
+      // Enable local HTTP API on the device (SO128 1) so the app can control it
+      // directly on the LAN without internet. This runs fire-and-forget; the
+      // provisioning flow doesn't wait for it since the device is already
+      // registered and the user will be redirected to the devices page. If it
+      // fails, the user can enable it later from the device settings.
+      unawaited(_enableLocalHttpApi(deviceId));
+
       // Background local discovery warm-up: bounded, single-flight, never
       // blocks the flow or affects the provisioning outcome.
       unawaited(
