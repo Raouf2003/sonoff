@@ -127,9 +127,16 @@ class _DevicesPageState extends State<DevicesPage>
   // stale and can never overwrite a fresh LAN read.
   static const Duration _kCloudFreshWindow = Duration(minutes: 5);
 
+  /// Delay before showing the visual pending/loading indicator.
+  /// If the command confirms (via Socket.IO or HTTP) before this delay,
+  /// the user never sees the heavy loading state.
+  static const Duration kRelayPendingIndicatorDelay =
+      Duration(milliseconds: 200);
+
   final List<_ChannelState> _channels =
       List.generate(4, (_) => _ChannelState());
   final List<bool> _channelLoading = [false, false, false, false];
+  final List<bool> _showPendingIndicator = [false, false, false, false];
   final Set<String> _pendingRelays = {};
   final List<AnimationController> _rippleControllers = [];
   final List<AnimationController> _entranceControllers = [];
@@ -140,6 +147,10 @@ class _DevicesPageState extends State<DevicesPage>
   // device_update for that relay can be correlated to its tap for the
   // end-to-end timing timeline.
   final Map<String, String> _inFlightOps = {};
+
+  // device:channel -> Timer for delayed pending indicator. Allows cancellation
+  // if the command resolves before the delay elapses.
+  final Map<String, Timer> _pendingIndicatorTimers = {};
 
   bool get _isOnline => _connectivity == _DeviceConnectivity.online;
   bool get _isOffline => _connectivity == _DeviceConnectivity.offline;
@@ -241,19 +252,25 @@ class _DevicesPageState extends State<DevicesPage>
     return true;
   }
 
-  /// Clears the visual pending state for a relay whose command has been
-  /// confirmed by a device report. Keeps the single-flight `_pendingRelays`
-  /// guard in place until the REST lifecycle finishes, so a tap can never
-  /// spawn a second command.
+  /// Clears the visual pending/loading state for a relay whose command has been
+  /// confirmed. Idempotent: safe to call multiple times for the same operation.
+  /// Keeps the single-flight `_pendingRelays` guard in place until the REST
+  /// lifecycle finishes, so a tap can never spawn a second command.
   void _resolvePendingForChannel(int channel, String opId) {
     final index = channel - 1;
     final key = '${_selectedDeviceId}_$channel';
     if (index < 0 || index >= _deviceChannels) return;
     if (!_pendingRelays.contains(key)) return;
+
+    // Cancel any pending indicator timer for this operation.
+    _pendingIndicatorTimers[key]?.cancel();
+    _pendingIndicatorTimers.remove(key);
+
     setState(() {
       _channels[index].pending = false;
       _channels[index].desired = null;
       _channelLoading[index] = false;
+      _showPendingIndicator[index] = false;
     });
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'UI confirmed (socket)');
   }
@@ -340,6 +357,11 @@ class _DevicesPageState extends State<DevicesPage>
     _statusTimer?.cancel();
     _cloudHealthTimer?.cancel();
     _cloudHealthTimer = null;
+    // Cancel all pending indicator timers.
+    for (final timer in _pendingIndicatorTimers.values) {
+      timer.cancel();
+    }
+    _pendingIndicatorTimers.clear();
     for (final c in _rippleControllers) {
       c.dispose();
     }
@@ -590,6 +612,17 @@ class _DevicesPageState extends State<DevicesPage>
         if (opId != null && committed && state != null && state != 'UNKNOWN') {
           _resolvePendingForChannel(channel, opId);
         }
+        // Phase 3b: Separately, if the Socket.IO event carries an opId that
+        // matches our in-flight operation, it means the backend received a
+        // valid MQTT ACK for our command. Resolve the command lifecycle
+        // immediately, even if the state report was rejected as stale by
+        // _applyChannelReport. The stale-report guard protects authoritative
+        // state reconciliation; it must not delay command confirmation.
+        if (opId != null && _pendingRelays.contains('$_selectedDeviceId:$channel')) {
+          ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+              'Socket.IO opId matched — command confirmed');
+          _resolvePendingForChannel(channel, opId);
+        }
       } catch (_) {
         // Ignore malformed event; polling re-establishes truth.
       }
@@ -718,10 +751,13 @@ class _DevicesPageState extends State<DevicesPage>
     final opId = ControlTimeline.begin(_selectedDeviceId!, channel);
     _inFlightOps['$_selectedDeviceId:$channel'] = opId;
     _pendingRelays.add(key);
+    // Immediately apply optimistic visual state and register the operation.
+    // Set pending=true so the optimistic UI (desired) is shown, but do NOT
+    // show the heavy loading indicator yet — it will appear after a delay only
+    // if the command is still unresolved.
     setState(() {
       ch.pending = true;
       ch.desired = targetState ? 'ON' : 'OFF';
-      _channelLoading[index] = true;
       // Optimistic visual flip: the card reflects the requested state at tap
       // time. The first confirmed report via `_applyChannelReport` overwrites
       // it; on total failure the catch path degrades to UNKNOWN.
@@ -732,6 +768,27 @@ class _DevicesPageState extends State<DevicesPage>
         _rippleControllers[index].reset();
       }
     });
+    ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Optimistic UI applied');
+
+    // Start a delayed timer to show the pending indicator if the command
+    // hasn't resolved by then. The timer is tied to this specific operation
+    // via the key, so a newer command on the same channel won't be affected.
+    final pendingTimer = Timer(kRelayPendingIndicatorDelay, () {
+      if (!mounted) return;
+      // Only show the indicator if THIS exact operation is still in flight.
+      // A newer tap would have replaced _pendingRelays and _inFlightOps.
+      if (_pendingRelays.contains(key) &&
+          _inFlightOps['$_selectedDeviceId:$channel'] == opId) {
+        setState(() {
+          _channelLoading[index] = true;
+          _showPendingIndicator[index] = true;
+        });
+        ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+            'Pending indicator shown');
+      }
+    });
+    _pendingIndicatorTimers[key] = pendingTimer;
+
     try {
       final result = await _repository.control(
         _selectedDeviceId!,
@@ -751,14 +808,10 @@ class _DevicesPageState extends State<DevicesPage>
       // The socket may already have confirmed this relay (Phase 3): then
       // pending is already resolved and this REST response must only finish
       // the lifecycle, never re-enable pending or regress the confirmed state.
-      final alreadyResolved = !ch.pending;
-      setState(() {
-        ch.pending = false;
-        ch.desired = null;
-        _channelLoading[index] = false;
-      });
+      final alreadyResolved = !_pendingRelays.contains(key);
+      _resolvePendingForChannel(channel, opId);
       ControlTimeline.mark(opId, _selectedDeviceId!, channel,
-          alreadyResolved ? 'REST completed (already resolved)' : 'Pending cleared');
+          alreadyResolved ? 'REST completed (already resolved)' : 'Pending cleared (HTTP)');
       _applyResult(result);
       if (!alreadyResolved) {
         ControlTimeline.mark(opId, _selectedDeviceId!, channel,
@@ -777,21 +830,21 @@ class _DevicesPageState extends State<DevicesPage>
       ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Command failed');
       final msg = e.toString().replaceFirst('Exception: ', '');
       final socketConfirmed = ch.seq != seqBefore;
-      setState(() {
-        ch.pending = false;
-        ch.desired = null;
-        _channelLoading[index] = false;
-        // NEVER roll back to a stale value. Only degrade to UNKNOWN when
-        // nothing newer arrived while the command was in flight; otherwise a
-        // fresher device report already owns the channel.
-        if (ch.seq == seqBefore) {
+      // If the command failed but a newer device report already arrived
+      // (socketConfirmed), the UI already shows the truth. Otherwise,
+      // degrade to UNKNOWN.
+      if (!socketConfirmed) {
+        _resolvePendingForChannel(channel, opId);
+        setState(() {
           ch.reported = null;
           ch.source = null;
           ch.updatedAt = null;
           _rippleControllers[index].stop();
           _rippleControllers[index].reset();
-        }
-      });
+        });
+      } else {
+        _resolvePendingForChannel(channel, opId);
+      }
       if (socketConfirmed) {
         // The device already confirmed a newer state (e.g. via tele/STATE)
         // while the REST wait timed out: the UI shows the truth, so a scary
@@ -809,6 +862,8 @@ class _DevicesPageState extends State<DevicesPage>
       _inFlightOps.remove('$_selectedDeviceId:$channel');
       ControlTimeline.end(opId);
       _pendingRelays.remove(key);
+      _pendingIndicatorTimers[key]?.cancel();
+      _pendingIndicatorTimers.remove(key);
     }
   }
 
@@ -1152,6 +1207,7 @@ class _DevicesPageState extends State<DevicesPage>
             desired: _channels[i].desired,
             pending: _channels[i].pending,
             loading: _channelLoading[i],
+            showPendingIndicator: _showPendingIndicator[i],
             offline: _isOffline,
             entrance: _entranceControllers[i],
             ripple: _rippleControllers[i],
@@ -1320,6 +1376,7 @@ class _WaterCard extends AnimatedWidget {
   final String? desired;
   final bool pending;
   final bool loading;
+  final bool showPendingIndicator;
   final bool offline;
   final AnimationController entrance;
   final AnimationController ripple;
@@ -1333,6 +1390,7 @@ class _WaterCard extends AnimatedWidget {
     required this.desired,
     required this.pending,
     required this.loading,
+    required this.showPendingIndicator,
     required this.offline,
     required this.entrance,
     required this.ripple,
@@ -1351,6 +1409,7 @@ class _WaterCard extends AnimatedWidget {
         desired: desired,
         pending: pending,
         loading: loading,
+        showPendingIndicator: showPendingIndicator,
         offline: offline,
         ripple: ripple,
         onToggle: onToggle,
@@ -1366,6 +1425,7 @@ class _WaterCardBody extends StatefulWidget {
   final String? desired;
   final bool pending;
   final bool loading;
+  final bool showPendingIndicator;
   final bool offline;
   final AnimationController ripple;
   final ValueChanged<bool> onToggle;
@@ -1377,6 +1437,7 @@ class _WaterCardBody extends StatefulWidget {
     required this.desired,
     required this.pending,
     required this.loading,
+    required this.showPendingIndicator,
     required this.offline,
     required this.ripple,
     required this.onToggle,
@@ -1413,10 +1474,15 @@ class _WaterCardBodyState extends State<_WaterCardBody>
         : widget.reported == 'ON';
     final isUnknown = widget.reported == null;
     final colors = context.steesColors;
-    // Only loading disables taps: offline/unknown cards stay tappable so the
+    // The heavy visual loading indicator (spinner, opacity, disabled) is driven
+    // by showPendingIndicator, which only becomes true after a delay if the
+    // command is still in flight. The pending flag tracks the command lifecycle
+    // for optimistic state and _pendingRelays guard.
+    final showLoading = widget.showPendingIndicator;
+    // Only showLoading disables taps: offline/unknown cards stay tappable so the
     // local-first path can run when the socket/backend is down. Offline still
     // renders grey via widget.offline below.
-    final disabled = widget.loading;
+    final disabled = showLoading;
 
     return GestureDetector(
       onTapDown: disabled ? null : (_) => _press.forward(),
@@ -1431,7 +1497,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
         scale: 1.0 - _press.value * 0.03,
         duration: const Duration(milliseconds: 120),
         child: AnimatedOpacity(
-          opacity: widget.loading ? 0.6 : (widget.offline ? 0.72 : 1.0),
+          opacity: showLoading ? 0.6 : (widget.offline ? 0.72 : 1.0),
           duration: const Duration(milliseconds: 200),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 350),
@@ -1477,7 +1543,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                     ),
                     _DropletToggle(
                       isOn: isOn,
-                      loading: widget.loading,
+                      loading: showLoading,
                       disabled: widget.offline,
                       activeColor: colors.leaf,
                       onTap: disabled ? null : () => widget.onToggle(!isOn),
@@ -1521,15 +1587,19 @@ class _WaterCardBodyState extends State<_WaterCardBody>
   }
 
   Widget _buildStatusPill(SteesColors colors, bool isOn, bool isUnknown) {
-    if (widget.pending) {
+    // The status pill always reflects the CONFIRMED (reported) state,
+    // not the optimistic desired state. The toggle visual uses desired
+    // when pending, but the pill must wait for a device report.
+    if (widget.showPendingIndicator) {
       return _SyncPill(label: 'TURNING…', color: colors.stream);
     }
-    if (isUnknown) {
+    if (widget.reported == null) {
       // UNKNOWN is never rendered as OFF. Connected+unknown → syncing;
       // otherwise the device is unreachable.
       return widget.offline ? const _OfflineBadge() : _SyncPill(label: 'SYNCING', color: colors.mist);
     }
-    return _FlowPill(isOn: isOn, color: colors.leaf);
+    final confirmedIsOn = widget.reported == 'ON';
+    return _FlowPill(isOn: confirmedIsOn, color: colors.leaf);
   }
 }
 
