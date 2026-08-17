@@ -10,6 +10,7 @@ const scheduleEngine = require('../services/scheduleEngine');
 const deviceProvisioningService = require('../services/deviceProvisioningService');
 const mqttGateway = require('../services/mqttGateway');
 const { normalizeMac } = require('../services/macIdentity');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
