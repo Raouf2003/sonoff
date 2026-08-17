@@ -178,6 +178,26 @@ class MqttGateway {
     }, 500);
   }
 
+  // Bounded state recovery for a SINGLE device right after it is claimed. The
+  // runtime is already warmed synchronously by the provisioning service so the
+  // control route accepts it immediately; this asks the firmware for its
+  // current STATE now so real channel values arrive instead of waiting up to a
+  // TelePeriod. One pass, no timer, read-only (never a control command). If the
+  // broker is down it is safely skipped - the connect handler runs
+  // requestStateSync() over the whole registry anyway.
+  requestStateSyncFor(deviceId) {
+    if (!deviceId || !this.isConnected()) return;
+    const topic = `cmnd/${deviceId}/State`;
+    console.log(`[mqtt] requesting state sync for ${deviceId}`);
+    this.client.publish(topic, '', { qos: 1, retain: false }, (err) => {
+      if (err) {
+        console.error(
+          `[mqtt] state sync publish failed for ${deviceId}: ${err.message}`,
+        );
+      }
+    });
+  }
+
   // ACK-based command. Publishes to MQTT, registers a pending command, and
   // resolves only when the matching stat/.../RESULT (or tele/STATE) ack
   // arrives. Rejects on timeout, publish failure, or disconnect so callers

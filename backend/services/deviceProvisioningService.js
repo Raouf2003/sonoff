@@ -1,6 +1,7 @@
 const Device = require('../models/Device');
 const deviceRegistry = require('./deviceRegistry');
 const mqttGateway = require('./mqttGateway');
+const RuntimeState = require('./runtimeState');
 const { normalizeMac } = require('./macIdentity');
 
 // Registers a physical device directly from its canonical MAC. There is no
@@ -14,10 +15,11 @@ const { normalizeMac } = require('./macIdentity');
 class DeviceProvisioningService {
   // Dependencies are injectable so service-level tests run without a broker or
   // a live database. The singleton (module.exports) uses the real ones only.
-  constructor({ deviceModel, mqtt, registry } = {}) {
+  constructor({ deviceModel, mqtt, registry, runtimeState } = {}) {
     this.DeviceModel = deviceModel || Device;
     this.mqtt = mqtt || mqttGateway;
     this.registry = registry || deviceRegistry;
+    this.runtimeState = runtimeState || RuntimeState;
     // Optional post-provision notification hook (Socket.IO fast path). Not wired
     // by default - the wizard relies on the mqttGateway device_seen room +
     // polling. Kept injectable so the service stays decoupled from io.
@@ -115,6 +117,19 @@ class DeviceProvisioningService {
     }
 
     this.registry.update(device);
+
+    // Newly-claimed device: warm runtimeState synchronously so the control
+    // route's isOnline gate accepts it immediately. Pre-claim STATE traffic
+    // never reached the runtime (gated out in mqttGateway._handle for unclaimed
+    // devices), so without this a fresh claim would be rejected with 409 until
+    // a backend restart repopulated the runtime. Then ask the firmware for its
+    // current STATE so real channel values arrive without waiting a TelePeriod.
+    // Both steps are non-fatal: the next telemetry report repopulates state.
+    this.runtimeState.ensureDeviceState(device.deviceId, device.channels);
+    this.runtimeState.touchDevice(device.deviceId);
+    if (typeof this.mqtt.requestStateSyncFor === 'function') {
+      this.mqtt.requestStateSyncFor(device.deviceId);
+    }
 
     if (this.onProvisioned) {
       try {

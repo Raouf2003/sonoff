@@ -49,20 +49,33 @@ class FakeDeviceModel {
   }
 }
 
-function service({ deviceRows = [], recent = false, deviceOpts } = {}) {
+function service({ deviceRows = [], recent = false, deviceOpts, syncFor } = {}) {
   const deviceModel = new FakeDeviceModel(deviceRows, deviceOpts || {});
   const mqtt = { hasRecent: () => recent };
+  if (syncFor) mqtt.requestStateSyncFor = syncFor;
   const updated = [];
   const registry = {
     update: (d) => updated.push(d.deviceId),
     remove: () => {},
   };
+  const runtimeState = {
+    ensured: [],
+    touched: [],
+    ensureDeviceState(deviceId, channels) {
+      this.ensured.push(deviceId);
+      return {};
+    },
+    touchDevice(deviceId) {
+      this.touched.push(deviceId);
+    },
+  };
   const svc = new DeviceProvisioningService({
     deviceModel,
     mqtt,
     registry,
+    runtimeState,
   });
-  return { svc, deviceModel, updated };
+  return { svc, deviceModel, updated, runtimeState };
 }
 
 function provision(svc, overrides = {}) {
@@ -85,6 +98,36 @@ test('valid MAC + recently seen => device created with canonical MAC identity', 
   assert.strictEqual(device.ownerId, 'owner1');
   assert.strictEqual(deviceModel.rows.length, 1);
   assert.deepStrictEqual(updated, [CID]);
+});
+
+test('fresh claim warms runtimeState so control works without a restart', async () => {
+  const syncs = [];
+  const { svc, runtimeState } = service({ recent: true, syncFor: (id) => syncs.push(id) });
+  await provision(svc);
+  // synchronous warmth -> isOnline gate in control.js passes immediately
+  assert.deepStrictEqual(runtimeState.ensured, [CID]);
+  assert.deepStrictEqual(runtimeState.touched, [CID]);
+  // async state sync requested for the canonical MAC, not the raw input
+  assert.deepStrictEqual(syncs, [CID]);
+});
+
+test('reclaimed legacy device also warms runtimeState', async () => {
+  const { svc, runtimeState } = service({
+    recent: true,
+    deviceRows: [
+      { _id: 'legacy', deviceId: 'stees_0123456789abcdef', ownerId: null, hardwareId: CID },
+    ],
+  });
+  await provision(svc);
+  assert.deepStrictEqual(runtimeState.ensured, [CID]);
+  assert.deepStrictEqual(runtimeState.touched, [CID]);
+});
+
+test('claim without a stateSyncFor implementation still warms runtimeState', async () => {
+  const { svc, runtimeState } = service({ recent: true });
+  await provision(svc);
+  assert.deepStrictEqual(runtimeState.ensured, [CID]);
+  assert.deepStrictEqual(runtimeState.touched, [CID]);
 });
 
 test('new device uses the MAC as deviceId (no backend-issued id, no session)', async () => {
