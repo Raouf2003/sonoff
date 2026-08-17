@@ -170,4 +170,24 @@ router.delete('/:deviceId', async (req, res) => {
   }
 });
 
+// Send arbitrary Tasmota command via MQTT (e.g., SetOption128, Restart)
+// Body: { command: "SetOption128 1" } or { command: "Restart 1" }
+router.post('/:deviceId/mqtt-command', authMiddleware, async (req, res) => {
+  try {
+    const device = await Device.findOne({ deviceId: req.params.deviceId });
+    if (!device || !device.ownerId || device.ownerId.toString() !== req.userId) {
+      return res.status(403).json({ error: 'You do not own this device' });
+    }
+    const { command } = req.body;
+    if (!command || typeof command !== 'string') {
+      return res.status(400).json({ error: 'command is required' });
+    }
+    await mqttGateway.publishTasmotaCommand(device.deviceId, command);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('MQTT command error:', err);
+    res.status(500).json({ error: 'Failed to send MQTT command' });
+  }
+});
+
 module.exports = router;

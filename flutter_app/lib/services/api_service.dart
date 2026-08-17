@@ -421,4 +421,11 @@ class ApiService {
     final res = await delete('/api/schedules/$id');
     _checkObject(res, const [200], 'Failed to delete schedule');
   }
+
+  Future<void> sendMqttCommand(String deviceId, String command) async {
+    final res = await post('/api/devices/$deviceId/mqtt-command', {
+      'command': command,
+    });
+    _checkObject(res, const [200], 'Failed to send MQTT command');
+  }
 }

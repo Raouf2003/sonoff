@@ -265,6 +265,25 @@ class MqttGateway {
     });
   }
 
+  // Publish arbitrary Tasmota command (e.g., SetOption128, Restart) via MQTT.
+  // Uses the main gateway connection (QoS 1). Does not wait for RESULT ack.
+  publishTasmotaCommand(deviceId, command) {
+    return new Promise((resolve, reject) => {
+      const c = this.client;
+      if (!c || !c.connected) {
+        return reject(new Error('MQTT not connected'));
+      }
+      const topic = `cmnd/${deviceId}/${command}`;
+      c.publish(topic, '', { qos: 1, retain: false }, (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
   // Latest known reading for a sensor, or null if never seen. The reading is
   // valid only if it arrived within `maxAgeMs`.
   getSensorReading(sensorId, maxAgeMs) {
