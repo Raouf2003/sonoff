@@ -497,21 +497,10 @@ void main() {
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
-    // With the delayed pending indicator (200ms), TURNING does NOT appear
-    // immediately. The optimistic flip happens instantly.
+    // TURNING ON appears immediately after the tap (no 200ms delay).
+    // The optimistic flip happens instantly.
     expect(repo.controlCalls, 1);
-    expect(find.text('TURNING…'), findsNothing);
-    expect(
-      find.text('FLOWING'),
-      findsNothing,
-      reason: 'the confirmed-state pill may only appear after a device report',
-    );
-
-    // Wait for the pending indicator delay to elapse.
-    await tester.pump(const Duration(milliseconds: 250));
-
-    // Now TURNING appears because the command is still in flight.
-    expect(find.text('TURNING…'), findsOneWidget);
+    expect(find.text('TURNING ON…'), findsOneWidget);
     expect(
       find.text('FLOWING'),
       findsNothing,
@@ -603,23 +592,16 @@ void main() {
     await tester.tap(find.text('CHANNEL 2'));
     await tester.pump();
 
-    // With the delayed pending indicator (200ms), TURNING does NOT appear
-    // immediately. The optimistic flip happens instantly.
-    expect(find.text('TURNING…'), findsNothing);
-    expect(find.text('FLOWING'), findsNothing);
-
-    // Wait for the pending indicator delay to elapse.
-    await tester.pump(const Duration(milliseconds: 250));
-
-    // Now TURNING appears because the command is still in flight.
-    expect(find.text('TURNING…'), findsOneWidget);
+    // TURNING ON appears immediately after the tap (no 200ms delay).
+    // The optimistic flip happens instantly (tapping DRY → ON).
+    expect(find.text('TURNING ON…'), findsOneWidget);
     expect(find.text('FLOWING'), findsNothing);
 
     // A failure clears the intent and degrades to UNKNOWN, never a fake OFF.
     repo.releaseControl.completeError(Exception('nope'));
     await tester.pumpAndSettle();
 
-    expect(find.text('TURNING…'), findsNothing);
+    expect(find.text('TURNING ON…'), findsNothing);
     expect(
       find.textContaining('nope'),
       findsWidgets,
@@ -652,12 +634,10 @@ void main() {
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
 
-      // The tapped card flips ON immediately (optimistic). The TURNING… pill
-      // does NOT appear immediately — it only shows after ~200ms if the command
-      // is still unresolved. Since the socket will confirm quickly in this test,
-      // the user never sees the heavy loading state.
+      // The tapped card flips ON immediately (optimistic). The TURNING ON… pill
+      // appears immediately after the tap (no 200ms delay).
       expect(repo.controlCalls, 1);
-      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('TURNING ON…'), findsOneWidget);
       expect(
         leafDrops(),
         2,
@@ -674,7 +654,7 @@ void main() {
       });
       await tester.pump();
 
-      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('TURNING ON…'), findsNothing);
       expect(find.text('DRY'), findsNWidgets(4));
       expect(
         leafDrops(),
@@ -1559,9 +1539,9 @@ void main() {
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
 
-      // TURNING does not appear immediately (delayed indicator).
-      expect(find.text('TURNING…'), findsNothing);
+      // TURNING ON appears immediately after the tap (no 200ms delay).
       expect(repo.controlCalls, 1);
+      expect(find.text('TURNING ON…'), findsOneWidget);
 
       // The device confirms ON over Socket.IO while the REST command is still
       // in flight (gated). The pill must resolve immediately.
@@ -1574,7 +1554,7 @@ void main() {
       await tester.pump();
 
       expect(
-        find.text('TURNING…'),
+        find.text('TURNING ON…'),
         findsNothing,
         reason: 'a confirmed device report must resolve the pending tap',
       );
@@ -1586,7 +1566,7 @@ void main() {
       repo.releaseControl.complete();
       await tester.pump();
       expect(repo.controlCalls, 1);
-      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('TURNING ON…'), findsNothing);
       expect(find.text('FLOWING'), findsOneWidget);
 
       await _unmount(tester);
@@ -1606,8 +1586,8 @@ void main() {
         await tester.tap(find.text('CHANNEL 1'));
         await tester.pump();
 
-        // TURNING does not appear immediately (delayed indicator).
-        expect(find.text('TURNING…'), findsNothing);
+        // TURNING ON appears immediately after the tap (no 200ms delay).
+        expect(find.text('TURNING ON…'), findsOneWidget);
 
         // Fresh report: commits ON, resolves the pending tap.
         socket.push('device_update', {
@@ -1617,7 +1597,7 @@ void main() {
           'updatedAt': DateTime.now().toIso8601String(),
         });
         await tester.pump();
-        expect(find.text('TURNING…'), findsNothing);
+        expect(find.text('TURNING ON…'), findsNothing);
         expect(find.text('FLOWING'), findsOneWidget);
 
         // A STALE report (older than the confirmed ON) must neither commit nor
@@ -1663,8 +1643,8 @@ void main() {
         await tester.tap(find.text('CHANNEL 1'));
         await tester.pump();
 
-        // TURNING does not appear immediately (delayed indicator).
-        expect(find.text('TURNING…'), findsNothing);
+        // TURNING ON appears immediately after the tap (no 200ms delay).
+        expect(find.text('TURNING ON…'), findsOneWidget);
 
         // Socket confirms ON (newer).
         socket.push('device_update', {
@@ -1674,6 +1654,7 @@ void main() {
           'updatedAt': DateTime.now().toIso8601String(),
         });
         await tester.pump();
+        expect(find.text('TURNING ON…'), findsNothing);
         expect(find.text('FLOWING'), findsOneWidget);
 
         // The REST response lands late and reports OFF with an OLDER timestamp.
@@ -1707,6 +1688,7 @@ void main() {
       await tester.tap(find.text('CHANNEL 1'));
       await tester.pump();
       expect(repo.controlCalls, 1);
+      expect(find.text('TURNING ON…'), findsOneWidget);
 
       // Socket confirms ON: pending clears but the single-flight guard stays
       // until the REST lifecycle completes.
@@ -1717,7 +1699,7 @@ void main() {
         'updatedAt': DateTime.now().toIso8601String(),
       });
       await tester.pump();
-      expect(find.text('TURNING…'), findsNothing);
+      expect(find.text('TURNING ON…'), findsNothing);
       expect(find.text('FLOWING'), findsOneWidget);
 
       // Second tap during the still-in-flight REST must be ignored.

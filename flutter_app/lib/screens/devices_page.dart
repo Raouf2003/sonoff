@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../theme/app_theme.dart';
@@ -768,6 +769,8 @@ class _DevicesPageState extends State<DevicesPage>
         _rippleControllers[index].reset();
       }
     });
+    // Light haptic feedback for instant perceived responsiveness.
+    HapticFeedback.lightImpact();
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Optimistic UI applied');
 
     // Start a delayed timer to show the pending indicator if the command
@@ -1577,7 +1580,7 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                     ),
                   ],
                 ),
-                _buildStatusPill(colors, isOn, isUnknown),
+                _buildStatusPill(colors, isOn, isUnknown, widget.pending, widget.desired),
               ],
             ),
           ),
@@ -1586,10 +1589,20 @@ class _WaterCardBodyState extends State<_WaterCardBody>
     );
   }
 
-  Widget _buildStatusPill(SteesColors colors, bool isOn, bool isUnknown) {
-    // The status pill always reflects the CONFIRMED (reported) state,
-    // not the optimistic desired state. The toggle visual uses desired
-    // when pending, but the pill must wait for a device report.
+  Widget _buildStatusPill(
+      SteesColors colors, bool isOn, bool isUnknown, bool pending, String? desired) {
+    // When a command is in flight (pending), immediately show the intended
+    // direction so the user sees TURNING ON/OFF without waiting for the
+    // 200ms delayed loading indicator. The confirmed state (FLOWING/DRY)
+    // is shown once pending clears.
+    if (pending) {
+      final turningOn = desired == 'ON';
+      return _SyncPill(
+        label: turningOn ? 'TURNING ON…' : 'TURNING OFF…',
+        color: colors.stream,
+      );
+    }
+    // Not pending: show confirmed state as before.
     if (widget.showPendingIndicator) {
       return _SyncPill(label: 'TURNING…', color: colors.stream);
     }
