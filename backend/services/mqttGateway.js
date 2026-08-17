@@ -276,13 +276,18 @@ class MqttGateway {
 
   // Logs a newly-seen entity (device or sensor) once, so the logs show every
   // thing currently talking to the broker without flooding per-message noise.
+  // Only logs claimed devices by default to reduce noise from shared broker.
   _logSeen(kind, id) {
     const now = Date.now();
     const last = this.seenLog.get(id);
-    if (last && now - last < 60 * 1000) return;
+    // Increase dedup window to 10 minutes to reduce log volume from shared broker
+    if (last && now - last < 10 * 60 * 1000) return;
     this.seenLog.set(id, now);
     const owned = kind === 'device' && this.deviceRegistry.isOwned(id);
-    console.log(`[mqtt] ${kind} seen on broker: ${id}${owned ? ' (claimed)' : ''}`);
+    // Only log claimed devices and sensors to reduce noise
+    if (owned) {
+      console.log(`[mqtt] ${kind} seen on broker: ${id} (claimed)`);
+    }
   }
 
   snapshot() {

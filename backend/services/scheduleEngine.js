@@ -162,9 +162,17 @@ async release(schedule) {
         const online = runtimeState.isOnline(deviceId);
 
         if (!online) {
-          console.warn(
-            `[scheduleEngine] Skipped schedule "${name}" channel ${channel} — device ${deviceId} is offline`,
-          );
+          // Throttle offline schedule skip logs: only log once per minute per device
+          const now = Date.now();
+          const key = `skip:${deviceId}`;
+          const last = this._offlineSkipLog?.get(key);
+          if (!this._offlineSkipLog) this._offlineSkipLog = new Map();
+          if (!last || now - last > 60 * 1000) {
+            this._offlineSkipLog.set(key, now);
+            console.warn(
+              `[scheduleEngine] Skipped schedule "${name}" channel ${channel} — device ${deviceId} is offline`,
+            );
+          }
           continue;
         }
 
