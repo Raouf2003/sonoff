@@ -15,6 +15,12 @@ import 'local_ip.dart';
 /// this is the worst case for a cold LAN so the user never waits 10-20s.
 const Duration kLocalBudget = Duration(seconds: 6);
 
+/// Fast timeout for interactive relay control using a CACHED verified IP.
+/// This is used for the critical relay button path — if the cached IP
+/// doesn't respond within this window, we immediately fall back to cloud.
+/// mDNS discovery is NEVER run in this path.
+const Duration kLocalControlFastTimeout = Duration(milliseconds: 400);
+
 /// mDNS browse window for a TAP-time discovery (only used when no verified IP
 /// is cached). Kept short so a first tap is still snappy.
 const Duration kTapMdnWindow = Duration(seconds: 2);
@@ -288,11 +294,13 @@ class DeviceRepositoryService {
 
     // LOCAL immediately when the cloud is already known unreachable. The
     // caller does not wait for a cloud timeout before the LAN gets its chance.
+    // Use fast local control (cached IPs only, no mDNS) so cloud fallback
+    // is immediate if local fails.
     if (cloudDown) {
       try {
         _tl(opId, deviceId, channel, 'Local attempt start');
-        final local = await _localControl(deviceId, channel, state, opId: opId)
-            .timeout(kLocalBudget);
+        final local = await _localControlFast(deviceId, channel, state, opId: opId)
+            .timeout(kLocalControlFastTimeout);
         _tl(opId, deviceId, channel, 'Local attempt done');
         _lastSource = DeviceTransportSource.local;
         _log('local control success for $deviceId channel $channel');
@@ -313,6 +321,8 @@ class DeviceRepositoryService {
             : DeviceTransportException('Local control failed: $e');
         _tl(opId, deviceId, channel, 'Local attempt failed');
         _log('local control failed for $deviceId (${_describe(localFailure)})');
+        // Trigger background mDNS refresh for future commands
+        _triggerBackgroundMdnRefresh(deviceId);
       }
     }
 
@@ -386,6 +396,20 @@ class DeviceRepositoryService {
     );
   }
 
+  /// Trigger background mDNS discovery to refresh the local IP cache.
+  /// This runs independently and does not block the control path.
+  void _triggerBackgroundMdnRefresh(String deviceId) {
+    unawaited(_discoverLocal(deviceId, urgent: false).then((transport) {
+      if (transport != null) {
+        _log('background mDNS refresh succeeded for $deviceId');
+      } else {
+        _log('background mDNS refresh found no device for $deviceId');
+      }
+    }).catchError((e) {
+      _log('background mDNS refresh error for $deviceId: $e');
+    }));
+  }
+
   /// True when discovery PROBED and verified this device's identity recently,
   /// so the transport may skip its own redundant `Status 5`. Never true for a
   /// fresh verified-cache / warm-cache reuse (those keep re-verifying to catch
@@ -448,6 +472,97 @@ class DeviceRepositoryService {
       identityVerified: _canSkipIdentityVerify(deviceId),
     );
     _maybeLearnIp(deviceId, local.address, result);
+    return result;
+  }
+
+  /// Fast local control attempt using ONLY cached/warm IPs.
+  /// Never runs mDNS discovery. Used for cloudDown=true path to avoid
+  /// blocking relay control on mDNS discovery.
+  /// Times out quickly so cloud fallback can proceed immediately.
+  Future<Map<String, dynamic>> _localControlFast(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async {
+    _tl(opId, deviceId, channel, 'Cached local IP attempt start');
+
+    // Try warm in-memory endpoint first (already verified)
+    final warm = _warmCache[deviceId];
+    final warmAt = _warmVerifiedAt[deviceId];
+    if (warm != null &&
+        warmAt != null &&
+        DateTime.now().difference(warmAt) < kVerifiedIpTtl) {
+      if (!isUsableHttpHost(warm.address)) {
+        _warmCache.remove(deviceId);
+        _warmVerifiedAt.remove(deviceId);
+      } else {
+        _tl(opId, deviceId, channel, 'Warm endpoint used');
+        _log('using warm verified endpoint for $deviceId (fast)');
+        return _executeLocalControl(warm, deviceId, channel, state, opId: opId);
+      }
+    }
+
+    // Try persisted cached IP (must verify identity first)
+    _tl(opId, deviceId, channel, 'Cached IP probe start');
+    final cached = await _locator.cachedAddress(deviceId);
+    if (cached != null && cached.isNotEmpty && isUsableHttpHost(cached)) {
+      final transport = _buildLocal(cached, deviceId);
+      // Fast identity check with short timeout
+      try {
+        final check = await transport.checkIdentity().timeout(kLocalControlFastTimeout);
+        if (check == LocalIdentityCheck.verified) {
+          _tl(opId, deviceId, channel, 'Cached IP probe result: verified');
+          _warmCache[deviceId] = transport;
+          _warmVerifiedAt[deviceId] = DateTime.now();
+          await _locator.storeVerifiedAddress(deviceId, cached);
+          _identityTrustedAt[deviceId] = DateTime.now();
+          _log('verified cached IP: $cached (fast)');
+          return _executeLocalControl(transport, deviceId, channel, state, opId: opId);
+        }
+        if (check == LocalIdentityCheck.mismatch) {
+          await _locator.discardAddress(deviceId);
+          _log('cached IP identity mismatch — discarding $cached');
+          // Logical rejection (identity mismatch) must surface immediately
+          throw const DeviceTransportException(
+            'The local device identity could not be verified.',
+            kind: TransportFailureKind.logical,
+          );
+        }
+      } on TimeoutException {
+        _tl(opId, deviceId, channel, 'Cached IP probe timeout');
+        _log('cached IP probe timeout — skipping to cloud');
+      }
+    } else {
+      _tl(opId, deviceId, channel, 'Cached IP probe result: none');
+    }
+
+    // No usable cached IP — fail fast so cloud can take over
+    _tl(opId, deviceId, channel, 'Cached local IP attempt fast timeout');
+    throw const DeviceTransportException(
+      'No cached local endpoint available for fast control.',
+      kind: TransportFailureKind.availability,
+    );
+  }
+
+  /// Execute the actual local control command with fast timeout.
+  Future<Map<String, dynamic>> _executeLocalControl(
+    LocalDeviceTransport transport,
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+  }) async {
+    final result = await transport
+        .control(
+          deviceId,
+          channel,
+          state,
+          opId: opId,
+          identityVerified: true, // already verified in caller
+        )
+        .timeout(kLocalControlFastTimeout);
+    _maybeLearnIp(deviceId, transport.address, result);
     return result;
   }
 
