@@ -104,7 +104,7 @@ void main() {
 
       expect(find.textContaining('already exists'), findsOneWidget);
       expect(
-        find.textContaining('already registered to your account'),
+        find.textContaining('delete it before claiming it again'),
         findsOneWidget,
       );
       // Re-claiming inside the wizard is unsupported: no removal control must

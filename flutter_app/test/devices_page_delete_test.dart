@@ -23,7 +23,6 @@ void _mockSecureStorage(WidgetTester tester) {
 /// Controllable ApiService: records DELETE calls and can fail them so the
 /// Devices-page delete flow is exercised without the real backend.
 class _DeleteApi extends ApiService {
-  _DeleteApi({this.failWith});
   Object? failWith;
   int deleteCalls = 0;
   String? lastDeletedDeviceId;

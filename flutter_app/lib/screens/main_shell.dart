@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/auth_service.dart';
@@ -18,25 +17,13 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
+class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
-  int _previousIndex = 0;
   final _auth = AuthService();
-  late final AnimationController _navAnimationController;
-  late final List<Animation<double>> _tabAnimations;
-
-  // Badge counts for each tab (can be updated from pages via callback)
-  final List<int> _badgeCounts = [0, 0, 0, 0];
 
   late final List<Widget> _pages = [
-    DevicesPage(
-      onNavigateToTab: (i) => _switchTab(i),
-      onBadgeUpdate: (count) => _updateBadge(0, count),
-    ),
-    SensorsPage(
-      onNavigateToTab: (i) => _switchTab(i),
-      onBadgeUpdate: (count) => _updateBadge(1, count),
-    ),
+    DevicesPage(onNavigateToTab: (i) => _switchTab(i)),
+    SensorsPage(onNavigateToTab: (i) => _switchTab(i)),
     const SchedulesPage(),
     const RulesPage(),
   ];
@@ -47,26 +34,6 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
     // Any API response with 401 (expired/invalid token) from any tab logs the
     // user out instead of leaving every page showing a generic failure.
     ApiService.onUnauthorized = _handleSessionExpired;
-
-    _navAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 250),
-      vsync: this,
-    );
-
-    _tabAnimations = List.generate(4, (index) {
-      return Tween<double>(begin: 0.0, end: 1.0).animate(
-        CurvedAnimation(
-          parent: _navAnimationController,
-          curve: Interval(
-            index * 0.1,
-            0.5 + index * 0.1,
-            curve: Curves.easeOutCubic,
-          ),
-        ),
-      );
-    });
-
-    _navAnimationController.forward();
   }
 
   @override
@@ -74,26 +41,11 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
     if (ApiService.onUnauthorized == _handleSessionExpired) {
       ApiService.onUnauthorized = null;
     }
-    _navAnimationController.dispose();
     super.dispose();
   }
 
   void _switchTab(int index) {
-    if (index == _currentIndex) return;
-    _previousIndex = _currentIndex;
-    setState(() {
-      _currentIndex = index;
-    });
-    _navAnimationController.forward(from: 0);
-    HapticFeedback.selectionClick();
-  }
-
-  void _updateBadge(int tabIndex, int count) {
-    if (mounted && count != _badgeCounts[tabIndex]) {
-      setState(() {
-        _badgeCounts[tabIndex] = count.clamp(0, 99);
-      });
-    }
+    setState(() => _currentIndex = index);
   }
 
   void _routeToLogin() {
@@ -154,76 +106,16 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
           ),
         ),
       ),
-      bottomNavigationBar: _buildAnimatedNavBar(),
-    );
-  }
-
-  Widget _buildAnimatedNavBar() {
-    final colors = context.steesColors;
-    final scheme = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return AnimatedBuilder(
-      animation: _navAnimationController,
-      builder: (context, _) {
-        return Container(
-          height: 68,
-          decoration: BoxDecoration(
-            color: isDark ? colors.submerged : colors.submerged,
-            boxShadow: [
-              BoxShadow(
-                color: isDark ? colors.shadow : colors.shadow.withValues(alpha: 0.15),
-                blurRadius: 16,
-                offset: const Offset(0, -4),
-              ),
-              BoxShadow(
-                color: isDark ? Colors.transparent : colors.shadow.withValues(alpha: 0.05),
-                blurRadius: 4,
-                offset: const Offset(0, -1),
-              ),
-            ],
-            border: Border(
-              top: BorderSide(
-                color: isDark ? colors.border : colors.border.withValues(alpha: 0.5),
-                width: 0.5,
-              ),
-            ),
-          ),
-          child: SafeArea(
-            top: false,
-            bottom: true,
-            child: Row(
-              children: List.generate(4, (index) {
-                final isSelected = _currentIndex == index;
-                final badgeCount = _badgeCounts[index];
-                final animation = _tabAnimations[index];
-                
-                return Expanded(
-                  child: AnimatedBuilder(
-                    animation: animation,
-                    builder: (context, child) {
-                      return Transform.translate(
-                        offset: Offset(0, (1 - animation.value) * 8),
-                        child: Opacity(
-                          opacity: animation.value.clamp(0.0, 1.0),
-                          child: _NavTab(
-                            index: index,
-                            isSelected: isSelected,
-                            badgeCount: badgeCount,
-                            onTap: () => _switchTab(index),
-                            colors: colors,
-                            isDark: isDark,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                );
-              }),
-            ),
-          ),
-        );
-      },
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (i) => setState(() => _currentIndex = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.water_drop_outlined), selectedIcon: Icon(Icons.water_drop), label: 'Devices'),
+          NavigationDestination(icon: Icon(Icons.sensors), label: 'Sensors'),
+          NavigationDestination(icon: Icon(Icons.schedule_outlined), selectedIcon: Icon(Icons.schedule), label: 'Schedules'),
+          NavigationDestination(icon: Icon(Icons.rule_outlined), selectedIcon: Icon(Icons.rule), label: 'Rules'),
+        ],
+      ),
     );
   }
 

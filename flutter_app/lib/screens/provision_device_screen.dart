@@ -51,7 +51,8 @@ class ProvisionDeviceScreen extends StatefulWidget {
         testDeviceId = null,
         testFailureCode = null,
         testWarmUp = null,
-        testLocalSetup = null;
+        testLocalSetup = null,
+        testHttpClient = null;
 
   /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
   /// failure state and injects an [ApiService] so widget tests can exercise the
@@ -66,6 +67,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
     this.testFailureCode,
     this.testWarmUp,
     this.testLocalSetup,
+    this.testHttpClient,
   });
 
   @visibleForTesting
@@ -88,6 +90,14 @@ class ProvisionDeviceScreen extends StatefulWidget {
   @visibleForTesting
   final Future<void> Function(String deviceId, {String? lastIp})? testLocalSetup;
 
+  /// Test seam: injects an [http.Client] that answers the Tasmota setup-AP
+  /// HTTP calls (reachability probe, Status 5 MAC read, config commands,
+  /// WifiTest3) so widget tests can drive the full wizard flow without a real
+  /// device / network. When null the wizard uses the default client (top-level
+  /// [http.get]).
+  @visibleForTesting
+  final http.Client? testHttpClient;
+
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
 }
@@ -100,12 +110,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // The trailing XXXX acts as a tasmota- prefix wildcard in MainActivity.
   static const String _tasmotaApSsid = 'tasmota-XXXX';
 
-  // Closed-loop duplicate message for a device already registered to the
-  // CURRENT user. Re-claiming inside the wizard is intentionally unsupported:
-  // the existing device must be deleted from the Devices page first.
+  // Closed-loop duplicate message for a device already registered. Re-claiming
+  // inside the wizard is intentionally unsupported: the existing device must be
+  // deleted from the Devices page first.
   static const String _alreadyExistsMessage =
-      'The device already exists. You must delete it before claiming it again. '
-      'This device is already registered to your account.';
+      'The device already exists. You must delete it before claiming it again.';
 
   // Give up waiting for the device to appear on the backend after this long.
   // Must comfortably exceed the backend's recentDevices window so a device that
@@ -415,8 +424,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   Future<bool> _isReachable() async {
     try {
       debugPrint('[PROVISION] probing $_deviceUrl');
-      final res =
-          await http.get(Uri.parse(_deviceUrl)).timeout(const Duration(seconds: 3));
+      final res = await _httpGet(Uri.parse(_deviceUrl))
+          .timeout(const Duration(seconds: 3));
       // Any HTTP response counts as reachable, regardless of status code.
       debugPrint('[PROVISION] probe status=${res.statusCode}');
       return true;
@@ -425,6 +434,21 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _wifiBound = false;
       await _logNetworkInfo('probe failed');
       return false;
+    }
+  }
+
+  // Single HTTP fetch path for every Tasmota setup-AP request. Uses the
+  // injected [widget.testHttpClient] in widget tests (so the flow can be driven
+  // without a real device / network) and the default top-level [http.get]
+  // otherwise. Never throws; call sites apply their own timeouts.
+  Future<http.Response> _httpGet(Uri uri) async {
+    final custom = widget.testHttpClient;
+    if (custom != null) return custom.get(uri);
+    final client = http.Client();
+    try {
+      return await client.get(uri);
+    } finally {
+      client.close();
     }
   }
 
@@ -538,24 +562,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       if (canonical != null) {
         _issuedDeviceId = canonical;
         debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
-        // BEST-EFFORT pre-flight duplicate check. The MAC is already known, so
-        // query the backend BEFORE leaving for Configure: if it is already
-        // registered to this account (or another) we freeze into the right
-        // terminal state immediately instead of making the user continue. This
-        // is ONLY a UX optimization - the phone may have no internet on the
-        // Tasmota AP, so a short timeout / unreachable backend is silently
-        // ignored and the normal flow continues. The authoritative duplicate /
-        // ownership enforcement stays in POST /api/devices/provision.
-        final duplicateKind = await _preflightDuplicateCheck(canonical);
-        if (!mounted || _step != _Step.connect) return;
-        if (duplicateKind != null) {
-          final msg = duplicateKind == _TerminalKind.alreadyAdded
-              ? _alreadyExistsMessage
-              : 'This device is already registered to another account and '
-                  'cannot be added to this one.';
-          _enterTerminalState(duplicateKind, msg);
-          return;
-        }
+        // Pre-flight duplicate check at the EARLIEST point the canonical
+        // identity exists - as soon as the setup AP is reachable, before the
+        // Configure step. If the backend confirms the MAC is already
+        // registered the wizard freezes into the right terminal state here,
+        // so the user never reaches the provisioning form. An unreachable
+        // backend (no internet on the Tasmota AP) silently continues and the
+        // same gate re-runs in _provision() before any config command.
+        if (await _stopIfAlreadyRegistered(canonical)) return;
       } else {
         debugPrint('[PROVISION] MAC not readable yet (retried on Apply)');
       }
@@ -677,6 +691,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _issuedDeviceId = canonical;
     debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
 
+    // HARD duplicate gate BEFORE any provisioning operation: even if the MAC
+    // read failed at AP-detection time (so the Configure step was entered
+    // without a check), the identity is guaranteed right now. If the backend
+    // confirms it already exists, the wizard freezes into the terminal
+    // "already added / already registered" state and NEVER sends a single
+    // Tasmota configuration command - no WiFi provisioning, no config changes,
+    // no re-claim. Same best-effort semantics as the AP-detection gate: an
+    // unreachable backend (no internet while on the Tasmota AP) silently
+    // continues, and the backend's authoritative check in
+    // POST /api/devices/provision remains the final backstop.
+    if (await _stopIfAlreadyRegistered(canonical)) return;
+
     final outcome = await _sendTasmotaConfig().timeout(
       _configStepDeadline,
       onTimeout: () {
@@ -741,7 +767,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         queryParameters: {'cmnd': 'Status 5'},
       );
       debugPrint('[PROVISION] reading device MAC (Status 5)');
-      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      final res = await _httpGet(uri).timeout(const Duration(seconds: 4));
       final body = res.body.trim();
       if (res.statusCode != 200) {
         debugPrint('[PROVISION] Status 5 HTTP ${res.statusCode}');
@@ -927,7 +953,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         queryParameters: {'cmnd': command},
       );
       debugPrint('[PROVISION] HTTP GET $uri');
-      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      final res = await _httpGet(uri).timeout(const Duration(seconds: 4));
       final body = res.body.trim();
       debugPrint('[PROVISION] response status=${res.statusCode} body=$body');
       if (res.statusCode != 200) return false;
@@ -960,7 +986,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           queryParameters: {'cmnd': key},
         );
         debugPrint('[PROVISION] read-back GET $uri (attempt $attempt)');
-        final res = await http.get(uri).timeout(const Duration(seconds: 3));
+        final res = await _httpGet(uri).timeout(const Duration(seconds: 3));
         final body = res.body.trim();
         if (res.statusCode != 200) {
           debugPrint('[PROVISION] read-back $key HTTP ${res.statusCode}');
@@ -1028,7 +1054,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       queryParameters: {'cmnd': 'WifiTest3 $ssid+$password'},
     );
     try {
-      final res = await http.get(startUri).timeout(_wifiTestHttpTimeout);
+      final res = await _httpGet(startUri).timeout(_wifiTestHttpTimeout);
       final body = res.body.trim();
       // The trigger response never echoes the credentials; it is either
       // `{"WifiTest3":"Testing"}` or an error — safe to log raw for diagnosis.
@@ -1057,7 +1083,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     while (DateTime.now().isBefore(deadline)) {
       pollNumber++;
       try {
-        final res = await http.get(pollUri).timeout(_wifiTestHttpTimeout);
+        final res = await _httpGet(pollUri).timeout(_wifiTestHttpTimeout);
         final body = res.body.trim();
         // Log the RAW poll body: it is decisive for diagnosing whether the
         // firmware returns a flat/wrapped/nested `WifiTest` verdict (or a
@@ -1354,9 +1380,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
-  // Best-effort pre-flight duplicate check, run once the physical MAC is known
-  // (offline AP phase) BEFORE leaving for Configure. Returns a terminal kind to
-  // freeze on, or null to continue provisioning normally. Purely a UX
+  // Best-effort pre-flight duplicate check, run ONCE the canonical identity is
+  // known, BEFORE any provisioning/configuration operation. Returns a terminal
+  // kind to freeze on, or null to continue provisioning normally. Purely a UX
   // optimization - NOT authoritative (see PART 4): the backend still enforces
   // the real duplicate/ownership check in POST /api/devices/provision. A short
   // timeout and silent failure mean an unreachable backend (no internet on the
@@ -1378,6 +1404,28 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       case PreflightDecision.continueProvisioning:
         return null;
     }
+  }
+
+  // Duplicate gate (GET /api/devices/check). Runs whenever the canonical
+  // identity becomes available - at AP detection (the earliest possible point)
+  // and again in _provision() immediately before the first Tasmota config
+  // command, so an already-existing device NEVER gets configured or connected
+  // to the user's Wi-Fi. Returns true (and freezes the wizard into a terminal
+  // "already added / already registered" state) when the backend confirms the
+  // identity exists, false to continue provisioning. Best-effort: an
+  // unreachable backend silently continues (see _preflightDuplicateCheck).
+  Future<bool> _stopIfAlreadyRegistered(String canonical) async {
+    final duplicateKind = await _preflightDuplicateCheck(canonical);
+    if (!mounted) return true;
+    if (duplicateKind != null) {
+      final msg = duplicateKind == _TerminalKind.alreadyAdded
+          ? _alreadyExistsMessage
+          : 'This device is already registered to another account and cannot '
+              'be added to this one.';
+      _enterTerminalState(duplicateKind, msg);
+      return true;
+    }
+    return false;
   }
 
   // Distinguishes terminal provision failures (never worth retrying) from
@@ -1442,6 +1490,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _closeProvisionSocket();
     _terminal = true;
     _claimed = false;
+    _provisioning = false;
     _terminalKind = kind;
     // The graded duplicate/registered terminal card is rendered on the WAIT
     // step, so a preflight duplicate found during the offline Connect phase also
