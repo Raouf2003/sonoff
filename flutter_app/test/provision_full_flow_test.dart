@@ -10,6 +10,7 @@ import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/services/api_service.dart';
 import 'package:smart_home_app/services/device_repository_service.dart';
 import 'package:smart_home_app/services/device_transport.dart';
+import 'package:smart_home_app/services/provisioning_service.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
 
 const _canonicalDeviceId = '34987AC30304';
@@ -69,8 +70,10 @@ class _FlowApi extends ApiService {
 
   bool deviceSeen = true;
   int deviceSeenCalls = 0;
+  final List<String> seenDeviceIds = [];
 
   int provisionCalls = 0;
+  final List<String> provisionedDeviceIds = [];
 
   @override
   Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
@@ -81,6 +84,7 @@ class _FlowApi extends ApiService {
   @override
   Future<Map<String, dynamic>> getDeviceSeen(String deviceId) async {
     deviceSeenCalls++;
+    seenDeviceIds.add(deviceId);
     return {'seen': deviceSeen};
   }
 
@@ -91,6 +95,7 @@ class _FlowApi extends ApiService {
     required int channels,
   }) async {
     provisionCalls++;
+    provisionedDeviceIds.add(deviceId);
     return <String, dynamic>{'ok': true, 'lastIp': '192.168.1.10'};
   }
 
@@ -124,6 +129,13 @@ class _TasmotaFake {
   /// carry no `cmnd` and are not recorded.
   final List<String> commands = [];
 
+  /// Every MAC string reported by `Status 5`, in read order.
+  final List<String> macsRead = [];
+
+  /// The MAC the fake device always reports. Canonicalized it must equal
+  /// [_canonicalDeviceId] (see [normalizeMac]).
+  static const reportedMac = '34:98:7A:C3:03:04';
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -137,7 +149,8 @@ class _TasmotaFake {
   String _bodyFor(String cmnd) {
     // Identity read (Status 5 is read-only, no reboot).
     if (cmnd.startsWith('Status 5')) {
-      return '{"StatusNET":{"Mac":"34:98:7A:C3:03:04"}}';
+      macsRead.add(reportedMac);
+      return '{"StatusNET":{"Mac":"$reportedMac"}}';
     }
     // Pre-flight WiFi credential test: trigger + verdict poll.
     if (cmnd.startsWith('WifiTest3')) return '{"WifiTest3":"Testing"}';
@@ -378,6 +391,44 @@ void main() {
       expect(api.preflightCalls, greaterThanOrEqualTo(2));
       expect(api.provisionCalls, 1);
       expect(tasmota.provisioned, isTrue);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'MAC consistency: the MAC read during the AP phase is the same '
+        'identity used to provision, verify online, and claim', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi(); // preflightStatus = notFound
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue, reason: 'claim completes for a new device');
+
+      // Every Status 5 read reports the SAME physical MAC.
+      expect(tasmota.macsRead, isNotEmpty,
+          reason: 'the AP phase must read the device MAC at least once');
+      expect(
+          tasmota.macsRead.toSet().length, 1,
+          reason: 'the MAC must be stable across every identity read');
+      // ...and it canonicalizes to the device identity used everywhere.
+      final canonical = normalizeMac(tasmota.macsRead.first);
+      expect(canonical, _canonicalDeviceId);
+
+      // The identity burned into the device (Topic == canonical MAC) is the
+      // one the backend observed after it joined the LAN, and the final claim
+      // registers under that exact canonical MAC - never a different one.
+      expect(tasmota.commands,
+          contains('Topic $_canonicalDeviceId'));
+      expect(api.seenDeviceIds, isNotEmpty,
+          reason: 'the online device must be verified by its canonical MAC');
+      expect(api.seenDeviceIds.every((id) => id == _canonicalDeviceId), isTrue);
+      expect(api.provisionedDeviceIds, [_canonicalDeviceId],
+          reason: 'the claim must register the same MAC that was provisioned');
 
       await _unmount(tester);
     });

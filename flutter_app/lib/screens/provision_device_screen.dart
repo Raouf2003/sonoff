@@ -1488,6 +1488,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
     _closeProvisionSocket();
+    // Cleanly disconnect from the device's setup AP. A duplicate stop never
+    // configured the device and never sent Restart, so there is no reboot to
+    // wait for - the phone can return to its home network immediately (the
+    // duplicate must be deleted from the Devices page, which needs internet).
+    unawaited(_releaseWifiBinding());
     _terminal = true;
     _claimed = false;
     _provisioning = false;
