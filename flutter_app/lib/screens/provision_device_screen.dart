@@ -227,6 +227,18 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // a specific error and stay put (no Restart, no identity change).
   WifiTestResult _wifiTestResult = WifiTestResult.unknown;
 
+  // The canonical identity most recently submitted to the backend duplicate
+  // gate (`GET /api/devices/check`). The gate runs at AP detection and again
+  // in _provision() before the first config command; both calls are over the
+  // phone's link to the backend, which is a best-effort UX check that can cost
+  // seconds on the offline Tasmota AP (its own short timeout). Skipping the
+  // second round-trip when the SAME identity was already checked is safe: the
+  // gate outcome is never authoritative (see PART 4) and the backend still
+  // enforces the real duplicate/ownership check in
+  // POST /api/devices/provision. The second gate stays for the one case it
+  // exists for — the MAC was NOT readable at AP detection, so no gate ran yet.
+  String _preflightCheckedFor = '';
+
   String get _phaseLabel {
     switch (_step) {
       case _Step.connect:
@@ -1414,8 +1426,24 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // "already added / already registered" state) when the backend confirms the
   // identity exists, false to continue provisioning. Best-effort: an
   // unreachable backend silently continues (see _preflightDuplicateCheck).
+  //
+  // The SAME canonical identity is only checked against the backend ONCE: the
+  // second call site (the hard gate in _provision) is skipped when this
+  // identity already passed the AP-detection gate. Both round-trips run over
+  // the phone's link to the backend — seconds on the offline Tasmota AP — and
+  // the gate is never authoritative, so a revisiting duplicate check buys
+  // nothing but latency. The hard gate only spends its round-trip for the one
+  // case it was added for: the MAC could not be read at AP detection, so no
+  // gate ran for this identity yet.
   Future<bool> _stopIfAlreadyRegistered(String canonical) async {
+    if (_preflightCheckedFor == canonical) {
+      debugPrint(
+          '[PROVISION] duplicate gate already run for $canonical — skipping '
+          'redundant round-trip');
+      return false;
+    }
     final duplicateKind = await _preflightDuplicateCheck(canonical);
+    _preflightCheckedFor = canonical;
     if (!mounted) return true;
     if (duplicateKind != null) {
       final msg = duplicateKind == _TerminalKind.alreadyAdded

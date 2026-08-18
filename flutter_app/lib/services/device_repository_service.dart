@@ -103,6 +103,12 @@ class DeviceRepositoryService {
   /// when no lastIp hint exists (e.g. re-claim / re-flash).
   final Map<String, Set<String>> _gatedCandidates = {};
 
+  /// Devices already handed to the automatic pre-SO128 repair in this
+  /// repository lifetime. Guards the at-most-once policy so a permanently
+  /// referer-gated device is never hammered with `SetOption128 1` on every
+  /// warm-up / lifecycle resume.
+  final Set<String> _so128RepairAttempted = {};
+
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
   DeviceTransportSource? get lastSource => _lastSource;
@@ -128,6 +134,42 @@ class DeviceRepositoryService {
         await _findLocal(id).timeout(kLocalBudget);
       } on Object catch (e) {
         _log('warm-up failed for $id (${_describe(e)})');
+      }
+    }
+  }
+
+  /// Automatic local HTTP API repair for ALREADY-REGISTERED devices whose
+  /// discovery classified them as referer-gated (reachable, but SetOption128
+  /// OFF). The claim wizard's `enableLocalHttpApi` only runs at claim time, so
+  /// a device that was registered BEFORE the auto-SO128 flow existed (or whose
+  /// enable later failed) has no way back to local control: the Devices page
+  /// would keep probing it referer-less and Tasmota keeps answering
+  /// `Referer '' denied`. Running after a [warmUp] pass repairs exactly those
+  /// devices through the same referer'd enable-first bootstrap — at most once
+  /// per repository lifetime per device, best-effort, and never blocking the
+  /// UI (the caller runs it unawaited after warm-up).
+  ///
+  /// Devices that are NOT referer-gated are skipped: an already-verified /
+  /// already-enabled device needs no `SetOption128 1` (sending it would be a
+  /// gratuitous command), and an unreachable one simply stays as-is.
+  Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {
+    for (final d in devices) {
+      final id = d['deviceId'];
+      if (id is! String || id.isEmpty) continue;
+      if (!_gatedCandidates.containsKey(id)) continue;
+      if (!_so128RepairAttempted.add(id)) continue;
+      _logSetup('repairing referer-gated (pre-SO128) registered device $id');
+      try {
+        // No lastIp hint: the bootstrap ladder (cached candidate first, then
+        // the gated candidates discovered during warm-up) drives the
+        // referer'd enable-first sequence. Exactly the claim-time recovery.
+        await enableLocalHttpApi(id).timeout(
+          // Warm-up discovery already consumed most of the mDNS budget; the
+          // enable-first bootstrap is a couple of referer'd LAN round trips.
+          const Duration(seconds: 10),
+        );
+      } on Object catch (e) {
+        _logSetup('gated repair failed for $id (${_describe(e)})');
       }
     }
   }

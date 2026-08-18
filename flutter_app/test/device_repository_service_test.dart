@@ -1540,4 +1540,118 @@ void main() {
       expect(locator.stores, 0);
     });
   });
+
+  group('repairGatedDevices (auto-SO128 repair for already-registered devices)',
+      () {
+    test('a warm-up referer-gated registered device is repaired via the '
+        'referer\'d enable-first bootstrap', () async {
+      // The real-device regression: a device registered BEFORE the auto-SO128
+      // flow existed is reachable on the LAN but SetOption128 is OFF, so the
+      // referer-less status probe is denied. The claim wizard never runs again
+      // for it (it is already registered), so local control can only be
+      // restored by the Devices page repair after a background warm-up.
+      final cm = _CmFake(responses: {
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON"}',
+      })..preSO128 = true;
+      final locator = _FakeLocator(
+        cached: '192.168.1.33',
+        candidates: const [],
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      // Background warm-up discovers the device; the referer-less probe is
+      // denied and the IP is remembered as referer-gated (never a mismatch).
+      await repo.warmUp(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+
+      // The automatic repair (run unawaited after warm-up on the Devices page)
+      // bootstraps SetOption128 ON with the device-matching Referer and
+      // persists the verified IP.
+      await repo.repairGatedDevices(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+
+      expect(cm.called, containsAll(['Status%205', 'SetOption128%201', 'State']),
+          reason: 'the repair re-probes the gated candidate and enables it');
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
+      expect(locator.lastStored, '192.168.1.33',
+          reason: 'a repaired device gets its verified IP persisted');
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('at most one repair attempt per device per run even on failure',
+        () async {
+      // The repair FAILS (SetOption128 stays denied), but the at-most-once
+      // fence must prevent a second attempt on a later warm-up / resume.
+      final cm = _CmFake();
+      cm.preSO128 = true;
+      // Every request — including a referer'd enable — is denied, so the
+      // repair bootstrap cannot succeed.
+      final locator = _FakeLocator(
+        cached: '192.168.1.33',
+        candidates: const [],
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      await repo.warmUp(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      expect(cm.called, isNotEmpty,
+          reason: 'warm-up probed the candidate (referer-less) and clarified '
+              'it as referer-gated');
+
+      final enableCallsAfterWarmUp = cm.called
+          .where((c) => c == 'SetOption128%201')
+          .length;
+
+      await repo.repairGatedDevices(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      // The FIRST repair does attempt the enable (the device is gated).
+      final enableCallsAfterFirst = cm.called
+          .where((c) => c == 'SetOption128%201')
+          .length;
+      expect(enableCallsAfterFirst, greaterThan(enableCallsAfterWarmUp),
+          reason: 'the first repair attempts the (failing) enable');
+
+      // A second repair pass (e.g. another lifecycle resume) must NOT re-run
+      // the enable: the device was already attempted once this run.
+      await repo.repairGatedDevices(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      expect(
+          cm.called.where((c) => c == 'SetOption128%201').length,
+          enableCallsAfterFirst,
+          reason: 'the at-most-once fence blocks a repeated enable attempt');
+    });
+
+    test('a device that is NOT referer-gated gets no repair command', () async {
+      // An already-enabled device answers the warm-up probe normally, so it is
+      // verified — not gated — and no gratuitous SetOption128 is ever sent.
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(
+        cached: '192.168.1.33',
+        candidates: const [],
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      await repo.warmUp(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      await repo.repairGatedDevices(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+
+      expect(cm.called, contains('Status%205'));
+      expect(cm.called.any((c) => c.contains('SetOption128')), isFalse,
+          reason: 'never send SetOption128 to a device that is not gated');
+    });
+  });
 }

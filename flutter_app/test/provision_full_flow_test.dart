@@ -136,6 +136,11 @@ class _TasmotaFake {
   /// [_canonicalDeviceId] (see [normalizeMac]).
   static const reportedMac = '34:98:7A:C3:03:04';
 
+  /// When true, the FIRST `Status 5` read answers without a MAC (the identity
+  /// is not readable yet at AP detection), and every later read reports it.
+  /// Exercises the fallback hard-gate path in `_provision()`.
+  bool failFirstMacRead = false;
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -149,7 +154,11 @@ class _TasmotaFake {
   String _bodyFor(String cmnd) {
     // Identity read (Status 5 is read-only, no reboot).
     if (cmnd.startsWith('Status 5')) {
+      final isFirstRead = macsRead.isEmpty;
       macsRead.add(reportedMac);
+      if (failFirstMacRead && isFirstRead) {
+        return '{"StatusNET":{"Mac":""}}';
+      }
       return '{"StatusNET":{"Mac":"$reportedMac"}}';
     }
     // Pre-flight WiFi credential test: trigger + verdict poll.
@@ -294,8 +303,9 @@ void main() {
 
       // Full end-to-end success: the wizard popped with `true`.
       expect(read(), isTrue, reason: 'claim must complete for a new device');
-      expect(api.preflightCalls, greaterThanOrEqualTo(2),
-          reason: 'gate runs at AP detection AND again before provisioning');
+      expect(api.preflightCalls, 1,
+          reason: 'the gate runs once at AP detection; the hard gate skips '
+              'its redundant backend round-trip for the same identity');
       expect(api.provisionCalls, 1);
       expect(tasmota.provisioned, isTrue,
           reason: 'WiFi/config commands must actually be sent for a new device');
@@ -334,11 +344,55 @@ void main() {
       expect(tasmota.provisioned, isFalse);
       // No backend claim either.
       expect(api.provisionCalls, 0);
-      expect(api.preflightCalls, greaterThanOrEqualTo(1));
+      expect(api.preflightCalls, 1,
+          reason: 'a single gate at AP detection certifies the duplicate');
       // No re-claim path exists in the wizard.
       expect(find.text('Remove Device'), findsNothing);
       expect(find.text('Delete'), findsNothing);
       expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'MAC not readable at AP detection: the hard gate in _provision still '
+        'stops a duplicate before any config command', (tester) async {
+      _mockSecureStorage(tester);
+      // The backend says the device already exists, but the identity could
+      // not be read at AP detection (first Status 5 empty), so NOTHING was
+      // checked yet — the hard gate in _provision must certify the re-read MAC
+      // before a single config command reaches the device.
+      final api = _FlowApi()
+        ..preflightStatus = DeviceDuplicateStatus.mine;
+      final tasmota = _TasmotaFake()
+        ..failFirstMacRead = true;
+      await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      // Identity unreadable at detection: the wizard still reaches Configure
+      // (it shows the Device ID as "read from the device when it connects"),
+      // because the authoritative identity re-read happens on Apply.
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      expect(find.text('read from the device when it connects'), findsOneWidget,
+          reason: 'the unreadable identity is shown as pending, not guessed');
+
+      await _fillAndProvision(tester);
+
+      // The hard gate ran once (in _provision), saw the duplicate, and froze.
+      expect(api.preflightCalls, 1,
+          reason: 'no gate ran at AP detection (identity unknown), so the hard '
+              'gate is the single authoritative certifier');
+      expect(api.provisionCalls, 0);
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      // No provisioning/config command reached the device: only the two
+      // read-only Status 5 identity reads (detection + Apply-time re-read).
+      expect(tasmota.commands.where((c) => c.startsWith('Status 5')).length, 2,
+          reason: 'identity read at AP detection and again at Apply');
+      expect(tasmota.commands.where((c) => !c.startsWith('Status 5')), isEmpty,
+          reason: 'a duplicate must never receive a config/Wi-Fi command, '
+              'regardless of when its MAC could first be read');
+      expect(tasmota.provisioned, isFalse);
 
       await _unmount(tester);
     });
@@ -388,7 +442,9 @@ void main() {
 
       expect(read(), isTrue,
           reason: 'after a successful DELETE the same device claims afresh');
-      expect(api.preflightCalls, greaterThanOrEqualTo(2));
+      expect(api.preflightCalls, 1,
+          reason: 'the gate runs once at AP detection for the new claim; no '
+              'redundant hard-gate round-trip for the same identity');
       expect(api.provisionCalls, 1);
       expect(tasmota.provisioned, isTrue);
 
@@ -429,6 +485,34 @@ void main() {
       expect(api.seenDeviceIds.every((id) => id == _canonicalDeviceId), isTrue);
       expect(api.provisionedDeviceIds, [_canonicalDeviceId],
           reason: 'the claim must register the same MAC that was provisioned');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'MAC not readable at AP detection: a genuine new device still claims '
+        'via the hard gate in _provision, once', (tester) async {
+      _mockSecureStorage(tester);
+      // The identity is unreadable at AP detection (no gate ran yet), but the
+      // backend says "not registered". The Apply-time identity re-read feeds
+      // the hard gate, which is the SINGLE certifier here, then provisioning
+      // runs to a successful claim.
+      final api = _FlowApi(); // preflightStatus = notFound
+      final tasmota = _TasmotaFake()
+        ..failFirstMacRead = true;
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue, reason: 'a new device claims to completion');
+      expect(api.preflightCalls, 1,
+          reason: 'the AP-detection gate was skipped (MAC unknown), so the '
+              'hard gate in _provision is the one certifier');
+      expect(api.provisionCalls, 1);
+      expect(tasmota.provisioned, isTrue);
 
       await _unmount(tester);
     });
