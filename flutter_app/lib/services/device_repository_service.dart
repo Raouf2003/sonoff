@@ -135,24 +135,48 @@ class DeviceRepositoryService {
   /// returns `false` and cloud control keeps working — the normal warm-up path
   /// can establish local control later.
   ///
+  /// [lastIp] is the LAN IP the CLAIM RESPONSE carried, learned by the backend
+  /// from MQTT telemetry. It is fed in as an UNVERIFIED discovery hint (the
+  /// existing `storeCandidateAddress` mechanism, never trusted until `Status 5`
+  /// confirms the MAC), so a fresh claim no longer depends solely on the
+  /// phone's mDNS enumeration. The discovery ladder becomes: warm verified
+  /// cache → cached verified IP → backend lastIp candidate → mDNS.
+  ///
   /// On success the device was found on the LAN, its identity verified
   /// (`Status 5` MAC), `SetOption128 1` enabled (idempotent), a read-only state
   /// verified, and the IP persisted as verified through the existing locator
   /// mechanism so the devices page (a separate repository instance) uses it
   /// locally on the next tap.
-  Future<bool> enableLocalHttpApi(String deviceId) async {
+  Future<bool> enableLocalHttpApi(String deviceId, {String? lastIp}) async {
+    _logSetup('setup started');
+    if (lastIp == null || lastIp.isEmpty) {
+      _logSetup('IP candidates: none (no backend lastIp)');
+    } else if (!isValidLocalIp(lastIp)) {
+      _logSetup('IP candidates: backend lastIp rejected (invalid): $lastIp');
+    } else {
+      _logSetup('IP candidates: backend lastIp=$lastIp');
+      try {
+        await _seedOneCandidate(deviceId, lastIp);
+      } on Object catch (e) {
+        _logSetup('candidate seed failed: ${_describe(e)}');
+      }
+    }
     LocalDeviceTransport? local;
     try {
-      local = await _findLocal(deviceId).timeout(kLocalBudget);
+      // `urgent` keeps the mDNS window short (2s) so the candidate probe + a
+      // possible mDNS sweep stay inside kLocalBudget.
+      local = await _findLocal(deviceId, urgent: true).timeout(kLocalBudget);
     } on Object catch (e) {
-      _log('local HTTP-API setup lookup failed for $deviceId (${_describe(e)})');
+      _logSetup('lookup failed: ${_describe(e)}');
       return false;
     }
     if (local == null) {
-      _log('local HTTP-API setup skipped for $deviceId — no reachable LAN endpoint');
+      _logSetup('failed: no reachable LAN endpoint');
       return false;
     }
+    _logSetup('selected IP: ${local.address}');
     try {
+      _logSetup('sending SetOption128');
       await local.enableHttpApi();
       // Read-only verification: proves the local device actually serves state
       // now that the HTTP API is on (and refreshes the learned IP if it moved).
@@ -160,6 +184,7 @@ class DeviceRepositoryService {
         deviceId,
         identityVerified: _canSkipIdentityVerify(deviceId),
       );
+      _logSetup('verification result: OK');
       // Persist/mark the endpoint as verified so a later repository instance
       // (e.g. the devices page after the wizard pops) finds it without mDNS.
       await _locator
@@ -169,10 +194,10 @@ class DeviceRepositoryService {
       _warmVerifiedAt[deviceId] = DateTime.now();
       _lastSource = DeviceTransportSource.local;
       _maybeLearnIp(deviceId, local.address, status);
-      _log('local HTTP-API enabled + verified for $deviceId at ${local.address}');
+      _logSetup('persisted verified IP: ${local.address}');
       return true;
     } on Object catch (e) {
-      _log('local HTTP-API setup failed for $deviceId (${_describe(e)})');
+      _logSetup('failed: ${_describe(e)}');
       return false;
     }
   }
@@ -852,6 +877,12 @@ class DeviceRepositoryService {
 
   void _log(String message) {
     debugPrint('[LOCAL] $message');
+  }
+
+  /// Dedicated trace for the claim-time AUTO SetOption128 bootstrap, so a
+  /// post-claim LAN miss is distinguishable from background warm-up logs.
+  void _logSetup(String message) {
+    debugPrint('[local-setup] $message');
   }
 
   /// No-op when [opId] is null (status polls, non-command flows).

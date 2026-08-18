@@ -150,6 +150,13 @@ class _FakeLocator implements DeviceLocator {
   Future<void> storeCandidateAddress(String deviceId, String ip) async {
     candidateStores++;
     lastCandidate = ip;
+    // Mirror the real locator: a DIFFERENT hint replaces the stored entry as
+    // an unverified candidate; the same address leaves the entry untouched
+    // (so a fresh verified entry is never downgraded).
+    if (cached != ip) {
+      cached = ip;
+      verifiedAt = null;
+    }
   }
 
   @override
@@ -1314,6 +1321,75 @@ void main() {
       expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.5/');
       expect(locator.lastStored, '192.168.1.5',
           reason: 'the setup path explicitly persists the verified IP');
+    });
+
+    test('Case 1c: mDNS finds nothing but the backend lastIp succeeds',
+        () async {
+      // The real-device failure: the phone's mDNS enumeration came back empty
+      // even though the device was HTTP-reachable. The claim response's
+      // lastIp is seeded as an unverified candidate and identity-verified
+      // (`Status 5`) before SetOption128 is sent — no mDNS required.
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(candidates: const []);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok =
+          await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
+
+      expect(ok, isTrue);
+      expect(locator.candidateStores, 1,
+          reason: 'the backend lastIp is seeded as an unverified hint');
+      expect(locator.lastCandidate, '192.168.1.33');
+      expect(
+        cm.called,
+        containsAll(['Status%205', 'SetOption128%201', 'State']),
+      );
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
+      expect(locator.lastStored, '192.168.1.33');
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('Case 1d: backend lastIp overrides a stale cached verified IP',
+        () async {
+      // The cache holds an OLD verified IP that the backend lastIp replaces
+      // (DHCP changed the lease): the fresh telemetry hint wins via the seed,
+      // is re-verified, and the setup completes against the new address.
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now().subtract(const Duration(minutes: 20)),
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok =
+          await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
+
+      expect(ok, isTrue);
+      expect(locator.lastStored, '192.168.1.33');
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
+    });
+
+    test('Case 1e: invalid backend lastIp is rejected, never seeded/probed',
+        () async {
+      final cm = _CmFake();
+      final locator = _FakeLocator(candidates: const []);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId, lastIp: '0.0.0.0');
+
+      expect(ok, isFalse);
+      expect(locator.candidateStores, 0,
+          reason: '0.0.0.0 is transient boot state, never a LAN hint');
+      expect(cm.called, isEmpty,
+          reason: 'an unusable hint must not trigger any HTTP request');
     });
 
     test('Case 3: no local IP -> clean skip, claim untouched, no HTTP',

@@ -367,6 +367,7 @@ class LocalDeviceTransport implements DeviceTransport {
   /// control is ready; it never affects the cloud claim.
   Future<void> enableHttpApi() async {
     final body = await _cm('SetOption128%201', referer: 'http://$address/');
+    debugPrint('[local-setup] response/status: $body');
     if (_isRefererDenied(body)) {
       const failure = DeviceTransportException(
         'The local device rejected the HTTP API enable command.',

@@ -86,7 +86,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
   /// that runs after a successful claim. Widget tests inject it so no real
   /// mDNS browser or LAN request is created on the claim-success path.
   @visibleForTesting
-  final Future<void> Function(String deviceId)? testLocalSetup;
+  final Future<void> Function(String deviceId, {String? lastIp})? testLocalSetup;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -1274,7 +1274,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     });
     try {
       _trace.enter(ProvisionPhase.claim, 'REGISTERING');
-      await _api.provisionDevice(
+      final claimed = await _api.provisionDevice(
         deviceId: deviceId,
         name: name,
         channels: _deviceType.channelCount,
@@ -1296,11 +1296,16 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       // Automatic LOCAL HTTP API setup: when the phone can already reach the
       // device on the LAN, enable SetOption128 1 through the local transport
       // (device-matching Referer bootstrap) and verify it, so local control
-      // works immediately — no Tasmota console, no restart. Strictly
+      // works immediately — no Tasmota console, no restart. The claim
+      // response's backend-learned lastIp is passed in as an UNVERIFIED IP
+      // hint: the existing discovery ladder identity-verifies it (`Status 5`)
+      // before use, so the setup no longer depends solely on mDNS. Strictly
       // best-effort and independent of the (already successful) cloud claim: a
       // LAN miss just leaves cloud control in charge, and later discovery can
       // still establish local control.
-      unawaited(_setupLocalControl(deviceId));
+      unawaited(
+        _setupLocalControl(deviceId, lastIp: claimed['lastIp'] as String?),
+      );
 
       // Background local discovery warm-up: bounded, single-flight, never
       // blocks the flow or affects the provisioning outcome.
@@ -1648,16 +1653,18 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // browser / LAN request is created on the claim-success path. Never affects
   // the claim outcome — a LAN miss or failure just leaves cloud control in
   // charge (later discovery can still establish local control).
-  Future<void> _setupLocalControl(String deviceId) async {
+  Future<void> _setupLocalControl(String deviceId, {String? lastIp}) async {
+    debugPrint('[local-setup] claim success');
     final hook = widget.testLocalSetup;
     if (hook != null) {
-      await hook(deviceId);
+      await hook(deviceId, lastIp: lastIp);
       return;
     }
+    debugPrint('[local-setup] setup started');
     try {
-      await _repository.enableLocalHttpApi(deviceId);
+      await _repository.enableLocalHttpApi(deviceId, lastIp: lastIp);
     } on Object catch (e) {
-      debugPrint('[LOCAL] SetOption128 setup skipped/failed for $deviceId: $e');
+      debugPrint('[local-setup] failed: $e');
     }
   }
 
