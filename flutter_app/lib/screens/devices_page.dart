@@ -10,6 +10,8 @@ import '../services/auth_service.dart';
 import '../services/control_timeline.dart';
 import '../services/device_repository_service.dart';
 import '../services/device_transport.dart';
+import '../services/local_device_cache.dart';
+import '../services/provisioning_service.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
@@ -39,7 +41,8 @@ class DevicesPage extends StatefulWidget {
   const DevicesPage({super.key, required this.onNavigateToTab})
       : testRepository = null,
         testSocketFactory = null,
-        testHealthCheck = null;
+        testHealthCheck = null,
+        testApi = null;
 
   /// Test seam: injects a fake repository / socket connector / cloud health
   /// probe so widget tests exercise the relay gate and cloud→local fallback
@@ -51,12 +54,14 @@ class DevicesPage extends StatefulWidget {
     this.testRepository,
     this.testSocketFactory,
     this.testHealthCheck,
+    this.testApi,
   });
 
   final DeviceRepositoryService? testRepository;
   final io.Socket Function(String url, Map<String, dynamic> options)?
       testSocketFactory;
   final Future<bool> Function()? testHealthCheck;
+  final ApiService? testApi;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -66,11 +71,15 @@ class _DevicesPageState extends State<DevicesPage>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   late final DeviceRepositoryService _repository =
       widget.testRepository ?? DeviceRepositoryService();
+  late final ApiService _api = widget.testApi ?? ApiService();
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
   bool _loadError = false;
   String? _selectedDeviceId;
   int _deviceChannels = 4;
+  // True while the authenticated DELETE (Delete Device) is in flight. Guards
+  // against duplicate taps / duplicate DELETE requests.
+  bool _deleting = false;
 
   io.Socket? _socket;
 
@@ -406,7 +415,7 @@ class _DevicesPageState extends State<DevicesPage>
           .timeout(const Duration(seconds: 2));
       if (mounted && cached.isNotEmpty && _devices.isEmpty) {
         setState(() {
-          _devices = cached.cast<Map<String, dynamic>>();
+          _devices = cached.cast<Map<String, dynamic>>().toList();
           _loading = false;
           _loadError = false;
         });
@@ -428,7 +437,7 @@ class _DevicesPageState extends State<DevicesPage>
       final devices = await _repository.getDevices();
       if (mounted) {
         setState(() {
-          _devices = devices.cast<Map<String, dynamic>>();
+          _devices = devices.cast<Map<String, dynamic>>().toList();
           _loading = false;
           _loadError = false;
         });
@@ -909,6 +918,117 @@ final useLocalFirst = !_socketConnected || (!_socketEverConnected && hasLocalIp)
     if (added == true) _loadDevices();
   }
 
+  // The selected device. Returns the first entry as a fallback so the delete
+  // flow always addresses an actual device.
+  Map<String, dynamic> get _selectedDevice =>
+      _getDevice(_selectedDeviceId ?? _devices.first['deviceId']);
+
+  // Confirm then delete the existing registration for the selected device from
+  // the authenticated account. Re-claiming happens through the normal claim
+  // flow afterwards, which re-checks the backend and finds the device gone.
+  Future<void> _confirmDeleteDevice() async {
+    if (_deleting) return;
+    final colors = context.steesColors;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.surface,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.xl)),
+        title: Text('Delete Device',
+            style: GoogleFonts.sora(
+                fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text(
+          'Are you sure you want to delete this device?\n'
+          'You can claim it again after deletion.',
+          style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel',
+                style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Delete',
+                style: GoogleFonts.inter(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: colors.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _deleteDevice();
+  }
+
+  // Executes the authenticated DELETE, guarding against duplicate taps, then
+  // drops the device from the local list and clears its Local Mode cache entry
+  // so a later re-claim starts clean.
+  Future<void> _deleteDevice() async {
+    if (_deleting) return;
+    final deviceId = _selectedDevice['deviceId'] as String?;
+    if (deviceId == null || deviceId.isEmpty) return;
+    setState(() => _deleting = true);
+    DeleteOutcome outcome;
+    try {
+      await _api.deleteDevice(deviceId);
+      outcome = classifyDeleteOutcome(succeeded: true);
+    } on ApiException catch (e) {
+      outcome = classifyDeleteOutcome(statusCode: e.statusCode);
+      if (e.statusCode == 401) {
+        // The shared ApiService.onUnauthorized handler already handles sign-out.
+        // Keep the device; do not pretend deletion succeeded.
+        if (mounted) {
+          _showError('You appear to be signed out. Sign in again and retry.');
+        }
+        setState(() => _deleting = false);
+        return;
+      }
+    } catch (_) {
+      outcome = classifyDeleteOutcome();
+    }
+    if (!mounted) return;
+    final colors = context.steesColors;
+    if (outcome == DeleteOutcome.cleared) {
+      // Removed (200) or already gone (404): drop the device locally and clear
+      // its Local Mode cache entry so a re-claim is treated as a new device.
+      await LocalDeviceCache().remove(deviceId);
+      if (!mounted) return;
+      setState(() {
+        _devices.removeWhere((d) => d['deviceId'] == deviceId);
+        if (_selectedDeviceId == deviceId) _selectedDeviceId = null;
+        if (_devices.isNotEmpty) {
+          _selectedDeviceId ??= _devices.first['deviceId'] as String;
+        } else {
+          _loading = false;
+          _loadError = false;
+        }
+        _deleting = false;
+      });
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text('Device deleted.',
+              style: const TextStyle(fontSize: 13)),
+          backgroundColor: colors.stream,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.md)),
+          margin: const EdgeInsets.all(AppSpacing.lg),
+          duration: const Duration(seconds: 3),
+        ));
+    } else {
+      // Network / timeout / server / unexpected failure: keep the device and
+      // surface a retryable error. Never claim deletion succeeded.
+      setState(() => _deleting = false);
+      _showError('Could not delete the device. Check your connection and try '
+          'again.');
+    }
+  }
+
   void _openSchedules() {
     widget.onNavigateToTab(2);
   }
@@ -1164,6 +1284,20 @@ final useLocalFirst = !_socketConnected || (!_socketEverConnected && hasLocalIp)
             localEvidenceFresh: _lastLocalEvidenceAt != null &&
                 DateTime.now().difference(_lastLocalEvidenceAt!) <
                     kLocalReportHold,
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          IconButton(
+            onPressed: _deleting ? null : _confirmDeleteDevice,
+            tooltip: 'Delete Device',
+            icon: _deleting
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2.5, color: colors.danger),
+                  )
+                : Icon(Icons.delete_outline,
+                    size: 20, color: colors.mist),
           ),
         ],
       ),

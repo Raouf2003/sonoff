@@ -96,6 +96,13 @@ class DeviceRepositoryService {
   /// duplicate `Status 5` on operations that immediately follow that probe.
   final Map<String, DateTime> _identityTrustedAt = {};
 
+  /// Candidate IPs (keyed by deviceId) that answered the discovery probe with
+  /// Tasmota's referer-denial warning: reachable but SetOption128 OFF. These
+  /// are the device pre-SO128 — never discarded as a mismatch — and the
+  /// claim-time setup drains them through the referer'd enable-first bootstrap
+  /// when no lastIp hint exists (e.g. re-claim / re-flash).
+  final Map<String, Set<String>> _gatedCandidates = {};
+
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
   DeviceTransportSource? get lastSource => _lastSource;
@@ -206,7 +213,10 @@ class DeviceRepositoryService {
 
     // LAST RESORT: the normal discovery ladder (warm cache / verified cache /
     // mDNS). Its referer-less identity probe only works once SO128 is already
-    // ON, so this covers the idempotent re-run on an enabled device. Unchanged.
+    // ON, so this covers the idempotent re-run on an enabled device. During the
+    // probe, any candidate that answers with the referer-denial warning (a
+    // reachable pre-SO128 box) is remembered as a gated candidate instead of
+    // being discarded as a mismatch.
     LocalDeviceTransport? local;
     try {
       // `urgent` keeps the mDNS window short (2s) so the candidate probe + a
@@ -216,12 +226,35 @@ class DeviceRepositoryService {
       _logSetup('discovery lookup failed: ${_describe(e)}');
       return false;
     }
-    if (local == null) {
-      _logSetup('failed: no reachable LAN endpoint');
-      return false;
+    if (local != null) {
+      _logSetup('selected IP: ${local.address} (discovered)');
+      return _directBootstrap(local, deviceId);
     }
-    _logSetup('selected IP: ${local.address} (discovered)');
-    return _directBootstrap(local, deviceId);
+
+    // GATED-CANDIDATE RECOVERY: `_findLocal` found no identity-verifiable
+    // endpoint, but it may have probed reachable devices whose referer-less
+    // `Status 5` was denied because SetOption128 is OFF. Those are OUR device
+    // pre-SO128 (re-claim / re-flash / fresh boot where no lastIp hint exists).
+    // Run the same referer'd enable-first bootstrap against each — no lastIp,
+    // no backend, no claim-flow change.
+    final gated = _gatedCandidates[deviceId];
+    if (gated != null && gated.isNotEmpty) {
+      _logSetup('gated recovery: ${gated.join(', ')}');
+      for (final ip in List<String>.of(gated)) {
+        _logSetup('selected IP: $ip (referer-gated recovery)');
+        final transport = LocalDeviceTransport(
+          address: ip,
+          deviceId: deviceId,
+          fetcher: _fetch,
+          bootstrap: true,
+        );
+        if (await _directBootstrap(transport, deviceId)) return true;
+        // Failed to enable/verify this candidate — drop just it and move on.
+        gated.remove(ip);
+      }
+    }
+    _logSetup('failed: no reachable LAN endpoint');
+    return false;
   }
 
   /// The direct claim-time bootstrap sequence for a KNOWN candidate IP:
@@ -886,6 +919,16 @@ class DeviceRepositoryService {
             _tl(opId, deviceId, channel, 'Cached IP probe result: mismatch');
             _log('cached IP identity mismatch — discarding $cached');
             break;
+          case LocalIdentityCheck.refererGated:
+            // The box IS reachable but SetOption128 is OFF, so the referer-less
+            // probe could not confirm the MAC. That is our device pre-SO128,
+            // not a repurposed IP — keep it (as a hint, like unavailable) and
+            // remember it so the claim-time setup can run the referer'd
+            // bootstrap against it.
+            _tl(opId, deviceId, channel, 'Cached IP probe result: gated');
+            _log('cached IP referer-gated (SetOption128 OFF) — kept for bootstrap');
+            _gatedCandidates.putIfAbsent(deviceId, () => <String>{}).add(cached);
+            break;
           case LocalIdentityCheck.unavailable:
             if (isVerified) {
               // A previously-confirmed address that no longer answers (box off /
@@ -914,16 +957,29 @@ class DeviceRepositoryService {
     for (final ip in candidates) {
       _log('mDNS candidate: $ip — verifying MAC');
       final transport = _buildLocal(ip, deviceId);
-      if (await transport.verifyIdentity()) {
-        _log('verified local device: $ip');
-        await _locator.storeVerifiedAddress(deviceId, ip);
-        _warmCache[deviceId] = transport;
-        _warmVerifiedAt[deviceId] = DateTime.now();
-        _identityTrustedAt[deviceId] = DateTime.now();
-        _tl(opId, deviceId, channel, 'mDNS verified');
-        return transport;
+      switch (await transport.checkIdentity()) {
+        case LocalIdentityCheck.verified:
+          _log('verified local device: $ip');
+          await _locator.storeVerifiedAddress(deviceId, ip);
+          _warmCache[deviceId] = transport;
+          _warmVerifiedAt[deviceId] = DateTime.now();
+          _identityTrustedAt[deviceId] = DateTime.now();
+          _tl(opId, deviceId, channel, 'mDNS verified');
+          return transport;
+        case LocalIdentityCheck.mismatch:
+          _log('mDNS candidate failed identity check — skipped');
+          break;
+        case LocalIdentityCheck.unavailable:
+          _log('mDNS candidate unreachable — skipped');
+          break;
+        case LocalIdentityCheck.refererGated:
+          // Pre-SO128 box: reachable but referer-less probes are denied. Keep
+          // the IP so the claim-time setup can bootstrap it (referer'd
+          // SetOption128), never a "mismatch".
+          _log('mDNS candidate referer-gated (SetOption128 OFF) — kept for bootstrap');
+          _gatedCandidates.putIfAbsent(deviceId, () => <String>{}).add(ip);
+          break;
       }
-      _log('mDNS candidate failed identity check — skipped');
     }
 
     _tl(opId, deviceId, channel, 'Local discovery failed');

@@ -80,6 +80,15 @@ bool _isRefererDenied(String body) {
   return body.toLowerCase().contains('denied');
 }
 
+/// Internal signal thrown by [LocalDeviceTransport._verifyIdentity] when the
+/// identity probe is answered with Tasmota's referer-denial warning instead of
+/// the `Status 5` MAC: the box is reachable but SetOption128 is OFF. Never
+/// escapes the transport — [checkIdentity] folds it into
+/// `LocalIdentityCheck.refererGated`.
+class _RefererGatedException implements Exception {
+  const _RefererGatedException();
+}
+
 /// POSITIVE confirmation that a `/cm` response proves SetOption128 is enabled.
 /// HTTP 200 alone is never treated as success: the body must actually report
 /// the option ON (`"1"` or `"ON"`), however it is wrapped. Any other response
@@ -368,11 +377,16 @@ class LocalDeviceTransport implements DeviceTransport {
 
   /// Like [verifyIdentity] but distinguishes WHY the probe failed, so discovery
   /// can keep a transiently-unreachable candidate while dropping a repurposed
-  /// address (identity mismatch).
+  /// address (identity mismatch) and keep a reachable pre-SO128 box
+  /// (referer-gated) as a bootstrap candidate.
   Future<LocalIdentityCheck> checkIdentity() async {
     try {
       await _verifyIdentity();
       return LocalIdentityCheck.verified;
+    } on _RefererGatedException {
+      // Tasmota answered "Referer '' denied" — the device is reachable but
+      // SetOption128 is OFF. Not an identity violation.
+      return LocalIdentityCheck.refererGated;
     } on DeviceTransportException catch (e) {
       return e.kind == TransportFailureKind.logical
           ? LocalIdentityCheck.mismatch
@@ -384,6 +398,14 @@ class LocalDeviceTransport implements DeviceTransport {
 
   Future<void> _verifyIdentity() async {
     final body = await _cm('Status%205');
+    // While SetOption128 is OFF, Tasmota answers the referer-less probe with
+    // the denial warning and NO MAC. That is not "a different device": it is
+    // OUR device in the pre-SO128 state this setup fixes. Signal it distinctly
+    // so the caller can run the referer'd bootstrap instead of discarding.
+    if (_isRefererDenied(body)) {
+      debugPrint('[LOCAL] identity GATED (SetOption128 OFF) at $address');
+      throw const _RefererGatedException();
+    }
     final mac = normalizeMac(extractMacFromStatus5(body));
     debugPrint('[LOCAL] candidate MAC: $mac, expected deviceId: $deviceId');
     if (mac == null || mac != deviceId) {

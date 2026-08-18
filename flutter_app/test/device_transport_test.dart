@@ -12,6 +12,8 @@ const _deviceId = '34987AC30304';
 const _macBody = '{"StatusNET":{"Mac":"34:98:7A:C3:03:04"}}';
 const _otherMacBody = '{"StatusNET":{"Mac":"00:11:22:33:44:55"}}';
 const _garbageBody = '<html>401 Unauthorized</html>';
+const _refererDeniedBody =
+    '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}';
 
 /// Controllable [TasmotaCmFetcher] backed by a command→body table.
 class _CmFake {
@@ -313,6 +315,23 @@ void main() {
         fetcher: cm.call,
       );
       expect(await t.verifyIdentity(), isFalse);
+    });
+
+    test('referer-denied Status 5 (pre-SO128) → refererGated, NOT mismatch',
+        () async {
+      // While SetOption128 is OFF Tasmota answers a referer-less `Status 5`
+      // with the denial warning and NO MAC. That must be classified as
+      // `refererGated` (reachable, pre-SO128) so discovery keeps the IP for the
+      // bootstrap instead of treating it as a repurposed foreign box.
+      final cm = _CmFake({'Status%205': _refererDeniedBody});
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      expect(await t.checkIdentity(), LocalIdentityCheck.refererGated);
+      expect(await t.verifyIdentity(), isFalse);
+      expect(cm.called, ['Status%205', 'Status%205']);
     });
 
     test('control is never sent before identity verification succeeds',

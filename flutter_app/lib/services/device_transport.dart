@@ -115,6 +115,12 @@ enum LocalIdentityCheck {
 
   /// The address answered but with a different MAC — the IP was repurposed.
   mismatch,
+
+  /// The address answered with Tasmota's referer-denial warning — SetOption128
+  /// is OFF, so the referer-less probe can never confirm the MAC. This is NOT
+  /// a repurposed address: the box is reachable and pre-SO128, so discovery
+  /// keeps it as a bootstrap candidate rather than discarding it.
+  refererGated,
 }
 
 /// Transport-level failure carrying a stable category so the repository can

@@ -356,32 +356,24 @@ void traceLog(String tag, String message) {
   print('[PROVISION][$tag] $message');
 }
 
-/// True when a terminal provision failure is a duplicate owned by the CURRENT
-/// authenticated user - the ONLY case where the provisioning wizard offers the
-/// "Remove Device" control. A duplicate owned by another user, a device-not-
-/// seen, a MQTT/network/auth error, or a generic provisioning failure must never
-/// surface the removal button.
-bool shouldShowRemoveDevice(String? errorCode) {
-  return errorCode == 'DEVICE_ALREADY_EXISTS';
-}
-
 /// Classifies the outcome of the authenticated device DELETE used by the
-/// "Remove Device" flow, so the wizard can decide whether to clear the
-/// duplicate terminal state (and allow a retry) or keep it.
+/// Devices-page "Delete Device" action, so callers decide whether to treat the
+/// removal as complete (and drop the device locally) or keep it and surface an
+/// error.
 ///
 /// * [succeeded] true (the DELETE returned the expected 200): the device was
-///   removed - clear the duplicate state.
+///   removed.
 /// * [statusCode] 404: the device is already gone (deleted elsewhere). Treated
-///   as already removed - clear the duplicate state and allow retry.
+///   as already removed.
 /// * Anything else (network / timeout via [kApiTimeout], a 401 handled by the
-///   shared auth gate, a 5xx): the deletion did NOT succeed - the duplicate
-///   state must be kept and a retryable error shown, never a false success.
+///   shared auth gate, a 5xx): the deletion did NOT succeed - the device must
+///   be kept in the account and a retryable error shown, never a false success.
 enum DeleteOutcome {
   /// Deleted (200) or already gone (404): clear duplicate state, allow retry.
   cleared,
 
-  /// Network / timeout / 401 / server / unexpected failure: keep the duplicate
-  /// state so the wizard never pretends the deletion succeeded.
+  /// Network / timeout / 401 / server / unexpected failure: the deletion did
+  /// NOT complete - keep the device in the account.
   kept,
 }
 
