@@ -1431,6 +1431,47 @@ void main() {
       expect(repo.lastSource, DeviceTransportSource.local);
     });
 
+    test('re-claim (no lastIp, no cache): referer-gated mDNS candidate is '
+        'bootstrapped, not discarded', () async {
+      // THE re-claim failure. The device was deleted and re-provisioned (fresh
+      // flash, SO128 OFF), so the provision response carries NO lastIp and the
+      // app cache has nothing either. Discovery only finds the box via mDNS,
+      // whose referer-less Status 5 is denied pre-SO128 — previously classified
+      // as identity MISMATCH and discarded, so local setup silently failed.
+      // Now the gated candidate is kept and drained through the referer'd
+      // enable-first bootstrap.
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'State': '{"POWER1":"ON"}',
+      })..preSO128 = true;
+      final locator = _FakeLocator(
+        cached: null,
+        candidates: const ['192.168.1.33'],
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isTrue);
+      // The mDNS probe was referer-less and DENIED (recorded first), then the
+      // gated-recovery bootstrap re-probed with the device-matching Referer —
+      // so the last recorded referer per command is the bootstrap's.
+      expect(cm.called,
+          ['Status%205', 'SetOption128%201', 'Status%205', 'State']);
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['State'], 'http://192.168.1.33/');
+      expect(locator.mDnsQueries, 1,
+          reason: 'the gated recovery must not re-run mDNS');
+      expect(locator.candidateStores, 0,
+          reason: 'there is no lastIp to seed');
+      expect(locator.discards, 0,
+          reason: 'a referer-gated pre-SO128 box is never a repurposed IP');
+      expect(locator.lastStored, '192.168.1.33');
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
     test('Case 3: no local IP -> clean skip, claim untouched, no HTTP',
         () async {
       final locator = _FakeLocator(candidates: const []);
