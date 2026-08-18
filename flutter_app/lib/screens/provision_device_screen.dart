@@ -1654,7 +1654,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // the claim outcome — a LAN miss or failure just leaves cloud control in
   // charge (later discovery can still establish local control).
   Future<void> _setupLocalControl(String deviceId, {String? lastIp}) async {
-    debugPrint('[local-setup] claim success');
+    debugPrint('[local-setup] claim success deviceId=$deviceId lastIp=$lastIp');
     final hook = widget.testLocalSetup;
     if (hook != null) {
       await hook(deviceId, lastIp: lastIp);

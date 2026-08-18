@@ -136,125 +136,143 @@ class DeviceRepositoryService {
   /// can establish local control later.
   ///
   /// [lastIp] is the LAN IP the CLAIM RESPONSE carried, learned by the backend
-  /// from MQTT telemetry. It is fed in as an UNVERIFIED discovery hint (the
-  /// existing `storeCandidateAddress` mechanism, never trusted until `Status 5`
-  /// confirms the MAC), so a fresh claim no longer depends solely on the
-  /// phone's mDNS enumeration. The discovery ladder becomes: warm verified
-  /// cache → cached verified IP → backend lastIp candidate → mDNS.
+  /// from MQTT telemetry. When present, the setup uses it as a DIRECT bootstrap
+  /// candidate (enable-first, referer'd — no discovery, no referer-less probe
+  /// before the enable). The persisted cached IP is tried the same way, then
+  /// the normal discovery ladder (only usable once SO128 is already ON).
   ///
-  /// On success the device was found on the LAN, its identity verified
-  /// (`Status 5` MAC), `SetOption128 1` enabled (idempotent), a read-only state
-  /// verified, and the IP persisted as verified through the existing locator
-  /// mechanism so the devices page (a separate repository instance) uses it
-  /// locally on the next tap.
+  /// On success the device was enabled on the LAN (SetOption128 1, idempotent,
+  /// positively confirmed), its identity verified (`Status 5` MAC), a read-only
+  /// state verified, and the IP persisted as verified through the existing
+  /// locator mechanism so the devices page (a separate repository instance)
+  /// uses it locally on the next tap.
   Future<bool> enableLocalHttpApi(String deviceId, {String? lastIp}) async {
     _logSetup('setup started');
-    if (lastIp == null || lastIp.isEmpty) {
-      _logSetup('IP candidates: none (no backend lastIp)');
-    } else if (!isValidLocalIp(lastIp)) {
-      _logSetup('IP candidates: backend lastIp rejected (invalid): $lastIp');
-    } else {
-      _logSetup('IP candidates: backend lastIp=$lastIp');
-      try {
-        await _seedOneCandidate(deviceId, lastIp);
-      } on Object catch (e) {
-        _logSetup('candidate seed failed: ${_describe(e)}');
+
+    String? cached;
+    DateTime? cachedVerifiedAt;
+    try {
+      cached = await _locator.cachedAddress(deviceId);
+      cachedVerifiedAt = await _locator.cachedVerifiedAt(deviceId);
+    } on Object catch (e) {
+      _logSetup('cache read failed: ${_describe(e)}');
+    }
+    _logSetup(
+      'candidates: backend lastIp=$lastIp'
+      '${cached != null ? ', cached IP=$cached' : ''}'
+      '${cachedVerifiedAt != null ? ', cached verifiedAt=${cachedVerifiedAt.toIso8601String()}' : ''}',
+    );
+
+    // DIRECT bootstrap (preferred): the claim response's lastIp. While SO128
+    // is OFF Tasmota answers a referer-less `/cm` (including `Status 5`) with
+    // the referer-denial warning, so normal discovery can never verify the
+    // device pre-SO128. This path therefore sends the referer'd `SetOption128
+    // 1` FIRST (accepted exactly like the built-in console), then verifies
+    // identity/state, then persists. NO referer-less request runs before the
+    // enable.
+    if (lastIp != null && lastIp.isNotEmpty) {
+      if (!isValidLocalIp(lastIp)) {
+        _logSetup('backend lastIp rejected (invalid): $lastIp');
+      } else {
+        _logSetup('backend lastIp accepted');
+        try {
+          await _seedOneCandidate(deviceId, lastIp);
+        } on Object catch (e) {
+          _logSetup('candidate seed failed: ${_describe(e)}');
+        }
+        _logSetup('selected IP: $lastIp');
+        final transport = LocalDeviceTransport(
+          address: lastIp,
+          deviceId: deviceId,
+          fetcher: _fetch,
+          bootstrap: true,
+        );
+        if (await _directBootstrap(transport, deviceId)) return true;
       }
     }
 
-    // Phase A — bootstrap directly on the KNOWN IP hints. While SetOption128
-    // is OFF Tasmota answers the referer-less `Status 5` identity probe with
-    // the referer-denial warning (no MAC), so the normal discovery ladder
-    // below would classify the freshly-claimed device as an identity MISMATCH
-    // and never reach the enable step. Bootstrap transports attach the
-    // device-matching Referer to EVERY request (identity probe included) —
-    // which Tasmota accepts pre-SO128, exactly like the built-in console —
-    // so the probe, the enable and the read-back all work in the very state
-    // this setup fixes. Identity is still confirmed by MAC before enabling.
-    final candidates = <String>{};
-    if (lastIp != null && isValidLocalIp(lastIp)) candidates.add(lastIp);
-    try {
-      final cached = await _locator.cachedAddress(deviceId);
-      if (cached != null && isValidLocalIp(cached)) candidates.add(cached);
-    } on Object catch (e) {
-      _logSetup('cached IP read failed: ${_describe(e)}');
-    }
-    for (final ip in candidates) {
-      _logSetup('probing bootstrap candidate: $ip');
+    // DIRECT bootstrap on the persisted cached IP (verified or candidate) —
+    // same enable-first sequence, no referer-less probe before the enable.
+    if (cached != null && isValidLocalIp(cached)) {
+      _logSetup('selected IP: $cached (cached)');
       final transport = LocalDeviceTransport(
-        address: ip,
+        address: cached,
         deviceId: deviceId,
         fetcher: _fetch,
         bootstrap: true,
       );
-      switch (await transport.checkIdentity()) {
-        case LocalIdentityCheck.verified:
-          _identityTrustedAt[deviceId] = DateTime.now();
-          if (await _completeSetup(transport, deviceId)) return true;
-          break;
-        case LocalIdentityCheck.mismatch:
-          _logSetup('candidate $ip identity mismatch — discarding');
-          try {
-            await _locator
-                .discardAddress(deviceId)
-                .timeout(const Duration(seconds: 2));
-          } on Object catch (e) {
-            _logSetup('discard failed: ${_describe(e)}');
-          }
-          break;
-        case LocalIdentityCheck.unavailable:
-          _logSetup('candidate $ip unreachable — trying next');
-          break;
-      }
+      if (await _directBootstrap(transport, deviceId)) return true;
     }
 
-    // Phase B — the existing discovery ladder (warm cache / persisted cache /
-    // mDNS), where the referer-less probe works because the device already has
-    // SetOption128 ON. Unchanged.
+    // LAST RESORT: the normal discovery ladder (warm cache / verified cache /
+    // mDNS). Its referer-less identity probe only works once SO128 is already
+    // ON, so this covers the idempotent re-run on an enabled device. Unchanged.
     LocalDeviceTransport? local;
     try {
       // `urgent` keeps the mDNS window short (2s) so the candidate probe + a
       // possible mDNS sweep stay inside kLocalBudget.
       local = await _findLocal(deviceId, urgent: true).timeout(kLocalBudget);
     } on Object catch (e) {
-      _logSetup('lookup failed: ${_describe(e)}');
+      _logSetup('discovery lookup failed: ${_describe(e)}');
       return false;
     }
     if (local == null) {
       _logSetup('failed: no reachable LAN endpoint');
       return false;
     }
-    return _completeSetup(local, deviceId);
+    _logSetup('selected IP: ${local.address} (discovered)');
+    return _directBootstrap(local, deviceId);
   }
 
-  /// Enable + read-back verify + persist the verified IP for a transport that
-  /// has been identity-confirmed. Shared by the bootstrap phase (referer'd
-  /// probe on a known hint) and the discovery phase (referer-less probe over
-  /// the normal ladder, device already SO128-on).
-  Future<bool> _completeSetup(LocalDeviceTransport local, String deviceId) async {
-    _logSetup('sending SetOption128 (selected IP: ${local.address})');
+  /// The direct claim-time bootstrap sequence for a KNOWN candidate IP:
+  /// referer'd `SetOption128 1` FIRST (no identity discovery, no referer-less
+  /// request), then identity/state verification, then persisting the verified
+  /// address. Any failure returns `false` and never touches the claim.
+  Future<bool> _directBootstrap(LocalDeviceTransport transport, String deviceId) async {
+    _logSetup('before enableHttpApi');
     try {
-      await local.enableHttpApi();
-      // Read-only verification: proves the local device actually serves state
-      // now that the HTTP API is on (and refreshes the learned IP if it moved).
-      final status = await local.getStatus(
+      await transport.enableHttpApi();
+      _logSetup('enableHttpApi result: SetOption128 accepted');
+    } on Object catch (e) {
+      _logSetup('enableHttpApi result: ${_describe(e)}');
+      return false;
+    }
+    _logSetup('before identity verification');
+    final check = await transport.checkIdentity();
+    _logSetup('after identity verification: $check');
+    if (check != LocalIdentityCheck.verified) {
+      _logSetup('identity verification failed ($check) — not persisting');
+      return false;
+    }
+    _identityTrustedAt[deviceId] = DateTime.now();
+    return _verifyAndPersist(transport, deviceId);
+  }
+
+  /// Read-only state verification + persistence of the now-verified IP. The
+  /// warm cache deliberately stores a NORMAL (non-bootstrap) transport so the
+  /// subsequent relay/status path stays referer-less.
+  Future<bool> _verifyAndPersist(LocalDeviceTransport transport, String deviceId) async {
+    try {
+      final status = await transport.getStatus(
         deviceId,
         identityVerified: _canSkipIdentityVerify(deviceId),
       );
-      _logSetup('verification result: OK');
-      // Persist/mark the endpoint as verified so a later repository instance
-      // (e.g. the devices page after the wizard pops) finds it without mDNS.
+      _logSetup('final verification result: OK');
       await _locator
-          .storeVerifiedAddress(deviceId, local.address)
+          .storeVerifiedAddress(deviceId, transport.address)
           .timeout(const Duration(seconds: 2));
-      _warmCache[deviceId] = local;
+      _warmCache[deviceId] = LocalDeviceTransport(
+        address: transport.address,
+        deviceId: deviceId,
+        fetcher: _fetch,
+      );
       _warmVerifiedAt[deviceId] = DateTime.now();
       _lastSource = DeviceTransportSource.local;
-      _maybeLearnIp(deviceId, local.address, status);
-      _logSetup('persisted verified IP: ${local.address}');
+      _maybeLearnIp(deviceId, transport.address, status);
+      _logSetup('persisted verified IP: ${transport.address}');
       return true;
     } on Object catch (e) {
-      _logSetup('failed: ${_describe(e)}');
+      _logSetup('final verification failed: ${_describe(e)}');
       return false;
     }
   }

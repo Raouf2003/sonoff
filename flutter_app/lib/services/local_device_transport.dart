@@ -80,6 +80,23 @@ bool _isRefererDenied(String body) {
   return body.toLowerCase().contains('denied');
 }
 
+/// POSITIVE confirmation that a `/cm` response proves SetOption128 is enabled.
+/// HTTP 200 alone is never treated as success: the body must actually report
+/// the option ON (`"1"` or `"ON"`), however it is wrapped. Any other response
+/// (empty, `{}`, an unknown key, an explicit `"OFF"`) fails the bootstrap.
+bool _confirmsSetOption128Enabled(String body) {
+  final trimmed = body.trim();
+  if (trimmed.isEmpty) return false;
+  try {
+    final value = _findStringValue(jsonDecode(trimmed), 'setoption128');
+    if (value == null) return false;
+    final upper = value.toUpperCase();
+    return upper == '1' || upper == 'ON';
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Normalizes a raw address (from the cache, mDNS, or telemetry) into an
 /// `host[:port]` form safe for `http://$address/...`. Strips any scheme that
 /// slipped in, removes trailing slashes, and brackets IPv6 (encoding a zone
@@ -149,8 +166,11 @@ Future<String> defaultTasmotaCmFetcher(
       );
     }
     final response = await request.close().timeout(readBudget);
-    if (response.statusCode != 200) {
-      final status = response.statusCode;
+    final status = response.statusCode;
+    if (kDebugMode) {
+      debugPrint('[LOCAL][HTTP]<< status=$status');
+    }
+    if (status != 200) {
       _logLocalHttp(
         deviceId: who,
         endpoint: endpoint,
@@ -165,6 +185,9 @@ Future<String> defaultTasmotaCmFetcher(
     }
     final body =
         await response.transform(utf8.decoder).join().timeout(readBudget);
+    if (kDebugMode) {
+      debugPrint('[LOCAL][HTTP]<< body=$body');
+    }
     _logLocalHttp(
       deviceId: who,
       endpoint: endpoint,
@@ -286,6 +309,11 @@ class LocalDeviceTransport implements DeviceTransport {
       // the identity probe itself passes Tasmota's referer gate pre-SO128. An
       // explicit referer (the `enableHttpApi` bootstrap) always wins.
       final effectiveReferer = referer ?? (bootstrap ? deviceReferer : null);
+      if (kDebugMode) {
+        debugPrint(
+          '[LOCAL][HTTP] transport=$address bootstrap=$bootstrap cmnd=$command',
+        );
+      }
       return await _fetcher(
         address,
         command,
@@ -400,6 +428,21 @@ class LocalDeviceTransport implements DeviceTransport {
       const failure = DeviceTransportException(
         'The local device rejected the HTTP API enable command.',
         cause: FormatException('Referer denied'),
+      );
+      _logLocalHttp(
+        deviceId: deviceId,
+        endpoint: address,
+        operation: 'SetOption128%201',
+        error: failure,
+      );
+      throw failure;
+    }
+    // HTTP 200 is NOT enough: the body must positively confirm SetOption128
+    // reports ON ("1"/"ON"). Any other response is an inconclusive enable.
+    if (!_confirmsSetOption128Enabled(body)) {
+      const failure = DeviceTransportException(
+        'The local device did not confirm SetOption128 was enabled.',
+        cause: FormatException('SetOption128 not confirmed'),
       );
       _logLocalHttp(
         deviceId: deviceId,
