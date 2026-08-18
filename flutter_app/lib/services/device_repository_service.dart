@@ -125,6 +125,58 @@ class DeviceRepositoryService {
     }
   }
 
+  /// Best-effort automatic local HTTP API preparation, run immediately after a
+  /// successful cloud claim so the app can control the device on the LAN
+  /// WITHOUT a manual Tasmota console command (`SetOption128 1`).
+  ///
+  /// The cloud claim and this local setup are DIFFERENT concerns: the caller
+  /// has already committed the claim and this NEVER rolls it back. Any failure
+  /// (device not on the phone's LAN, unreachable, timeout, referer-denied)
+  /// returns `false` and cloud control keeps working — the normal warm-up path
+  /// can establish local control later.
+  ///
+  /// On success the device was found on the LAN, its identity verified
+  /// (`Status 5` MAC), `SetOption128 1` enabled (idempotent), a read-only state
+  /// verified, and the IP persisted as verified through the existing locator
+  /// mechanism so the devices page (a separate repository instance) uses it
+  /// locally on the next tap.
+  Future<bool> enableLocalHttpApi(String deviceId) async {
+    LocalDeviceTransport? local;
+    try {
+      local = await _findLocal(deviceId).timeout(kLocalBudget);
+    } on Object catch (e) {
+      _log('local HTTP-API setup lookup failed for $deviceId (${_describe(e)})');
+      return false;
+    }
+    if (local == null) {
+      _log('local HTTP-API setup skipped for $deviceId — no reachable LAN endpoint');
+      return false;
+    }
+    try {
+      await local.enableHttpApi();
+      // Read-only verification: proves the local device actually serves state
+      // now that the HTTP API is on (and refreshes the learned IP if it moved).
+      final status = await local.getStatus(
+        deviceId,
+        identityVerified: _canSkipIdentityVerify(deviceId),
+      );
+      // Persist/mark the endpoint as verified so a later repository instance
+      // (e.g. the devices page after the wizard pops) finds it without mDNS.
+      await _locator
+          .storeVerifiedAddress(deviceId, local.address)
+          .timeout(const Duration(seconds: 2));
+      _warmCache[deviceId] = local;
+      _warmVerifiedAt[deviceId] = DateTime.now();
+      _lastSource = DeviceTransportSource.local;
+      _maybeLearnIp(deviceId, local.address, status);
+      _log('local HTTP-API enabled + verified for $deviceId at ${local.address}');
+      return true;
+    } on Object catch (e) {
+      _log('local HTTP-API setup failed for $deviceId (${_describe(e)})');
+      return false;
+    }
+  }
+
   /// The registered device list, cloud-first with a local cache fallback
   /// (unchanged: the list itself remains cloud-authorised; Local Mode never
   /// invents devices). Also seeds the local discovery candidate list from each

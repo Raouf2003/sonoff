@@ -21,14 +21,17 @@ class _CmFake {
   final List<String> called = [];
   Object? error;
   Duration delay = Duration.zero;
+  String? lastReferer;
 
   Future<String> call(
     String address,
     String command, {
     String? password,
     String? deviceId,
+    String? referer,
   }) async {
     called.add(command);
+    lastReferer = referer;
     if (delay != Duration.zero) {
       await Future<void>.delayed(delay);
     }
@@ -481,6 +484,92 @@ void main() {
     });
   });
 
+  group('LocalDeviceTransport auto HTTP API setup (enableHttpApi)', () {
+    test('sends SetOption128 with a device-matching Referer, no identity probe',
+        () async {
+      final cm = _CmFake({'SetOption128%201': '{"SetOption128":"1"}'});
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await t.enableHttpApi();
+      expect(cm.called, ['SetOption128%201']);
+      // The Referer matches the device's own address (what the console sends),
+      // so the enable command passes Tasmota's check even while SO128 is OFF.
+      expect(cm.lastReferer, 'http://192.168.1.5/');
+    });
+
+    test('idempotent when SetOption128 is already enabled', () async {
+      final cm = _CmFake({'SetOption128%201': '{"SetOption128":"1"}'});
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      // No exception: re-running the setup on an already-configured device is a
+      // normal, safe outcome.
+      await t.enableHttpApi();
+      await t.enableHttpApi();
+      expect(cm.called, ['SetOption128%201', 'SetOption128%201']);
+    });
+
+    test('a referer-denied response fails the setup visibly', () async {
+      final cm = _CmFake({
+        'SetOption128%201':
+            '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}',
+      });
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await expectLater(
+        t.enableHttpApi(),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.message, 'message', contains('rejected')),
+        ),
+      );
+    });
+
+    test('unreachable device propagates an availability failure', () async {
+      final cm = _CmFake({})..error = const SocketException('unreachable');
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await expectLater(
+        t.enableHttpApi(),
+        throwsA(
+          isA<DeviceTransportException>()
+              .having((e) => e.kind, 'kind', TransportFailureKind.availability),
+        ),
+      );
+    });
+
+    test('invalid address never reaches the fetcher', () async {
+      final cm = _CmFake({});
+      final t = LocalDeviceTransport(
+        address: '0.0.0.0',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      await expectLater(
+        t.enableHttpApi(),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.message,
+            'message',
+            contains('address is invalid'),
+          ),
+        ),
+      );
+      expect(cm.called, isEmpty);
+    });
+  });
+
   group('CloudDeviceTransport passthrough', () {
     test('delegates 1:1 to ApiService and reports cloud source', () async {
       final api = _FakeCloudApi();
@@ -683,7 +772,7 @@ void main() {
       final t = LocalDeviceTransport(
         address: '192.168.1.5',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async {
+        fetcher: (address, command, {password, deviceId, referer}) async {
           throw const SocketException(
             'Connection refused',
             osError: OSError('refused', 111),
@@ -712,7 +801,7 @@ void main() {
       final t = LocalDeviceTransport(
         address: '192.168.1.5',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async {
+        fetcher: (address, command, {password, deviceId, referer}) async {
           throw const SocketException(
             'Connection timed out',
             osError: OSError('timed out', 110),
@@ -763,7 +852,7 @@ void main() {
       final t = LocalDeviceTransport(
         address: '192.168.1.5',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async {
+        fetcher: (address, command, {password, deviceId, referer}) async {
           throw original;
         },
       );
@@ -802,13 +891,13 @@ void main() {
       final t = LocalDeviceTransport(
         address: 'fe80::1',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async => '',
+        fetcher: (address, command, {password, deviceId, referer}) async => '',
       );
       expect(t.address, '[fe80::1]');
       final withZone = LocalDeviceTransport(
         address: 'fe80::1%wlan0',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async => '',
+        fetcher: (address, command, {password, deviceId, referer}) async => '',
       );
       expect(withZone.address, '[fe80::1%25wlan0]');
     });
@@ -817,7 +906,7 @@ void main() {
       final t = LocalDeviceTransport(
         address: '192.168.1.20:8080',
         deviceId: _deviceId,
-        fetcher: (address, command, {password, deviceId}) async => '',
+        fetcher: (address, command, {password, deviceId, referer}) async => '',
       );
       expect(t.address, '192.168.1.20:8080');
     });

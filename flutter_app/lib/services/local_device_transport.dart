@@ -17,11 +17,16 @@ const Duration kLocalReadTimeout = Duration(seconds: 2);
 /// network. All low-level failures are converted into availability
 /// [DeviceTransportException]s (with the ORIGINAL error preserved as
 /// `cause`), never raw socket exceptions.
+///
+/// [referer] is a per-request override for the `Referer` header. It is only
+/// sent by the SetOption128 bootstrap (Tasmota requires a device-matching
+/// referer while SO128 is OFF); the normal status/control path never sends it.
 typedef TasmotaCmFetcher = Future<String> Function(
   String address,
   String command, {
   String? password,
   String? deviceId,
+  String? referer,
 });
 
 /// Structured DEBUG-ONLY diagnostic for a local HTTP attempt. Logs only
@@ -66,6 +71,15 @@ void _logLocalHttp({
 /// as the single choke point if a future caller is tempted to.
 String _logSafe(String value) => value;
 
+/// True when a `/cm` response body is Tasmota's referer-denial warning
+/// (`{"WARNING":"Referer '...' denied. Use 'SO128 1' ..."}`) — i.e. the
+/// SetOption128 enable was NOT accepted. Anything else (a normal SetOption128
+/// echo, or a non-JSON body) is not a denial, so only an explicit rejection
+/// fails the automatic bootstrap.
+bool _isRefererDenied(String body) {
+  return body.toLowerCase().contains('denied');
+}
+
 /// Normalizes a raw address (from the cache, mDNS, or telemetry) into an
 /// `host[:port]` form safe for `http://$address/...`. Strips any scheme that
 /// slipped in, removes trailing slashes, and brackets IPv6 (encoding a zone
@@ -95,6 +109,7 @@ Future<String> defaultTasmotaCmFetcher(
   String command, {
   String? password,
   String? deviceId,
+  String? referer,
   Duration? connectTimeout,
   Duration? readTimeout,
 }) async {
@@ -114,6 +129,15 @@ Future<String> defaultTasmotaCmFetcher(
     if (password != null && password.isNotEmpty) {
       final cred = base64Encode(utf8.encode('admin:$password'));
       request.headers.set(HttpHeaders.authorizationHeader, 'Basic $cred');
+    }
+    // While SetOption128 is OFF Tasmota rejects referer-less HTTP API commands
+    // (`Referer '' denied. Use 'SO128 1' ...`). The automatic SO128 bootstrap
+    // therefore sends a Referer matching the device's own address — same header
+    // shape the built-in console produces — so the enable request is accepted
+    // in the very state it fixes. Once SO128 is ON, referer-less commands
+    // (status/control) are accepted; no other request sends a referer.
+    if (referer != null && referer.isNotEmpty) {
+      request.headers.set(HttpHeaders.refererHeader, referer);
     }
     final response = await request.close().timeout(readBudget);
     if (response.statusCode != 200) {
@@ -216,7 +240,7 @@ class LocalDeviceTransport implements DeviceTransport {
   @override
   DeviceTransportSource get source => DeviceTransportSource.local;
 
-  Future<String> _cm(String command) async {
+  Future<String> _cm(String command, {String? referer}) async {
     // Last-line guard: an unusable address (e.g. `0.0.0.0`, multicast) can
     // never reach HttpClient, even if one was somehow cached before validation.
     if (!isUsableHttpHost(address)) {
@@ -239,6 +263,7 @@ class LocalDeviceTransport implements DeviceTransport {
         command,
         password: password,
         deviceId: deviceId,
+        referer: referer,
       ).timeout(readTimeout);
     } on TimeoutException catch (e) {
       // The whole local attempt (connect + headers + body) exceeded the budget.
@@ -322,6 +347,40 @@ class LocalDeviceTransport implements DeviceTransport {
         kind: TransportFailureKind.logical,
       );
     }
+  }
+
+  /// Automatically enables Tasmota's local HTTP API (`SetOption128 1`) so
+  /// direct `/cm` relay commands from the app are accepted WITHOUT a browser
+  /// console command. Idempotent: sending `SetOption128 1` when it is already
+  /// enabled succeeds harmlessly, which is why this is safe to run on every
+  /// claim.
+  ///
+  /// The single request deliberately carries a `Referer` matching the device's
+  /// own address (the same header shape the built-in console sends). While
+  /// SetOption128 is OFF Tasmota rejects referer-less HTTP API commands — the
+  /// exact state this fixes — so the bootstrap must present a valid referer.
+  /// Once enabled, the existing referer-less status/control commands are
+  /// accepted.
+  ///
+  /// Any failure (unreachable, timeout, denied, invalid address) propagates as
+  /// a [DeviceTransportException] so the caller can decide whether local
+  /// control is ready; it never affects the cloud claim.
+  Future<void> enableHttpApi() async {
+    final body = await _cm('SetOption128%201', referer: 'http://$address/');
+    if (_isRefererDenied(body)) {
+      const failure = DeviceTransportException(
+        'The local device rejected the HTTP API enable command.',
+        cause: FormatException('Referer denied'),
+      );
+      _logLocalHttp(
+        deviceId: deviceId,
+        endpoint: address,
+        operation: 'SetOption128%201',
+        error: failure,
+      );
+      throw failure;
+    }
+    debugPrint('[LOCAL] HTTP API enabled (SetOption128) at $address');
   }
 
   @override

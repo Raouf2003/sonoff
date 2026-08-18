@@ -115,6 +115,7 @@ class _CmFake {
     String command, {
     String? password,
     String? deviceId,
+    String? referer,
   }) async {
     final body = responses[command];
     if (body == null) throw const DeviceTransportException('HTTP 404');
@@ -180,6 +181,7 @@ class _RecordingCmFake {
     String command, {
     String? password,
     String? deviceId,
+    String? referer,
   }) async {
     log.add('$address $command');
     final body = responsesByAddress[address]?[command];

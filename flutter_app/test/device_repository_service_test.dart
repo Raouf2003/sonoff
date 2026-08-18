@@ -77,6 +77,7 @@ class _CmFake {
   final Map<String, List<String>> macByAddress;
   bool unreachable = false;
   final List<String> called = [];
+  final Map<String, String?> refererByCommand = {};
   Object? error;
 
   Future<String> call(
@@ -84,8 +85,10 @@ class _CmFake {
     String command, {
     String? password,
     String? deviceId,
+    String? referer,
   }) async {
     called.add(command);
+    refererByCommand[command] = referer;
     final err = error;
     if (err != null) throw err;
     if (unreachable) {
@@ -1262,6 +1265,123 @@ void main() {
               'reported IP adds no write');
       expect(locator.lastStored, '192.168.1.5',
           reason: '0.0.0.0 must never be stored as this device IP');
+    });
+  });
+
+  group('enableLocalHttpApi (automatic SetOption128 after claim)', () {
+    test('Case 1: reachable device -> SO128 + status verify + verified IP',
+        () async {
+      // No cached IP yet (a fresh claim): the phone finds the device via mDNS,
+      // which identity-verifies it with `Status 5` before it is used.
+      final cm = _CmFake(responses: {
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isTrue);
+      // Identity probe -> SetOption128 enable -> read-only State verification.
+      expect(
+          cm.called, containsAll(['Status%205', 'SetOption128%201', 'State']));
+      // The enable request carries a device-matching Referer bootstrap.
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.5/');
+      // The verified IP is persisted via the existing mechanism.
+      expect(locator.lastStored, '192.168.1.5');
+      expect(repo.lastSource, DeviceTransportSource.local);
+    });
+
+    test('Case 1b: a fresh verified cached IP still runs setup + verification',
+        () async {
+      final cm = _CmFake(responses: {
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(
+        cached: '192.168.1.5',
+        verifiedAt: DateTime.now(),
+      );
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isTrue);
+      expect(cm.called, containsAll(['SetOption128%201', 'State']));
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.5/');
+      expect(locator.lastStored, '192.168.1.5',
+          reason: 'the setup path explicitly persists the verified IP');
+    });
+
+    test('Case 3: no local IP -> clean skip, claim untouched, no HTTP',
+        () async {
+      final locator = _FakeLocator(candidates: const []);
+      final repo = _repo(_FakeCloudApi(), locator: locator);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isFalse);
+      expect(locator.mDnsQueries, 1,
+          reason: 'discovery ran, but nothing on the LAN was found');
+      expect(locator.stores, 0,
+          reason: 'nothing was verified so nothing may be persisted');
+    });
+
+    test('Case 2/1: already-enabled device is idempotent and still verified',
+        () async {
+      // SetOption128 echoed back already-"1" is NOT a denial: the setup
+      // proceeds to verification and marks the IP verified.
+      final cm = _CmFake(responses: {
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'Status%205': _macBody,
+        'State': '{"POWER1":"ON"}',
+      });
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isTrue);
+      expect(cm.called, containsAll(['SetOption128%201', 'State']));
+      expect(locator.lastStored, '192.168.1.5');
+    });
+
+    test('setup DENIED (referer-check still blocking) never marks verified',
+        () async {
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'SetOption128%201':
+            '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}',
+      });
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isFalse,
+          reason: 'setup failure must NEVER make the claim look failed');
+      // The only verified write is the discovery promotion from MAC-verifying
+      // the box; the failed setup adds no further verified write and the
+      // read-back verification is never reached.
+      expect(locator.stores, 1);
+      expect(locator.lastStored, '192.168.1.5');
+      expect(cm.called, ['Status%205', 'SetOption128%201'],
+          reason: 'verification stops at the denied enable');
+    });
+
+    test('setup timeout/unreachable -> false, no rollback, no verified store',
+        () async {
+      final cm = _CmFake()..unreachable = true;
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok = await repo.enableLocalHttpApi(_deviceId);
+
+      expect(ok, isFalse);
+      expect(locator.stores, 0);
     });
   });
 }

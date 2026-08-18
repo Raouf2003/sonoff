@@ -50,7 +50,8 @@ class ProvisionDeviceScreen extends StatefulWidget {
       : testApi = null,
         testDeviceId = null,
         testFailureCode = null,
-        testWarmUp = null;
+        testWarmUp = null,
+        testLocalSetup = null;
 
   /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
   /// failure state and injects an [ApiService] so widget tests can exercise the
@@ -64,6 +65,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
     this.testDeviceId,
     this.testFailureCode,
     this.testWarmUp,
+    this.testLocalSetup,
   });
 
   @visibleForTesting
@@ -79,6 +81,12 @@ class ProvisionDeviceScreen extends StatefulWidget {
   /// mDNS browsers and holds fake-time timers) with a no-op in widget tests.
   @visibleForTesting
   final Future<void> Function(List<Map<String, dynamic>> devices)? testWarmUp;
+
+  /// Test seam: replaces the automatic local HTTP API setup (SetOption128)
+  /// that runs after a successful claim. Widget tests inject it so no real
+  /// mDNS browser or LAN request is created on the claim-success path.
+  @visibleForTesting
+  final Future<void> Function(String deviceId)? testLocalSetup;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -1285,6 +1293,15 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       unawaited(_api.sendMqttCommand(deviceId, 'SetOption128 1'));
       unawaited(_api.sendMqttCommand(deviceId, 'Restart 1'));
 
+      // Automatic LOCAL HTTP API setup: when the phone can already reach the
+      // device on the LAN, enable SetOption128 1 through the local transport
+      // (device-matching Referer bootstrap) and verify it, so local control
+      // works immediately — no Tasmota console, no restart. Strictly
+      // best-effort and independent of the (already successful) cloud claim: a
+      // LAN miss just leaves cloud control in charge, and later discovery can
+      // still establish local control.
+      unawaited(_setupLocalControl(deviceId));
+
       // Background local discovery warm-up: bounded, single-flight, never
       // blocks the flow or affects the provisioning outcome.
       unawaited(
@@ -1623,6 +1640,25 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       return;
     }
     await _repository.warmUp([device]);
+  }
+
+  // Automatic local HTTP API preparation (SetOption128 1) after a successful
+  // claim, so the device can be controlled on the LAN without a manual console
+  // command. Test seam: provision widget tests replace it so no real mDNS
+  // browser / LAN request is created on the claim-success path. Never affects
+  // the claim outcome — a LAN miss or failure just leaves cloud control in
+  // charge (later discovery can still establish local control).
+  Future<void> _setupLocalControl(String deviceId) async {
+    final hook = widget.testLocalSetup;
+    if (hook != null) {
+      await hook(deviceId);
+      return;
+    }
+    try {
+      await _repository.enableLocalHttpApi(deviceId);
+    } on Object catch (e) {
+      debugPrint('[LOCAL] SetOption128 setup skipped/failed for $deviceId: $e');
+    }
   }
 
   void _setSuccess(String msg) {
