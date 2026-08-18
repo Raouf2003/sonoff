@@ -161,6 +161,56 @@ class DeviceRepositoryService {
         _logSetup('candidate seed failed: ${_describe(e)}');
       }
     }
+
+    // Phase A — bootstrap directly on the KNOWN IP hints. While SetOption128
+    // is OFF Tasmota answers the referer-less `Status 5` identity probe with
+    // the referer-denial warning (no MAC), so the normal discovery ladder
+    // below would classify the freshly-claimed device as an identity MISMATCH
+    // and never reach the enable step. Bootstrap transports attach the
+    // device-matching Referer to EVERY request (identity probe included) —
+    // which Tasmota accepts pre-SO128, exactly like the built-in console —
+    // so the probe, the enable and the read-back all work in the very state
+    // this setup fixes. Identity is still confirmed by MAC before enabling.
+    final candidates = <String>{};
+    if (lastIp != null && isValidLocalIp(lastIp)) candidates.add(lastIp);
+    try {
+      final cached = await _locator.cachedAddress(deviceId);
+      if (cached != null && isValidLocalIp(cached)) candidates.add(cached);
+    } on Object catch (e) {
+      _logSetup('cached IP read failed: ${_describe(e)}');
+    }
+    for (final ip in candidates) {
+      _logSetup('probing bootstrap candidate: $ip');
+      final transport = LocalDeviceTransport(
+        address: ip,
+        deviceId: deviceId,
+        fetcher: _fetch,
+        bootstrap: true,
+      );
+      switch (await transport.checkIdentity()) {
+        case LocalIdentityCheck.verified:
+          _identityTrustedAt[deviceId] = DateTime.now();
+          if (await _completeSetup(transport, deviceId)) return true;
+          break;
+        case LocalIdentityCheck.mismatch:
+          _logSetup('candidate $ip identity mismatch — discarding');
+          try {
+            await _locator
+                .discardAddress(deviceId)
+                .timeout(const Duration(seconds: 2));
+          } on Object catch (e) {
+            _logSetup('discard failed: ${_describe(e)}');
+          }
+          break;
+        case LocalIdentityCheck.unavailable:
+          _logSetup('candidate $ip unreachable — trying next');
+          break;
+      }
+    }
+
+    // Phase B — the existing discovery ladder (warm cache / persisted cache /
+    // mDNS), where the referer-less probe works because the device already has
+    // SetOption128 ON. Unchanged.
     LocalDeviceTransport? local;
     try {
       // `urgent` keeps the mDNS window short (2s) so the candidate probe + a
@@ -174,9 +224,16 @@ class DeviceRepositoryService {
       _logSetup('failed: no reachable LAN endpoint');
       return false;
     }
-    _logSetup('selected IP: ${local.address}');
+    return _completeSetup(local, deviceId);
+  }
+
+  /// Enable + read-back verify + persist the verified IP for a transport that
+  /// has been identity-confirmed. Shared by the bootstrap phase (referer'd
+  /// probe on a known hint) and the discovery phase (referer-less probe over
+  /// the normal ladder, device already SO128-on).
+  Future<bool> _completeSetup(LocalDeviceTransport local, String deviceId) async {
+    _logSetup('sending SetOption128 (selected IP: ${local.address})');
     try {
-      _logSetup('sending SetOption128');
       await local.enableHttpApi();
       // Read-only verification: proves the local device actually serves state
       // now that the HTTP API is on (and refreshes the learned IP if it moved).

@@ -139,6 +139,15 @@ Future<String> defaultTasmotaCmFetcher(
     if (referer != null && referer.isNotEmpty) {
       request.headers.set(HttpHeaders.refererHeader, referer);
     }
+    // Outbound wire debug line: the ACTUAL URI and the Referer header value as
+    // read back from the outgoing request object. Credentials are never logged.
+    if (kDebugMode) {
+      final wireReferer = request.headers.value(HttpHeaders.refererHeader);
+      debugPrint(
+        '[LOCAL][HTTP]>> GET http://$address/cm?cmnd=$command '
+        'referer=${wireReferer ?? '(none)'}',
+      );
+    }
     final response = await request.close().timeout(readBudget);
     if (response.statusCode != 200) {
       final status = response.statusCode;
@@ -224,6 +233,7 @@ class LocalDeviceTransport implements DeviceTransport {
     TasmotaCmFetcher? fetcher,
     this.connectTimeout = kLocalConnectTimeout,
     this.readTimeout = kLocalReadTimeout,
+    this.bootstrap = false,
   })  : address = _normalizeEndpoint(address),
         _fetcher = fetcher ?? defaultTasmotaCmFetcher;
 
@@ -231,6 +241,20 @@ class LocalDeviceTransport implements DeviceTransport {
   final String deviceId;
   final String? password;
   final TasmotaCmFetcher _fetcher;
+
+  /// Bootstrap mode is used ONLY by the claim-time automatic SO128 setup. It
+  /// attaches the device-matching `Referer` to EVERY request (identity probe,
+  /// enable, read-back), because while SetOption128 is OFF Tasmota answers a
+  /// referer-less `/cm` (including `Status 5`) with the referer-denial warning
+  /// — no MAC — which the normal discovery ladder would treat as an identity
+  /// MISMATCH and discard. The referer'd probe is accepted exactly like the
+  /// built-in console, letting the setup reach the `SetOption128 1` enable in
+  /// the very state it fixes. Identity is still confirmed by MAC (`Status 5`)
+  /// before anything is enabled; the normal (non-bootstrap) transport is 100%
+  /// unchanged and never sends a referer.
+  final bool bootstrap;
+
+  String get deviceReferer => 'http://$address/';
 
   /// Injected timeouts; kept as fields so the bounded-timeout behavior is
   /// unit-testable without waiting for the production constants.
@@ -258,12 +282,16 @@ class LocalDeviceTransport implements DeviceTransport {
     }
     final stopwatch = Stopwatch()..start();
     try {
+      // In bootstrap mode EVERY command carries the device-matching Referer so
+      // the identity probe itself passes Tasmota's referer gate pre-SO128. An
+      // explicit referer (the `enableHttpApi` bootstrap) always wins.
+      final effectiveReferer = referer ?? (bootstrap ? deviceReferer : null);
       return await _fetcher(
         address,
         command,
         password: password,
         deviceId: deviceId,
-        referer: referer,
+        referer: effectiveReferer,
       ).timeout(readTimeout);
     } on TimeoutException catch (e) {
       // The whole local attempt (connect + headers + body) exceeded the budget.
@@ -366,7 +394,7 @@ class LocalDeviceTransport implements DeviceTransport {
   /// a [DeviceTransportException] so the caller can decide whether local
   /// control is ready; it never affects the cloud claim.
   Future<void> enableHttpApi() async {
-    final body = await _cm('SetOption128%201', referer: 'http://$address/');
+    final body = await _cm('SetOption128%201', referer: deviceReferer);
     debugPrint('[local-setup] response/status: $body');
     if (_isRefererDenied(body)) {
       const failure = DeviceTransportException(

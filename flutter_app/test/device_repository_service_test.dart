@@ -76,6 +76,12 @@ class _CmFake {
   /// test can simulate identity changing between discovery and command.
   final Map<String, List<String>> macByAddress;
   bool unreachable = false;
+
+  /// Models a Tasmota with SetOption128 OFF: EVERY referer-less `/cm` command
+  /// answers the referer-denial warning (HTTP 200, no MAC/state), exactly the
+  /// real-device behavior that used to kill the automatic setup. Referer'd
+  /// commands proceed to the normal `responses` table.
+  bool preSO128 = false;
   final List<String> called = [];
   final Map<String, String?> refererByCommand = {};
   Object? error;
@@ -93,6 +99,9 @@ class _CmFake {
     if (err != null) throw err;
     if (unreachable) {
       throw const DeviceTransportException('unreachable');
+    }
+    if (preSO128 && (referer == null || referer.isEmpty)) {
+      return '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}';
     }
     if (command == 'Status%205') {
       final queue = macByAddress[address];
@@ -1390,6 +1399,36 @@ void main() {
           reason: '0.0.0.0 is transient boot state, never a LAN hint');
       expect(cm.called, isEmpty,
           reason: 'an unusable hint must not trigger any HTTP request');
+    });
+
+    test('pre-SO128 device: referer-less probes are denied, bootstrap still works',
+        () async {
+      // THE real-device failure. SetOption128 is OFF, so Tasmota answers EVERY
+      // referer-less /cm (including the Status 5 identity probe) with the
+      // denial warning — no MAC. The old flow ran discovery's referer-less
+      // probe first, read a MISMATCH, discarded the IP, and never reached the
+      // SetOption128 enable. The bootstrap transport now probes WITH the
+      // device-matching Referer, so probe → enable → read-back all succeed.
+      final cm = _CmFake(responses: {
+        'Status%205': _macBody,
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'State': '{"POWER1":"ON"}',
+      })..preSO128 = true;
+      final locator = _FakeLocator(candidates: const []);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok =
+          await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
+
+      expect(ok, isTrue);
+      // Every request carried the bootstrap Referer — the identity probe too.
+      expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['State'], 'http://192.168.1.33/');
+      expect(locator.candidateStores, 1,
+          reason: 'the backend lastIp was seeded as the bootstrap hint');
+      expect(locator.lastStored, '192.168.1.33');
+      expect(repo.lastSource, DeviceTransportSource.local);
     });
 
     test('Case 3: no local IP -> clean skip, claim untouched, no HTTP',

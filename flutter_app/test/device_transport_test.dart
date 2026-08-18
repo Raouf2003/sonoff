@@ -19,6 +19,7 @@ class _CmFake {
 
   final Map<String, String> responses;
   final List<String> called = [];
+  final Map<String, String?> referers = {};
   Object? error;
   Duration delay = Duration.zero;
   String? lastReferer;
@@ -32,6 +33,7 @@ class _CmFake {
   }) async {
     called.add(command);
     lastReferer = referer;
+    referers[command] = referer;
     if (delay != Duration.zero) {
       await Future<void>.delayed(delay);
     }
@@ -568,6 +570,49 @@ void main() {
       );
       expect(cm.called, isEmpty);
     });
+
+    test('bootstrap mode attaches the Referer to EVERY request, probe included',
+        () async {
+      // While SO128 is OFF Tasmota answers a referer-less `Status 5` with the
+      // denial warning (no MAC), which discovery would read as a MISMATCH. The
+      // bootstrap transport must therefore send the device-matching Referer on
+      // the identity probe, the enable, and the read-back.
+      final cm = _CmFake({
+        'Status%205': _macBody,
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+        bootstrap: true,
+      );
+      expect(await t.checkIdentity(), LocalIdentityCheck.verified);
+      await t.enableHttpApi();
+      await t.getStatus(_deviceId, identityVerified: true);
+      expect(cm.referers['Status%205'], 'http://192.168.1.5/');
+      expect(cm.referers['SetOption128%201'], 'http://192.168.1.5/');
+      expect(cm.referers['State'], 'http://192.168.1.5/');
+    });
+
+    test('normal mode NEVER sends a Referer on probe/status/control', () async {
+      final cm = _CmFake({
+        'Status%205': _macBody,
+        'Power1%20ON': '{"POWER1":"ON"}',
+        'State': '{"POWER1":"ON"}',
+      });
+      final t = LocalDeviceTransport(
+        address: '192.168.1.5',
+        deviceId: _deviceId,
+        fetcher: cm.call,
+      );
+      expect(await t.checkIdentity(), LocalIdentityCheck.verified);
+      await t.getStatus(_deviceId, identityVerified: true);
+      await t.control(_deviceId, 1, 'ON', identityVerified: true);
+      expect(cm.referers.values.every((r) => r == null), isTrue,
+          reason: 'the production status/control path stays referer-less');
+    });
   });
 
   group('CloudDeviceTransport passthrough', () {
@@ -631,6 +676,54 @@ void main() {
           deviceId: _deviceId,
         );
         expect(body, '{"POWER1":"ON"}');
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('a supplied Referer reaches the underlying HTTP request on the wire',
+        () async {
+      // Regression: the SetOption128 bootstrap request must carry the device-
+      // matching Referer at the NETWORK level (proving no abstraction between
+      // the transport and the socket drops it).
+      String? observed;
+      final server = await startServer((req) async {
+        observed = req.headers.value('referer');
+        req.response.write('{"SetOption128":"1"}');
+        await req.response.close();
+      });
+      try {
+        final sentReferer = 'http://127.0.0.1:${server.port}/';
+        final body = await defaultTasmotaCmFetcher(
+          '127.0.0.1:${server.port}',
+          'SetOption128%201',
+          deviceId: _deviceId,
+          referer: sentReferer,
+        );
+        expect(body, '{"SetOption128":"1"}');
+        // The exact header value we supplied is what the peer observed.
+        expect(observed, sentReferer);
+      } finally {
+        await server.close(force: true);
+      }
+    });
+
+    test('without referer the request carries NO Referer header on the wire',
+        () async {
+      String? observed;
+      final server = await startServer((req) async {
+        observed = req.headers.value('referer');
+        req.response.write('{"POWER1":"ON"}');
+        await req.response.close();
+      });
+      try {
+        await defaultTasmotaCmFetcher(
+          '127.0.0.1:${server.port}',
+          'State',
+          deviceId: _deviceId,
+        );
+        expect(observed, isNull,
+            reason: 'the normal status/control path must stay referer-less');
       } finally {
         await server.close(force: true);
       }
