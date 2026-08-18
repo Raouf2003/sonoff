@@ -43,6 +43,9 @@ class _FakeRepo extends DeviceRepositoryService {
   Future<void> warmUp(List<Map<String, dynamic>> devices) async {}
 
   @override
+  Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {}
+
+  @override
   Future<List<Map<String, dynamic>>> getDevices() async => const [
         {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
       ];

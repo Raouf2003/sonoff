@@ -1629,12 +1629,18 @@ void main() {
           reason: 'the at-most-once fence blocks a repeated enable attempt');
     });
 
-    test('a device that is NOT referer-gated gets no repair command', () async {
+    test('an already-enabled (non-gated) device still gets exactly one '
+        'idempotent repair', () async {
       // An already-enabled device answers the warm-up probe normally, so it is
-      // verified — not gated — and no gratuitous SetOption128 is ever sent.
+      // verified — not gated. The repair is STILL sent once: because for an
+      // already-registered device the pre-SO128 state is not reliably
+      // observable (cached IP / mDNS are environmental), the idempotent
+      // `SetOption128 1` re-confirm runs for every registered device exactly
+      // once per run and persists the verified IP.
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
         'State': '{"POWER1":"ON"}',
+        'SetOption128%201': '{"SetOption128":"1"}',
       });
       final locator = _FakeLocator(
         cached: '192.168.1.33',
@@ -1645,13 +1651,29 @@ void main() {
       await repo.warmUp(const [
         {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
       ]);
+      expect(cm.called, contains('Status%205'));
+      // The single repair for this run is the unconditional-repair policy.
       await repo.repairGatedDevices(const [
         {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
       ]);
 
-      expect(cm.called, contains('Status%205'));
-      expect(cm.called.any((c) => c.contains('SetOption128')), isFalse,
-          reason: 'never send SetOption128 to a device that is not gated');
+      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/',
+          reason: 'the repair re-confirms SO128 with the device-matching '
+              'Referer, harmlessly, even for an already-enabled box');
+      expect(locator.lastStored, '192.168.1.33',
+          reason: 'an already-enabled device also gets its verified IP '
+              'persisted by the single repair');
+
+      // A second repair pass must not re-send: at-most-once per device per run.
+      final enableCalls = cm.called
+          .where((c) => c == 'SetOption128%201')
+          .length;
+      await repo.repairGatedDevices(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      expect(
+          cm.called.where((c) => c == 'SetOption128%201').length, enableCalls,
+          reason: 'the at-most-once fence blocks a repeated repair attempt');
     });
   });
 }

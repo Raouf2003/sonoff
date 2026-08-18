@@ -149,16 +149,21 @@ class DeviceRepositoryService {
   /// per repository lifetime per device, best-effort, and never blocking the
   /// UI (the caller runs it unawaited after warm-up).
   ///
-  /// Devices that are NOT referer-gated are skipped: an already-verified /
-  /// already-enabled device needs no `SetOption128 1` (sending it would be a
-  /// gratuitous command), and an unreachable one simply stays as-is.
+  /// The bootstrap is run for EVERY registered device (not only the ones
+  /// warm-up classified as referer-gated), because for an ALREADY-registered
+  /// device the pre-SO128 state is not reliably observable: whether the phone
+  /// has a seeded cached IP or mDNS enumerates correctly are both environmental,
+  /// so a warm-up that finds nothing would wrongly skip the device. Sending the
+  /// idempotent `SetOption128 1` to an already-enabled device is harmless (it
+  /// merely re-confirms) and [enableLocalHttpApi] also persists the verified
+  /// IP, so every registered device benefits from exactly one repair attempt
+  /// per app run.
   Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {
     for (final d in devices) {
       final id = d['deviceId'];
       if (id is! String || id.isEmpty) continue;
-      if (!_gatedCandidates.containsKey(id)) continue;
       if (!_so128RepairAttempted.add(id)) continue;
-      _logSetup('repairing referer-gated (pre-SO128) registered device $id');
+      _logSetup('repairing registered device $id (pre-SO128 bootstrap)');
       try {
         // No lastIp hint: the bootstrap ladder (cached candidate first, then
         // the gated candidates discovered during warm-up) drives the
@@ -169,7 +174,7 @@ class DeviceRepositoryService {
           const Duration(seconds: 10),
         );
       } on Object catch (e) {
-        _logSetup('gated repair failed for $id (${_describe(e)})');
+        _logSetup('repair failed for $id (${_describe(e)})');
       }
     }
   }

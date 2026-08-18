@@ -219,6 +219,12 @@ class _FakeRepo extends DeviceRepositoryService {
   }
 
   @override
+  Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {
+    // Same rationale as warmUp: the unconditional per-device repair bootstrap
+    // hits the real LAN discovery ladder and would hold fake-time timers.
+  }
+
+  @override
   Future<List<Map<String, dynamic>>> getDevices() async => devices;
 
   @override
