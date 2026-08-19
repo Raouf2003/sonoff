@@ -118,6 +118,32 @@ class DeviceProvisioningService {
 
     this.registry.update(device);
 
+    // Seed the fresh claim's lastIp from the IP the device itself reported in
+    // its boot/reboot tele/STATE while still unclaimed (see mqttGateway
+    // unclaimedIpHints). Tasmota only re-publishes STATE every TelePeriod
+    // (default 300s), so without this seed the app's local-setup bootstrap
+    // would depend on a single-shot cmnd/State sync arriving inside its bounded
+    // window — and a lost/late reply leaves the device claimed but locally
+    // unreachable until the next telemetry burst. The hint is just that: the
+    // app still verifies identity via Status 5 before trusting the address.
+    if (!device.lastIp) {
+      const hint =
+        typeof this.mqtt.unclaimedIpHint === 'function'
+          ? this.mqtt.unclaimedIpHint(mac)
+          : null;
+      if (hint) {
+        this.registry.updateIp(mac, hint);
+        this.DeviceModel.updateOne({ deviceId: mac }, { $set: { lastIp: hint } })
+          .catch((err) =>
+            console.error(`Device lastIp seed error for ${mac}:`, err.message),
+          );
+        device.lastIp = hint;
+        console.log(
+          `[provision] seeded lastIp ${hint} for ${mac} from boot telemetry`,
+        );
+      }
+    }
+
     // Newly-claimed device: warm runtimeState synchronously so the control
     // route's isOnline gate accepts it immediately. Pre-claim STATE traffic
     // never reached the runtime (gated out in mqttGateway._handle for unclaimed

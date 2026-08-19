@@ -16,6 +16,14 @@ class FakeDeviceModel {
     this.rows = rows.map((r) => ({ ...r }));
     this.opts = opts; // { raceCreateDup } to force the unique-index loser path
     this.createCalls = 0;
+    this.updateOneCalls = [];
+  }
+
+  async updateOne(filter, update, options) {
+    this.updateOneCalls.push({ filter, update, options });
+    const row = this.rows.find((r) => r.deviceId === filter.deviceId);
+    if (row && update && update.$set) Object.assign(row, update.$set);
+    return { catch() {} };
   }
 
   async findOne(query) {
@@ -49,13 +57,22 @@ class FakeDeviceModel {
   }
 }
 
-function service({ deviceRows = [], recent = false, deviceOpts, syncFor } = {}) {
+function service({
+  deviceRows = [],
+  recent = false,
+  deviceOpts,
+  syncFor,
+  unclaimedIpHint,
+} = {}) {
   const deviceModel = new FakeDeviceModel(deviceRows, deviceOpts || {});
   const mqtt = { hasRecent: () => recent };
   if (syncFor) mqtt.requestStateSyncFor = syncFor;
+  if (unclaimedIpHint) mqtt.unclaimedIpHint = () => unclaimedIpHint;
   const updated = [];
+  const ipSeeds = [];
   const registry = {
     update: (d) => updated.push(d.deviceId),
+    updateIp: (deviceId, ip) => ipSeeds.push({ deviceId, ip }),
     remove: () => {},
   };
   const runtimeState = {
@@ -75,7 +92,7 @@ function service({ deviceRows = [], recent = false, deviceOpts, syncFor } = {}) 
     registry,
     runtimeState,
   });
-  return { svc, deviceModel, updated, runtimeState };
+  return { svc, deviceModel, updated, ipSeeds, runtimeState };
 }
 
 function provision(svc, overrides = {}) {
@@ -304,6 +321,55 @@ test('preflight /check: invalid MAC => INVALID_MAC', async () => {
       (err) => err.code === 'INVALID_MAC',
     );
   }
+});
+
+// ─────────────────────────────────────────────────────────────
+// lastIp seeding from the device's own boot telemetry (unclaimed hint).
+// A fresh claim has no lastIp yet — the IP the device reported in its boot
+// STATE (see mqttGateway unclaimedIpHints) must seed it immediately so the
+// app's local-setup bootstrap can reach the device without waiting up to a
+// TelePeriod for the next post-claim STATE.
+// ─────────────────────────────────────────────────────────────
+
+test('fresh claim seeds lastIp from the unclaimed boot-telemetry hint', async () => {
+  const { svc, deviceModel, ipSeeds } = service({
+    recent: true,
+    unclaimedIpHint: '192.168.1.33', // what the device reported at boot
+  });
+  const device = await provision(svc);
+  assert.strictEqual(device.lastIp, '192.168.1.33',
+    'the returned device must carry the seeded hint');
+  assert.deepStrictEqual(ipSeeds, [{ deviceId: CID, ip: '192.168.1.33' }],
+    'the registry must learn the seeded IP for the canonical MAC');
+  assert.deepStrictEqual(deviceModel.updateOneCalls, [
+    { filter: { deviceId: CID }, update: { $set: { lastIp: '192.168.1.33' } }, options: undefined },
+  ], 'the DB row must persist the seeded lastIp');
+});
+
+test('claim never overwrites an existing lastIp with the hint', async () => {
+  const { svc, deviceModel, ipSeeds } = service({
+    recent: true,
+    unclaimedIpHint: '192.168.1.33',
+    deviceRows: [
+      { _id: 'existing', deviceId: CID, ownerId: null, hardwareId: CID, lastIp: '10.0.0.5' },
+    ],
+  });
+  const device = await provision(svc);
+  assert.strictEqual(device.lastIp, '10.0.0.5',
+    'an already-known lastIp must survive the claim untouched');
+  assert.deepStrictEqual(ipSeeds, [],
+    'no registry seed when the device already has a lastIp');
+  assert.deepStrictEqual(deviceModel.updateOneCalls, [],
+    'no DB write when the device already has a lastIp');
+});
+
+test('claim without a hint leaves lastIp null (no seed, no crash)', async () => {
+  const { svc, deviceModel, ipSeeds } = service({ recent: true });
+  const device = await provision(svc);
+  assert.strictEqual(device.lastIp ?? null, null,
+    'no hint => no seeded lastIp');
+  assert.deepStrictEqual(ipSeeds, []);
+  assert.deepStrictEqual(deviceModel.updateOneCalls, []);
 });
 
 test('authMiddleware: missing/bad/expired token => 401, valid token sets userId', async () => {

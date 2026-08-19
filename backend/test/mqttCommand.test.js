@@ -280,6 +280,58 @@ test('a valid IP overrides a previous invalid lastIp', () => {
   ]);
 });
 
+// ─────────────────────────────────────────────────────────────
+// Unclaimed-device IP hints: a freshly-provisioned device publishes its boot
+// tele/STATE (with IPAddress) BEFORE the app claims it. The hint is stored in
+// memory so the claim can seed lastIp immediately — but never written to the
+// DB and never trusted as ownership, only as a discovery candidate.
+// ─────────────────────────────────────────────────────────────
+
+function unclaimedGateway() {
+  const gw = new MqttGateway();
+  gw.client = makeClient();
+  gw.deviceRegistry = {
+    get: () => null, // unclaimed
+    all: () => [],
+    isOwned: () => false,
+  };
+  return gw;
+}
+
+test('unclaimed tele/STATE records a valid IP hint without touching the DB', () => {
+  const gw = unclaimedGateway();
+  let writes = 0;
+  gw.deviceModel = {
+    updateOne() {
+      writes++;
+      return { catch() {} };
+    },
+  };
+
+  gw._handle('tele/dev-boot/STATE', JSON.stringify({ IPAddress: '192.168.1.33' }));
+  gw._handle('tele/dev-boot/STATE', JSON.stringify({ IPAddress: '192.168.1.33' }));
+
+  assert.strictEqual(gw.unclaimedIpHint('dev-boot'), '192.168.1.33',
+    'the boot IP must be available as a claim-time hint');
+  assert.strictEqual(writes, 0, 'an unclaimed hint must never hit the DB');
+});
+
+test('unclaimed tele/STATE with an invalid IP is rejected and stores no hint', () => {
+  const gw = unclaimedGateway();
+  gw._handle('tele/dev-boot/STATE', JSON.stringify({ IPAddress: '0.0.0.0' }));
+  gw._handle('tele/dev-boot/STATE', JSON.stringify({ IPAddress: 'not-an-ip' }));
+  assert.strictEqual(gw.unclaimedIpHint('dev-boot'), null);
+});
+
+test('a claim-time hint expires after the recent window', () => {
+  const gw = unclaimedGateway();
+  gw._handle('tele/dev-boot/STATE', JSON.stringify({ IPAddress: '192.168.1.33' }));
+  // Age the hint beyond RECENT_WINDOW_MS then verify it is dropped on read.
+  const hints = gw.unclaimedIpHints;
+  hints.set('dev-boot', { ip: '192.168.1.33', ts: Date.now() - 400000 });
+  assert.strictEqual(gw.unclaimedIpHint('dev-boot'), null);
+});
+
 // A stat/<device>/RESULT is a POWER report (and ACK source). It must update
 // state exactly as before AND never cascade into a schedule sync - mqttGateway
 // has no sync wiring (that lives in scheduleSyncService / the devSync route).

@@ -58,6 +58,16 @@ class MqttGateway {
     // device, used to expose devices observed on the broker in the last
     // RECENT_WINDOW_MS regardless of claim status.
     this.recentDevices = new Map();
+    // deviceId -> { ip, ts } the most recent VALID LAN IP a device reported
+    // through tele/STATE while it was still UNCLAIMED. Tasmota only publishes
+    // tele/STATE at boot and then every TelePeriod (default 300s), so the boot
+    // STATE — which carries the IP the device just obtained after being
+    // provisioned — arrives BEFORE the claim and is the only reliable record of
+    // the address at claim time. The provisioning service seeds a fresh claim's
+    // lastIp from this hint so the app's local-setup bootstrap can reach the
+    // device immediately instead of depending on a fragile post-claim STATE
+    // sync. Still just a hint: the app re-verifies identity via Status 5.
+    this.unclaimedIpHints = new Map();
     // Injectable Device model so unit tests can capture lastIp persistence
     // without a Mongo connection.
     this.deviceModel = Device;
@@ -88,6 +98,9 @@ class MqttGateway {
     }
     for (const [id, ts] of this.seenLog) {
       if (now - ts >= SEEN_LOG_TTL_MS) this.seenLog.delete(id);
+    }
+    for (const [id, hint] of this.unclaimedIpHints) {
+      if (now - hint.ts >= RECENT_WINDOW_MS) this.unclaimedIpHints.delete(id);
     }
   }
 
@@ -352,6 +365,19 @@ class MqttGateway {
     return !!ts && Date.now() - ts < RECENT_WINDOW_MS;
   }
 
+  // Returns the freshest VALID LAN IP this device reported WHILE UNCLAIMED
+  // (within RECENT_WINDOW_MS), or null. Used only to seed a brand-new claim's
+  // lastIp so local control does not wait on a post-claim telemetry round.
+  unclaimedIpHint(deviceId) {
+    const hint = this.unclaimedIpHints.get(deviceId);
+    if (!hint) return null;
+    if (Date.now() - hint.ts >= RECENT_WINDOW_MS) {
+      this.unclaimedIpHints.delete(deviceId);
+      return null;
+    }
+    return hint.ip;
+  }
+
   _resolvePending(deviceId, channel, observed, topic = 'unknown') {
     const key = `${deviceId}:${channel}`;
     const p = this.pending.get(key);
@@ -383,6 +409,21 @@ class MqttGateway {
       if (p.reject) p.reject(err);
     }
     console.log(`Pending commands cleared (${reason}): ${this.pending.size}`);
+  }
+
+  // Remembers the LAN IP a device reports through tele/STATE while UNCLAIMED.
+  // Same validity rules as _recordDeviceIp, but never persists and never
+  // requires the device to be in the registry — that is the whole point: the
+  // boot STATE of a freshly-provisioned device arrives before its claim.
+  _recordUnclaimedIpHint(deviceId, ip) {
+    if (!ip || typeof ip !== 'string') return;
+    ip = ip.trim();
+    if (!ip) return;
+    if (classifyIp(ip) !== 'valid') {
+      console.log(`[mqtt] rejected invalid unclaimed telemetry IP for ${deviceId}: ${ip}`);
+      return;
+    }
+    this.unclaimedIpHints.set(deviceId, { ip, ts: Date.now() });
   }
 
   // Remembers the LAN IP a claimed device reported via tele/STATE. Only
@@ -477,9 +518,12 @@ class MqttGateway {
     // Only process if we have a claimed device OR a pending command for this deviceId
     const hasPending = this._hasPendingFor(deviceId);
     if (!device && !hasPending) {
-      // Still record IP for unclaimed devices if STATE arrives
+      // Record the boot/reboot STATE IP as a claim-time hint even while the
+      // device is unclaimed: a fresh claim must be able to seed lastIp from
+      // precisely this telemetry, which arrives minutes before any
+      // post-claim STATE. Invalid values (0.0.0.0 etc.) are rejected here too.
       if (isState && parsed && parsed.IPAddress) {
-        this._recordDeviceIp(deviceId, parsed.IPAddress);
+        this._recordUnclaimedIpHint(deviceId, parsed.IPAddress);
       }
       return;
     }
