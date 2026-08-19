@@ -8,8 +8,10 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:smart_home_app/screens/devices_page.dart';
 import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/services/api_service.dart';
+import 'package:smart_home_app/services/cloud_device_transport.dart';
 import 'package:smart_home_app/services/device_repository_service.dart';
 import 'package:smart_home_app/services/device_transport.dart';
+import 'package:smart_home_app/services/local_device_cache.dart';
 import 'package:smart_home_app/services/provisioning_service.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
 
@@ -93,11 +95,21 @@ class _FlowApi extends ApiService {
   /// duplicate gate must stop the flow without any backend call.
   bool registeredAtStart = false;
 
+  /// Models the phone sitting on the OFFLINE Tasmota setup AP: every cloud
+  /// list fetch and the duplicate pre-flight fail immediately. The wizard's
+  /// persisted account snapshot (SharedPreferences) must still block a
+  /// registered MAC, and a brand-new device with no snapshot must still be
+  /// claimable (the backend remains the final net).
+  bool offline = false;
+
   int unclaimCalls = 0;
   final List<String> mqttCommands = [];
 
   @override
   Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
+    if (offline) {
+      throw const ApiException('offline', code: 'NETWORK_ERROR');
+    }
     preflightCalls++;
     return preflightStatus;
   }
@@ -125,6 +137,9 @@ class _FlowApi extends ApiService {
 
   @override
   Future<List<dynamic>> getDevices() async {
+    if (offline) {
+      throw const ApiException('offline', code: 'NETWORK_ERROR');
+    }
     getDevicesCalls++;
     // Until the claim commits, the account owns nothing — UNLESS the test
     // models a device registered before the wizard opened. That is exactly
@@ -249,6 +264,8 @@ Future<bool? Function()> _launcher(
   _TasmotaFake tasmota, {
   Future<bool> Function(String deviceId, {String? lastIp})? localSetup,
   Future<bool> Function(String canonical)? isRegistered,
+  bool useRealBoundaryCheck = false,
+  DeviceRepositoryService? repo,
 }) async {
   _mockWifiChannels(tester);
   bool? result;
@@ -266,11 +283,16 @@ Future<bool? Function()> _launcher(
                       testApi: api,
                       testHttpClient: tasmota.client,
                       testWarmUp: (_) async {},
-                      testIsDeviceRegistered:
-                          isRegistered ??
+                      // With a real boundary check the Gate B seam is NOT
+                      // injected, so the authoritative repository bound is
+                      // exercised against the (mocked) persisted snapshot.
+                      testIsDeviceRegistered: useRealBoundaryCheck
+                          ? null
+                          : (isRegistered ??
                               (canonical) async =>
                                   api.registeredAtStart &&
-                                  canonical == _canonicalDeviceId,
+                                  canonical == _canonicalDeviceId),
+                      testRepository: repo,
                       testLocalSetup:
                           localSetup ?? (_, {lastIp}) async => true,
                     ),
@@ -288,6 +310,22 @@ Future<bool? Function()> _launcher(
   await tester.pumpAndSettle();
   return () => result;
 }
+
+/// A cloud transport whose device list and pre-flight fail immediately, modeling
+/// the offline Tasmota setup AP. Used with a REAL [DeviceRepositoryService] and
+/// the mocked SharedPreferences so the persisted account snapshot is the only
+/// offline source Gate B can consult.
+class _OfflineCloudApi extends ApiService {
+  @override
+  Future<List<dynamic>> getDevices() async {
+    throw const ApiException('offline', code: 'NETWORK_ERROR');
+  }
+}
+
+DeviceRepositoryService _offlineRepo() => DeviceRepositoryService(
+      cloud: CloudDeviceTransport(api: _OfflineCloudApi()),
+      cache: LocalDeviceCache(),
+    );
 
 /// Drives the Connect step: Continue -> AP detection (stabilize delay + probe)
 /// -> identity read -> pre-flight duplicate gate.
@@ -596,6 +634,229 @@ void main() {
               'touched the device — zero provisioning commands');
       expect(tasmota.commands.length, 3 * 1,
           reason: 'exactly one identity read per attempt');
+    });
+
+    testWidgets(
+        'reopen on the OFFLINE Tasmota AP: the PERSISTED account snapshot '
+        '(empty display mirror) still blocks the same MAC — zero provisioning '
+        'commands', (tester) async {
+      _mockSecureStorage(tester);
+      // Phone B logged into the same account. Its display mirror is EMPTY (the
+      // device was claimed from Phone A), but a successful GET /api/devices
+      // refresh while online captured the MAC into the persisted account
+      // snapshot. Now the phone is on the offline Tasmota AP.
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': _canonicalDeviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      expect(await cache.cachedDevices(), isEmpty,
+          reason: 'display mirror is empty — only the account snapshot knows '
+              'the device (the cross-client case)');
+
+      final api = _FlowApi()..offline = true;
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          useRealBoundaryCheck: true, repo: _offlineRepo());
+
+      await _tapContinue(tester);
+
+      // The persisted snapshot certifies the duplicate fully offline.
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      expect(find.text('Test Wi-Fi & Continue'), findsNothing,
+          reason: 'the reopened wizard must never reach the Configure form');
+      expect(api.preflightCalls, 0,
+          reason: 'the persisted snapshot certifies offline — no backend '
+              'pre-flight round-trip is needed');
+      expect(api.provisionCalls, 0);
+      expect(tasmota.commands, ['Status 5'],
+          reason: 'only the read-only identity probe touched the device');
+      expect(tasmota.provisioned, isFalse);
+      expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'repeated recreation (3x) offline with a fresh repository each time: '
+        'the persisted snapshot keeps blocking the registered MAC', (tester) async {
+      _mockSecureStorage(tester);
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': _canonicalDeviceId, 'name': 'Controller', 'channels': 4},
+        {'deviceId': 'AAAAAAAAAAAA', 'name': 'Gate', 'channels': 4},
+      ]);
+      final api = _FlowApi()..offline = true;
+      final tasmota = _TasmotaFake();
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        final read = await _launcher(tester, api, tasmota,
+            useRealBoundaryCheck: true, repo: _offlineRepo());
+        await _tapContinue(tester);
+
+        expect(find.textContaining('delete it before claiming it again'),
+            findsOneWidget,
+            reason: 'attempt $attempt must freeze into the duplicate terminal');
+        expect(find.text('Test Wi-Fi & Continue'), findsNothing,
+            reason: 'attempt $attempt must never reach the Configure form');
+        expect(api.provisionCalls, 0,
+            reason: 'attempt $attempt must never claim the device');
+        expect(tasmota.commands.where((c) => c.startsWith('Status 5')).length,
+            attempt,
+            reason: 'one identity read per attempt, nothing else');
+        expect(tasmota.commands.where((c) => !c.startsWith('Status 5')), isEmpty,
+            reason: 'across all attempts the registered MAC never receives a '
+                'config/Wi-Fi command');
+        expect(tasmota.provisioned, isFalse);
+        expect(read(), isNot(true));
+
+        await _unmount(tester);
+      }
+      expect(api.preflightCalls, 0,
+          reason: 'every stop happened fully offline at the snapshot gate');
+      expect(api.unclaimCalls, 0);
+    });
+
+    testWidgets(
+        'network failure never erases the persisted account snapshot', (tester) async {
+      _mockSecureStorage(tester);
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': _canonicalDeviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      final api = _FlowApi()..offline = true;
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          useRealBoundaryCheck: true, repo: _offlineRepo());
+
+      await _tapContinue(tester);
+
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      // The failed GET /api/devices must NOT have erased the stored knowledge.
+      expect(await cache.loadAccountSnapshotMacs(), contains(_canonicalDeviceId),
+          reason: 'a network failure is not evidence of absence — the persisted '
+              'snapshot must survive a failed refresh');
+      expect(api.provisionCalls, 0);
+      expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'first-time offline new device with NO persisted snapshot: provisioning '
+        'still proceeds (real Gate B path, backend remains the net)', (tester) async {
+      _mockSecureStorage(tester);
+      // Brand-new account, never refreshed, straight onto the offline AP.
+      final api = _FlowApi()..offline = true;
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          useRealBoundaryCheck: true, repo: _offlineRepo());
+
+      await _tapContinue(tester);
+      // No knowledge exists -> the wizard reaches Configure.
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester);
+
+      // The genuinely unknown state must not fail closed: a new device claims.
+      expect(read(), isTrue, reason: 'unknown is not a false duplicate');
+      expect(api.provisionCalls, 1);
+      expect(tasmota.provisioned, isTrue);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'delete then reclaim: the persisted snapshot drops the MAC, so an '
+        'offline reopen no longer blocks the same device', (tester) async {
+      _mockSecureStorage(tester);
+      // The account's persisted snapshot contains the device.
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': _canonicalDeviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+
+      // Delete it from the Devices page (the real authenticated delete flow).
+      final api = _StatefulApi()..preflightStatus = DeviceDuplicateStatus.mine;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: DevicesPage.test(
+              onNavigateToTab: (_) {},
+              testRepository: _fakeRepo,
+              testSocketFactory: (url, opts) => _FakeSocket(),
+              testHealthCheck: () async => true,
+              testApi: api,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Delete Device'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(api.deleteCalls, 1);
+      // The delete removed the MAC from the persisted account snapshot.
+      expect(await cache.loadAccountSnapshotMacs(),
+          isNot(contains(_canonicalDeviceId)),
+          reason: 'reopening Add Device after deletion must not falsely block');
+      await _unmount(tester);
+
+      // Re-claim the SAME device while offline: with the MAC dropped from the
+      // snapshot and the backend confirming the deletion, the device claims.
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          useRealBoundaryCheck: true, repo: _offlineRepo());
+
+      await _tapContinue(tester);
+      // Offline + snapshot without M: unknown is not a false duplicate.
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue,
+          reason: 'after a successful DELETE the same device claims afresh, '
+              'even offline');
+      expect(api.provisionCalls, 1);
+      expect(tasmota.provisioned, isTrue);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'Add Device entry refreshes and persists the account snapshot while '
+        'still on the normal network', (tester) async {
+      _mockSecureStorage(tester);
+      // The cloud list contains the account's device before the wizard opens.
+      final api = _FlowApi()..registeredAtStart = true;
+      expect(await LocalDeviceCache().loadAccountSnapshotMacs(), isNull,
+          reason: 'no snapshot yet until Add Device is entered');
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: DevicesPage.test(
+              onNavigateToTab: (_) {},
+              testRepository: _fakeRepo,
+              testSocketFactory: (url, opts) => _FakeSocket(),
+              testHealthCheck: () async => true,
+              testApi: api,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.add));
+      await tester.pumpAndSettle();
+
+      // The pre-AP refresh ran on the normal network and persisted the MAC.
+      expect(await LocalDeviceCache().loadAccountSnapshotMacs(),
+          contains(_canonicalDeviceId),
+          reason: 'the snapshot is captured BEFORE the wizard can enter the '
+              'offline Tasmota AP, so a later offline duplicate check is '
+              'decided from persisted knowledge');
+      await _unmount(tester);
     });
 
     testWidgets(

@@ -107,4 +107,88 @@ void main() {
     final cache = LocalDeviceCache();
     expect(await cache.cachedDevices(), isEmpty);
   });
+
+  group('account snapshot (registered canonical MACs)', () {
+    test('no snapshot yet reads as null (unknown, not empty evidence)', () async {
+      final cache = LocalDeviceCache();
+      expect(await cache.loadAccountSnapshotMacs(), isNull);
+    });
+
+    test('saveAccountSnapshot stores ONLY canonical MACs, skips the rest',
+        () async {
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': '34:98:7A:C3:03:04', 'name': 'Controller'},
+        {'deviceId': '34987AC30304', 'name': 'duplicate-form'},
+        {'deviceId': 'stees_legacy', 'name': 'legacy'},
+        {'deviceId': 'not-a-mac', 'name': 'junk'},
+        {'name': 'no-id'},
+      ]);
+
+      final macs = await cache.loadAccountSnapshotMacs();
+      expect(macs, {'34987AC30304'},
+          reason: 'only the canonical MAC is stored, never legacy/non-MAC ids');
+    });
+
+    test('an EMPTY refreshed snapshot is valid evidence of no devices',
+        () async {
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const []);
+      expect(await cache.loadAccountSnapshotMacs(), isEmpty,
+          reason: 'an empty snapshot was refreshed online — absence is evidence');
+    });
+
+    test('upsertAccountSnapshot adds a MAC without dropping the others',
+        () async {
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': 'AAAAAAAAAAAA', 'name': 'Gate'},
+      ]);
+      await cache.upsertAccountSnapshot('34987AC30304');
+
+      expect(await cache.loadAccountSnapshotMacs(),
+          containsAll(['AAAAAAAAAAAA', '34987AC30304']));
+    });
+
+    test('removeFromAccountSnapshot drops the MAC, keeps the rest', () async {
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': '34987AC30304', 'name': 'Controller'},
+        {'deviceId': 'AAAAAAAAAAAA', 'name': 'Gate'},
+      ]);
+      await cache.removeFromAccountSnapshot('34987AC30304');
+
+      final macs = await cache.loadAccountSnapshotMacs();
+      expect(macs, contains('AAAAAAAAAAAA'));
+      expect(macs, isNot(contains('34987AC30304')));
+    });
+
+    test('a corrupt snapshot reads as null (unknown, never a guess)', () async {
+      SharedPreferences.setMockInitialValues({
+        kAccountSnapshotKey: '{oops',
+      });
+      final cache = LocalDeviceCache();
+      expect(await cache.loadAccountSnapshotMacs(), isNull);
+    });
+
+    test('account scope isolation: another user snapshot is not reused',
+        () async {
+      final alice = LocalDeviceCache(accountScope: 'alice');
+      await alice.saveAccountSnapshot(const [
+        {'deviceId': '34987AC30304', 'name': 'Controller'},
+      ]);
+
+      final bob = LocalDeviceCache(accountScope: 'bob');
+      expect(await bob.loadAccountSnapshotMacs(), isNull,
+          reason: 'one user must never borrow another user registered-set');
+      // Alice keeps her snapshot.
+      expect(await alice.loadAccountSnapshotMacs(), contains('34987AC30304'));
+      // Bob's own refresh writes an independent snapshot.
+      await bob.saveAccountSnapshot(const [
+        {'deviceId': 'AAAAAAAAAAAA', 'name': 'Gate'},
+      ]);
+      expect(await bob.loadAccountSnapshotMacs(), contains('AAAAAAAAAAAA'));
+      expect(await bob.loadAccountSnapshotMacs(), isNot(contains('34987AC30304')));
+    });
+  });
 }

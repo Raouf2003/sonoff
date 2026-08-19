@@ -60,7 +60,8 @@ class ProvisionDeviceScreen extends StatefulWidget {
         testWarmUp = null,
         testLocalSetup = null,
         testHttpClient = null,
-        testIsDeviceRegistered = null;
+        testIsDeviceRegistered = null,
+        testRepository = null;
 
   /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
   /// failure state and injects an [ApiService] so widget tests can exercise the
@@ -77,6 +78,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
     this.testLocalSetup,
     this.testHttpClient,
     this.testIsDeviceRegistered,
+    this.testRepository,
   });
 
   @visibleForTesting
@@ -118,6 +120,12 @@ class ProvisionDeviceScreen extends StatefulWidget {
   /// boundary-gate-before-any-config-command behavior is exercised.
   @visibleForTesting
   final Future<bool> Function(String canonical)? testIsDeviceRegistered;
+
+  /// Test seam: replaces the repository consulted by Gate B (the authoritative
+  /// provisioning-boundary duplicate check). Lets widget tests drive the REAL
+  /// persisted snapshot / cloud-failure path deterministically with no network.
+  @visibleForTesting
+  final DeviceRepositoryService? testRepository;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -168,6 +176,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // and silently - it must never block provisioning.
   static const Duration _preflightTimeout = Duration(seconds: 4);
 
+  // Bound for the account snapshot refresh in `_loadClaimedMacsAtStart`. The
+  // phone is usually on its home network at wizard open; this just keeps a
+  // slow/unreachable backend from delaying the Connect step.
+  static const Duration _snapshotRefreshTimeout = Duration(seconds: 5);
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -183,8 +196,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   /// Used after a successful provisioning to kick off background local
   /// discovery warm-up so the device's first relay tap uses a verified LAN IP
-  /// instead of waiting on mDNS. Best-effort only.
-  final DeviceRepositoryService _repository = DeviceRepositoryService();
+  /// instead of waiting on mDNS. Best-effort only. Also the Gate B authority
+  /// (see [_stopIfRegisteredAtBoundary]); a test seam may inject a controlled
+  /// repository so the real persisted-snapshot path runs without network.
+  late final DeviceRepositoryService _repository;
 
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
@@ -292,6 +307,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _api = widget.testApi ?? ApiService();
+    _repository = widget.testRepository ?? DeviceRepositoryService();
     // Test-only seeding: jump straight into a graded terminal failure (e.g. a
     // duplicate) so the "Remove Device" flow can be exercised in widget tests
     // without the offline AP / MQTT hardware steps.
@@ -1414,6 +1430,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         // wizard. Bounded and silent on failure.
         try {
           await _api.unclaimDevice(deviceId).timeout(const Duration(seconds: 3));
+          await _deviceCache
+              .removeFromAccountSnapshot(deviceId)
+              .timeout(const Duration(seconds: 3));
         } catch (_) {}
         _claimed = false;
         if (!mounted) return;
@@ -1480,19 +1499,41 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
 
   // Loads the user's registered device MACs once, at wizard start, into the
   // immutable [_claimedMacsAtStart] snapshot that powers Gate A (the early
-  // offline duplicate gate). Best-effort and silent: an unreachable backend (or
-  // no session) leaves the empty snapshot — Gate B at the provisioning boundary
+  // offline duplicate gate). Seeds from the PERSISTED account snapshot
+  // (SharedPreferences) — so a reopen on the offline Tasmota AP still sees the
+  // account's registered identities — then refreshes from the authoritative
+  // cloud list and persists the fresh result. Best-effort and silent: a failed
+  // refresh keeps the persisted snapshot; Gate B at the provisioning boundary
   // re-verifies against the repository authority, so a stale/empty snapshot can
   // NEVER let an existing MAC into provisioning.
   Future<void> _loadClaimedMacsAtStart() async {
+    // 1. Seed from the PERSISTED account snapshot first (SharedPreferences):
+    //    fast, fully offline, and it survives Close/reopen, wizard recreation
+    //    and app restarts — the reopen duplicate block does not depend on the
+    //    phone having internet on the Tasmota AP. A null store (never refreshed,
+    //    or another account's snapshot) yields the empty set.
+    _claimedMacsAtStart = ClaimDeviceSnapshot.fromMacs(
+      await _deviceCache.loadAccountSnapshotMacs() ?? const <String>{},
+    );
+    // 2. Refresh from the authoritative cloud list (bounded). A success
+    //    REPLACES both the in-memory snapshot and the persisted account
+    //    snapshot. Any failure keeps the persisted knowledge — a network
+    //    failure must never erase already-known registered identities.
     try {
-      final devices = await _api.getDevices();
+      final devices = await _api
+          .getDevices()
+          .timeout(_snapshotRefreshTimeout);
       if (_isTerminal || !mounted) return;
       _claimedMacsAtStart = ClaimDeviceSnapshot.fromDevices(devices);
-      debugPrint('[PROVISION] wizard-start registered snapshot loaded: '
+      await _deviceCache.saveAccountSnapshot(
+        devices.whereType<Map<String, dynamic>>().toList(),
+      );
+      debugPrint('[PROVISION] wizard-start registered snapshot refreshed: '
           '${_claimedMacsAtStart.macs.length} device(s)');
     } catch (_) {
-      debugPrint('[PROVISION] wizard-start registered snapshot unavailable');
+      debugPrint('[PROVISION] wizard-start registered snapshot unavailable — '
+          'using persisted snapshot '
+          '(${_claimedMacsAtStart.macs.length} device(s))');
     }
   }
 
@@ -1611,20 +1652,26 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       return registered;
     }
     try {
-      final registered = await _repository
-          .isDeviceRegistered(canonical)
+      final state = await _repository
+          .registrationState(canonical)
           .timeout(const Duration(seconds: 4));
-      if (registered) {
+      if (state == RegistrationState.registered) {
         debugPrint('[PROVISION] $canonical already registered (authoritative '
             'repository check) — stopping before any provisioning command');
         _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
         return true;
       }
+      // `notRegistered` = a valid source shows the MAC absent (evidence);
+      // `unknown` = no source could establish anything (a network failure is
+      // NOT evidence of absence). Both proceed: the backend pre-claim check and
+      // POST /api/devices/provision remain the final authority, and the
+      // persisted account snapshot guarantees the offline-reopen case was
+      // decided by `registered` above, never by a failed request.
     } on Object catch (e) {
       // The authoritative sources are unreachable (deep offline). The session
-      // snapshot was already checked above; the backend pre-claim check +
-      // POST /api/devices/provision remain the net for a duplicate that only
-      // exists on another phone.
+      // snapshot (seeded from the persisted account snapshot) was already
+      // checked above; the backend pre-claim check + POST /api/devices/provision
+      // remain the net for a duplicate that only exists on another phone.
       debugPrint('[PROVISION] authoritative registered check unavailable: $e');
     }
     return false;
@@ -1764,6 +1811,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
             'name': name,
             'channels': _deviceType.channelCount,
           })
+          .timeout(_cacheWriteBudget);
+      // A newly claimed device joins the persisted account snapshot too, so a
+      // later offline reopen still certifies it as registered.
+      await _deviceCache
+          .upsertAccountSnapshot(deviceId)
           .timeout(_cacheWriteBudget);
     } on Object catch (e) {
       debugPrint('[LOCAL] cache upsert failed for $deviceId: $e');

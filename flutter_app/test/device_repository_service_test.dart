@@ -417,6 +417,96 @@ void main() {
           reason: 'a device claimed on ANOTHER phone is unknown offline here — '
               'the backend pre-claim check + provision stay the final net');
     });
+
+    test('cloud unreachable + empty mirror + NO snapshot → UNKNOWN (three-state '
+        'honesty: a network failure is not evidence of absence)', () async {
+      final repo = _repo(_FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR'));
+
+      expect(await repo.registrationState(_deviceId),
+          RegistrationState.unknown,
+          reason: 'the state MUST NOT collapse to a confident '
+              '"not registered" when no source could establish anything');
+    });
+
+    test('a fresh cloud success refreshes the persisted account snapshot',
+        () async {
+      final cloud = _FakeCloudApi()
+        ..devices = const [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ];
+      final repo = _repo(cloud);
+      final cache = LocalDeviceCache();
+
+      expect(await repo.registrationState(_deviceId),
+          RegistrationState.registered);
+      // The authoritative list was persisted, so a later offline check certifies.
+      expect(await cache.loadAccountSnapshotMacs(), contains(_deviceId));
+    });
+
+    test('cloud unreachable: the PERSISTED ACCOUNT SNAPSHOT certifies '
+        '(cross-client — display mirror is EMPTY)', () async {
+      final cache = LocalDeviceCache();
+      // Phone B: empty display mirror (Claimed from Phone A), but an online
+      // GET /api/devices refresh captured M into the account snapshot.
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      expect(await cache.cachedDevices(), isEmpty,
+          reason: 'the display mirror is genuinely empty — only the snapshot '
+              'knows the device');
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, cache: cache);
+
+      expect(await repo.registrationState(_deviceId),
+          RegistrationState.registered,
+          reason: 'a device claimed from another client must still block '
+              'offline once the account snapshot knows it');
+      expect(await repo.isDeviceRegistered(_deviceId), isTrue);
+
+      // A FRESH repository (reopening Add Device) reads the SAME persisted
+      // snapshot — reopening cannot bypass.
+      final reopened = _repo(_FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR'));
+      expect(await reopened.isDeviceRegistered(_deviceId), isTrue);
+    });
+
+    test('a VALID persisted account snapshot that lacks the MAC is evidence of '
+        'absence (new device on offline AP)', () async {
+      final cache = LocalDeviceCache();
+      await cache.saveAccountSnapshot(const [
+        {'deviceId': 'AAAAAAAAAAAA', 'name': 'Gate', 'channels': 4},
+      ]);
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, cache: cache);
+
+      expect(await repo.registrationState(_deviceId),
+          RegistrationState.notRegistered,
+          reason: 'a refreshed snapshot that does not contain the MAC IS '
+              'authoritative evidence of absence');
+    });
+
+    test('registrationState persists the cloud list and then certifies it '
+        'even when the next fetch fails', () async {
+      // First call: cloud up, contains M → registered + persisted.
+      final up = _FakeCloudApi()
+        ..devices = const [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ];
+      final repo = _repo(up);
+      expect(await repo.registrationState(_deviceId),
+          RegistrationState.registered);
+
+      // Second call: cloud down (offline AP) → persisted snapshot still certifies.
+      final down = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final reopened = _repo(down);
+      expect(await reopened.isDeviceRegistered(_deviceId), isTrue,
+          reason: 'an unavailable network must never erase already-known '
+              'information');
+    });
   });
 
   group('control: cloud-first, local fallback on availability only', () {

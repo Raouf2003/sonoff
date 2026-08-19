@@ -926,7 +926,26 @@ final useLocalFirst = !_socketConnected || (!_socketEverConnected && hasLocalIp)
     );
   }
 
-  void _openAddDevice() async {
+  Future<void> _openAddDevice() async {
+    // Refresh the PERSISTED account snapshot BEFORE the wizard can reach the
+    // offline Tasmota AP: while the phone is still on its normal network, a
+    // successful GET /api/devices (bounded) replaces the stored registered-MAC
+    // set, so a later offline duplicate check inside the wizard is always
+    // decided from fresh, persisted knowledge. Any failure keeps the last valid
+    // snapshot — it must never be erased by a failed request.
+    final cache = LocalDeviceCache();
+    try {
+      final devices = await _api.getDevices().timeout(kRegisteredCheckLimit);
+      final normalized = devices
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      await cache.saveAccountSnapshot(normalized);
+      await cache.replaceAll(normalized);
+    } catch (_) {
+      // Offline at entry (or transient error): the existing persisted snapshot
+      // is kept, and the wizard itself re-attempts the refresh on open.
+    }
+    if (!mounted) return;
     final added = await Navigator.of(
       context,
     ).push<bool>(MaterialPageRoute(builder: (_) => const AddDeviceScreen()));
@@ -1008,9 +1027,11 @@ final useLocalFirst = !_socketConnected || (!_socketEverConnected && hasLocalIp)
     if (!mounted) return;
     final colors = context.steesColors;
     if (outcome == DeleteOutcome.cleared) {
-      // Removed (200) or already gone (404): drop the device locally and clear
-      // its Local Mode cache entry so a re-claim is treated as a new device.
+      // Removed (200) or already gone (404): drop the device locally, clear
+      // its Local Mode cache entry, and remove its canonical MAC from the
+      // persisted account snapshot so a re-claim is treated as a new device.
       await LocalDeviceCache().remove(deviceId);
+      await LocalDeviceCache().removeFromAccountSnapshot(deviceId);
       if (!mounted) return;
       setState(() {
         _devices.removeWhere((d) => d['deviceId'] == deviceId);

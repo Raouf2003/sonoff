@@ -54,6 +54,25 @@ const Duration kLocalReportHold = Duration(seconds: 60);
 /// since it was cached.
 const Duration kLocalProbeTrustWindow = Duration(seconds: 30);
 
+/// How a canonical MAC is known at the provisioning boundary. Distinct states
+/// so "no evidence" is never collapsed into "definitely not registered": a
+/// network failure is NOT evidence of absence, and the pre-config hard gate may
+/// only treat a MAC as a duplicate when [registered] is authoritative.
+enum RegistrationState {
+  /// Present in a valid registered-device source (live cloud list, or the
+  /// persisted account snapshot captured from a successful refresh).
+  registered,
+
+  /// A valid source was consulted and the MAC was absent — evidence, not a
+  /// guess (e.g. a refreshed account snapshot that does not contain it).
+  notRegistered,
+
+  /// No source could establish anything: cloud unreachable and no persisted
+  /// account snapshot exists for this account. The backend's pre-claim checks
+  /// and POST /api/devices/provision remain the final authority.
+  unknown,
+}
+
 /// The single service the devices page uses for relay control and status.
 ///
 /// Relay CONTROL is CLOUD-FIRST (the tap reaches MQTT immediately; the LAN is
@@ -331,6 +350,15 @@ class DeviceRepositoryService {
       } on Object catch (e) {
         _log('cache refresh failed after cloud list fetch (${_describe(e)})');
       }
+      // A successful cloud list fetch also refreshes the PERSISTED account
+      // snapshot (canonical MACs) so offline duplicate detection always knows
+      // the full registered set — including devices claimed from another client.
+      try {
+        await _cache.saveAccountSnapshot(devices);
+      } on Object catch (e) {
+        _log('account snapshot refresh failed after cloud list fetch '
+            '(${_describe(e)})');
+      }
       await _seedCandidates(devices);
       _lastSource = DeviceTransportSource.cloud;
       _log('device list from cloud (${devices.length}) — cache refreshed');
@@ -366,39 +394,113 @@ class DeviceRepositoryService {
     }
   }
 
+  /// True when the registration knowledge is authoritative that [canonicalMac]
+  /// is registered (see [registrationState] for the full three-state semantics).
+  /// `false` covers both "evidence of absence" and "unknown" — both proceed at
+  /// the boundary, where the backend pre-claim check and POST /api/devices/provision
+  /// remain the final authority.
+  Future<bool> isDeviceRegistered(String canonicalMac) async {
+    return await registrationState(canonicalMac) == RegistrationState.registered;
+  }
+
   /// HARD provisioning invariant, consulted at the authoritative provisioning
   /// boundary immediately before the first Tasmota configuration command.
   ///
-  /// True when [canonicalMac] is already registered to the current user. Unlike
-  /// a UI/session snapshot, this is NOT a function of transient wizard state:
-  /// it sources the same registered-data authority the Devices page list and
-  /// Local Mode use — the cloud-authorised registered list (bounded) first,
-  /// then the PERSISTED local mirror of that list ([LocalDeviceCache], written
-  /// only by cloud-verified claim/delete/list flows). A MAC present in EITHER
-  /// source is registered, so the rule survives closing the wizard, reopening
-  /// Add Device, recreating the widget, and offline / setup-AP conditions.
+  /// Three-state registration knowledge for [canonicalMac]:
   ///
-  /// Failsafe for the genuinely-offline race (a device just claimed on another
-  /// phone while THIS phone is on the setup AP with no internet): returns false
-  /// rather than deadlocking an offline provisioning flow — the backend
-  /// pre-claim check and POST /api/devices/provision remain the final authority
-  /// and still reject the duplicate before the WIZARD can leave the WAIT phase.
-  Future<bool> isDeviceRegistered(String canonicalMac) async {
-    bool found = false;
+  ///  * [RegistrationState.registered] — the MAC is present in a valid source:
+  ///    the cloud-authorised list (bounded), the PERSISTED account snapshot
+  ///    ([LocalDeviceCache.saveAccountSnapshot], taken from a successful
+  ///    `GET /api/devices`), or the persisted display mirror ([kLocalDevicesKey]).
+  ///    A MAC in ANY of these is registered, so the rule survives closing the
+  ///    wizard, reopening Add Device, recreating the widget, and offline /
+  ///    setup-AP conditions.
+  ///  * [RegistrationState.notRegistered] — a valid source was consulted and
+  ///    the MAC was absent (e.g. a persisted account snapshot that was refreshed
+  ///    online and that does not contain it). This is evidence, not a guess.
+  ///  * [RegistrationState.unknown] — no source could establish anything:
+  ///    cloud unreachable, no persisted account snapshot for this account. A
+  ///    network failure is NOT evidence of absence; the backend pre-claim check
+  ///    and POST /api/devices/provision remain the final authority.
+  ///
+  /// The cloud list is tried first (bounded by [kRegisteredCheckLimit]); a
+  /// successful fetch refreshes BOTH the persisted account snapshot and the
+  /// display mirror, so offline knowledge is never lost and only grows fresher.
+  /// An unreachable cloud falls back to the persisted snapshot — a failed
+  /// request must never erase already-known information.
+  Future<RegistrationState> registrationState(String canonicalMac) async {
     try {
-      final devices = await _cloud.getDevices().timeout(kRegisteredCheckLimit);
-      found = ClaimDeviceSnapshot.fromDevices(devices).containsMac(canonicalMac);
+      final devices =
+          await _cloud.getDevices().timeout(kRegisteredCheckLimit);
+      final found = ClaimDeviceSnapshot.fromDevices(devices).containsMac(
+        canonicalMac,
+      );
+      // Persist the fresh authoritative knowledge before answering so an
+      // immediately-following offline boundary still certifies it.
+      try {
+        await _cache.saveAccountSnapshot(devices);
+      } on Object catch (e) {
+        _log('account snapshot refresh failed (${_describe(e)})');
+      }
+      try {
+        await _cache.replaceAll(devices);
+      } on Object catch (e) {
+        _log('display mirror refresh failed (${_describe(e)})');
+      }
+      return found
+          ? RegistrationState.registered
+          : RegistrationState.notRegistered;
     } on Object catch (e) {
       _log('registered-MAC cloud check unavailable (${_describe(e)})');
     }
-    if (found) return true;
+
+    // Cloud unreachable (phone on the offline Tasmota AP): consult the
+    // PERSISTED account snapshot captured before entering the AP. Presence is
+    // registered; a valid snapshot that lacks the MAC is evidence of absence.
+    try {
+      final snapshotMacs = await _cache.loadAccountSnapshotMacs();
+      if (snapshotMacs != null) {
+        return snapshotMacs.contains(canonicalMac)
+            ? RegistrationState.registered
+            : RegistrationState.notRegistered;
+      }
+    } on Object catch (e) {
+      _log('registered-MAC account snapshot unavailable (${_describe(e)})');
+    }
+
+    // No account snapshot yet: fall back to the persisted display mirror
+    // (legacy/back-compat). Presence certifies; otherwise the state is UNKNOWN —
+    // never a confident "not registered".
     try {
       final cached = await _cache.cachedDevices();
-      found = ClaimDeviceSnapshot.fromDevices(cached).containsMac(canonicalMac);
+      final found =
+          ClaimDeviceSnapshot.fromDevices(cached).containsMac(canonicalMac);
+      return found ? RegistrationState.registered : RegistrationState.unknown;
     } on Object catch (e) {
       _log('registered-MAC mirror check unavailable (${_describe(e)})');
     }
-    return found;
+    return RegistrationState.unknown;
+  }
+
+  /// Refreshes the PERSISTED account device snapshot (canonical MACs) plus the
+  /// display mirror from a bounded cloud list fetch. Called at the Add Device
+  /// entry while the phone is still on its normal network — BEFORE the wizard
+  /// enters the offline Tasmota AP. Any failure is swallowed: the last valid
+  /// persisted snapshot must never be erased by a failed request.
+  Future<void> refreshAccountSnapshot() async {
+    try {
+      final devices = await _cloud.getDevices().timeout(kRegisteredCheckLimit);
+      await _cache.saveAccountSnapshot(devices);
+      try {
+        await _cache.replaceAll(devices);
+      } on Object catch (e) {
+        _log('display mirror refresh failed after account refresh '
+            '(${_describe(e)})');
+      }
+      await _seedCandidates(devices);
+    } on Object catch (e) {
+      _log('account snapshot refresh unavailable (${_describe(e)})');
+    }
   }
 
   /// Best-effort, non-authoritative: persists each device's cloud-learned LAN
