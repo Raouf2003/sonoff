@@ -25,6 +25,17 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// MQTT broker endpoint that the provisioning wizard writes into Tasmota.
+/// Served by the backend from its MQTT_BROKER_URL env so the app can never
+/// drift from the broker the backend itself connects to (a broadcast address is
+/// not sensitive, but it must be fetched BEFORE the phone joins the device's
+/// offline soft-AP, which has no internet route back to the backend).
+class MqttBrokerInfo {
+  const MqttBrokerInfo({required this.host, required this.port});
+  final String host;
+  final int port;
+}
+
 /// Result of the provisioning pre-flight duplicate check: whether a given
 /// canonical MAC is already registered to the current user, to another user, or
 /// not registered at all. Read-only and non-authoritative - the real duplicate /
@@ -285,6 +296,32 @@ class ApiService {
   Future<Map<String, dynamic>> getStatus(String deviceId) async {
     final res = await get('/api/status', query: {'deviceId': deviceId});
     return _checkObject(res, const [200], 'Failed to fetch status');
+  }
+
+  // Broker host/port for provisioning, served by the backend from its own
+  // MQTT_BROKER_URL env (one source of truth - see server.js). Fetched once at
+  // wizard start, before the phone joins the Tasmota setup AP. A failure here
+  // must BLOCK the wizard: silently falling back to a hardcoded broker would
+  // reproduce the factory-default-broker bug. The address is not sensitive, so
+  // the endpoint requires no auth and this call can run pre-login.
+  Future<MqttBrokerInfo> getMqttBrokerInfo() async {
+    final res = await get('/api/mqtt/broker-info');
+    final body = _checkObject(res, const [200], 'Could not load broker info');
+    final host = body['host'];
+    final port = body['port'];
+    if (host is! String || host.trim().isEmpty) {
+      throw const ApiException(
+        'Broker info missing a host',
+        code: 'INVALID_BROKER_INFO',
+      );
+    }
+    if (port is! int) {
+      throw const ApiException(
+        'Broker info missing a port',
+        code: 'INVALID_BROKER_INFO',
+      );
+    }
+    return MqttBrokerInfo(host: host.trim(), port: port);
   }
 
   Future<Map<String, dynamic>> control(

@@ -207,6 +207,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // slow/unreachable backend from delaying the Connect step.
   static const Duration _snapshotRefreshTimeout = Duration(seconds: 5);
 
+  // Bound for the broker-info pre-fetch in `_loadBrokerInfo`. Runs at the same
+  // moment over the same home-network link as the snapshot refresh; a
+  // slow/unreachable backend must not hang the Connect step (the failure
+  // surfaces as a blocking error either way).
+  static const Duration _brokerInfoTimeout = Duration(seconds: 5);
+
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
@@ -229,8 +235,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   final _ssidCtl = TextEditingController();
   final _wifiPassCtl = TextEditingController();
-  final _mqttBrokerCtl = TextEditingController(text: 'broker.emqx.io');
-  final _mqttPortCtl = TextEditingController(text: '1883');
+  // Broker host/port are NOT hardcoded: they are fetched once at wizard start
+  // (before the phone joins the offline Tasmota soft-AP, which has no route to
+  // the backend) and populated from the backend's own broker-info endpoint. A
+  // hardcoded default would silently reproduce Tasmota's factory broker.
+  // The controllers stay `final`; `_loadBrokerInfo()` fills their text.
+  final _mqttBrokerCtl = TextEditingController();
+  final _mqttPortCtl = TextEditingController();
   final _mqttUserCtl = TextEditingController();
   final _mqttPassCtl = TextEditingController();
   final _deviceNameCtl = TextEditingController();
@@ -313,6 +324,20 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // provisioning boundary against the repository's registered-device authority.
   ClaimDeviceSnapshot _claimedMacsAtStart = ClaimDeviceSnapshot.empty();
 
+  /// Broker endpoint the device must be provisioned to, fetched ONCE at wizard
+  /// start while the phone is on its home network (the Tasmota setup AP has no
+  /// internet route back to the backend). A `null` value after loading means the
+  /// fetch FAILED — this is a hard blocker, never a silent default: without a
+  /// known broker the wizard must not hand the device off to Tasmota's factory
+  /// `broker.emqx.io`. Backend-served (backend/.env MQTT_BROKER_URL), so the
+  /// address can never drift between the app and the broker in use.
+  MqttBrokerInfo? _brokerInfo;
+  String? _brokerInfoError;
+
+  /// In-flight load of [_brokerInfo]. Blocking the Connect step on it makes a
+  /// fast reopen wait the same way Gate A waits on the account snapshot.
+  Future<void>? _brokerInfoLoad;
+
   /// In-flight registration of the once-at-start snapshot load. Gate B awaits
   /// it (it is normally already complete) so a fast reopen cannot race the
   /// snapshot and accidentally skip Gate A.
@@ -379,6 +404,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // back to the existing backend duplicate gates (also authoritative).
     if (code == null) {
       _claimedMacsAtStartLoad = _loadClaimedMacsAtStart();
+      // Broker host/port for the device's MQTT config MUST be fetched now, on
+      // the home network, before the user is allowed to proceed to the offline
+      // Tasmota AP. Unlike the snapshot, a failure is a HARD blocker (see
+      // _loadBrokerInfo): proceeding without a real broker would silently
+      // reconfigure the device onto Tasmota's factory broker.
+      _brokerInfoLoad = _loadBrokerInfo();
     }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
@@ -493,6 +524,27 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _startSearch() async {
     debugPrint('[PROVISION] phase=$_phaseLabel start search');
+    // Broker info is fetched at wizard start on the home network (the Tasmota
+    // setup AP has no route to the backend). Proceeding to the AP without it
+    // would silently leave the device on Tasmota's factory broker later, so a
+    // missing broker config is a HARD blocker: wait for the in-flight fetch,
+    // then either proceed or show the blocking error.
+    if (_brokerInfo == null) {
+      final load = _brokerInfoLoad;
+      if (load != null) {
+        await load;
+        if (!mounted) return;
+      }
+    }
+    if (_brokerInfo == null) {
+      debugPrint('[PROVISION] blocked: broker info not available');
+      if (mounted) {
+        setState(() => _error = _brokerInfoError ??
+            'Could not load the MQTT broker address. Reopen Add Device while '
+                'you have an internet connection.');
+      }
+      return;
+    }
     // PHASE 1 (OFFLINE-AP): the phone is already on the Tasmota AP now (the
     // user picked it in Wi-Fi Settings and returned here). No backend call is
     // allowed from this point - the MAC, Wi-Fi config and WifiTest3 are all
@@ -647,6 +699,23 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   void _startApDetection() {
     if (_step != _Step.connect) return;
+    // The Connect step must not probe the Tasmota AP until the broker endpoint
+    // is known (fetched at wizard start on the home network). A missing broker
+    // would later write Tasmota's factory default into the device. Recovery
+    // re-enters Connect after a broker info already loaded earlier, so this
+    // only blocks the initial flow.
+    if (_brokerInfo == null) {
+      debugPrint('[PROVISION] blocked AP detection: broker info not available');
+      if (mounted) {
+        setState(() {
+          _searching = false;
+          _error = _brokerInfoError ??
+              'Could not load the MQTT broker address. Reopen Add Device while '
+                  'you have an internet connection.';
+        });
+      }
+      return;
+    }
     _reachTimer?.cancel();
     _apProbeGen++;
     final gen = _apProbeGen;
@@ -970,13 +1039,23 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   await _ensureBoundToWifi();
   _trace.enter(ProvisionPhase.config, 'BROKER_BACKLOG');
 
-  debugPrint('[PROVISION] configuring MQTT broker...');
+  // Defense in depth: the Connect step already blocks without broker info, but
+  // never write an empty/default host if this is somehow reached - a device on
+  // Tasmota's factory broker is exactly the bug this guard exists to prevent.
+  final brokerHost = _mqttBrokerCtl.text.trim();
+  final brokerPort = _mqttPortCtl.text.trim();
+  if (brokerHost.isEmpty || brokerPort.isEmpty) {
+    debugPrint(
+        '[PROVISION] VERIFY FAILED: broker host/port not loaded - aborting');
+    return _ConfigOutcome.configFailed;
+  }
+  debugPrint('[PROVISION] configuring MQTT broker $brokerHost:$brokerPort...');
   final brokerParts = <String>[
     if (_mqttUserCtl.text.trim().isNotEmpty)
       'MqttUser ${_mqttUserCtl.text.trim()}',
     if (_mqttPassCtl.text.isNotEmpty) 'MqttPassword ${_mqttPassCtl.text}',
-    'MqttHost ${_mqttBrokerCtl.text.trim()}',
-    'MqttPort ${_mqttPortCtl.text.trim()}',
+    'MqttHost $brokerHost',
+    'MqttPort $brokerPort',
   ];
   final brokerOk = await _sendCommand('Backlog ${brokerParts.join('; ')}');
   debugPrint('[PROVISION] MQTT broker response=${brokerOk ? 'OK' : 'FAILED'}');
@@ -1058,8 +1137,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   final checks = <String, String>{
     'Topic': topic,
     'FullTopic': '%prefix%/%topic%/',
-    'MqttHost': _mqttBrokerCtl.text.trim(),
-    'MqttPort': _mqttPortCtl.text.trim(),
+    'MqttHost': brokerHost,
+    'MqttPort': brokerPort,
     'SSId1': _ssidCtl.text.trim(),
   };
   for (final entry in checks.entries) {
@@ -1556,6 +1635,43 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         _state = ProvisionState.waitingForMqtt;
       });
       _waitTimer = Timer(_seenPollInterval, () => _pollDeviceSeen());
+    }
+  }
+
+  // Loads the broker host/port once, at wizard start, from the backend's own
+  // broker-info endpoint (which serves backend/.env MQTT_BROKER_URL). A failure
+  // is a HARD blocker — never a silent fallback to a hardcoded default:
+  // proceeding without a known broker would write Tasmota's factory
+  // `broker.emqx.io` into every device. The Connect step stays disabled until
+  // [_brokerInfo] is set, and a failed fetch is surfaced as a blocking error so
+  // the user can fix connectivity and reopen instead of misconfiguring a device.
+  Future<void> _loadBrokerInfo() async {
+    try {
+      final info = await _api
+          .getMqttBrokerInfo()
+          .timeout(_brokerInfoTimeout);
+      if (!_isTerminal && mounted) {
+        _mqttBrokerCtl.text = info.host;
+        _mqttPortCtl.text = '${info.port}';
+        setState(() {
+          _brokerInfo = info;
+          _brokerInfoError = null;
+        });
+        debugPrint('[PROVISION] broker info loaded: ${info.host}:${info.port}');
+      }
+    } catch (e) {
+      debugPrint('[PROVISION] broker info load failed (blocking): $e');
+      if (!_isTerminal && mounted) {
+        setState(() {
+          _brokerInfo = null;
+          final msg = 'Could not load the MQTT broker address from the '
+              'backend. Make sure you are online, then reopen Add Device.';
+          _brokerInfoError = msg;
+          // Surface immediately on the Connect screen so the blocker is visible
+          // before the user even taps Continue, not only after the tap.
+          _error = msg;
+        });
+      }
     }
   }
 

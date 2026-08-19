@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +18,13 @@ import 'package:smart_home_app/services/provisioning_service.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
 
 const _canonicalDeviceId = '34987AC30304';
+
+/// The broker the test backend exposes via `getMqttBrokerInfo` — deliberately
+/// NOT Tasmota's factory default, so tests prove the wizard writes and read-back
+/// verifies the backend-served address (the bug being guarded against is a
+/// hardcoded `broker.emqx.io`).
+const _testBrokerHost = 'mqtt.stees.test';
+const _testBrokerPort = 1883;
 
 /// Secure storage on the test host is unregistered; a token read must simply
 /// return null so the wizard's Socket.IO fast-path (`_startDeviceWatch`) can
@@ -112,6 +121,13 @@ class _FlowApi extends ApiService {
   /// claimable (the backend remains the final net).
   bool offline = false;
 
+  /// Broker info failures model the pre-fetch at wizard start failing (phone
+  /// offline / backend unreachable), which must BLOCK the wizard before AP
+  /// connect. Independent of [offline] so the offline duplicate-gate tests
+  /// (whose subject is the persisted snapshot, not the broker) keep a known
+  /// broker and exercise their gate; the broker-failure tests opt in.
+  bool brokerInfoDown = false;
+
   @override
   Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
     if (offline) {
@@ -119,6 +135,14 @@ class _FlowApi extends ApiService {
     }
     preflightCalls++;
     return preflightStatus;
+  }
+
+  @override
+  Future<MqttBrokerInfo> getMqttBrokerInfo() async {
+    if (brokerInfoDown) {
+      throw const ApiException('broker info down', code: 'NETWORK_ERROR');
+    }
+    return const MqttBrokerInfo(host: _testBrokerHost, port: _testBrokerPort);
   }
 
   @override
@@ -228,6 +252,20 @@ class _TasmotaFake {
   bool failFirstTopicReadback = false;
   bool _topicMismatchDone = false;
 
+  /// The broker the fake device reports back on `MqttHost`/`MqttPort` read-back.
+  /// Defaults to the configured backend-served broker so the read-back verify
+  /// succeeds. Override to the Tasmota factory default (broker.emqx.io) to
+  /// model a device that ignored/never received the write and is still on the
+  /// stock broker — the wizard must halt instead of accepting it.
+  final String _brokerHost = _testBrokerHost;
+  final int _brokerPort = _testBrokerPort;
+
+  /// When true, the fake ALWAYS reports Tasmota's factory-default broker on
+  /// read-back, regardless of what was configured. Models the real-hardware bug
+  /// this regression guards against: the device stayed connected to
+  /// `broker.emqx.io` instead of the backend's broker.
+  bool stuckOnFactoryBroker = false;
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -260,8 +298,16 @@ class _TasmotaFake {
       return '{"Topic":"$_canonicalDeviceId"}';
     }
     if (cmnd == 'FullTopic') return '{"FullTopic":"%prefix%/%topic%/"}';
-    if (cmnd == 'MqttHost') return '{"MqttHost":"broker.emqx.io"}';
-    if (cmnd == 'MqttPort') return '{"MqttPort":"1883"}';
+    // Echo the CONFIGURED broker (backend-served), never Tasmota's factory
+    // default: the read-back verify must see exactly what the wizard wrote.
+    // `stuckOnFactoryBroker` models a device that never got the write.
+    if (stuckOnFactoryBroker) {
+      if (cmnd == 'MqttHost') return '{"MqttHost":"broker.emqx.io"}';
+      if (cmnd == 'MqttPort') return '{"MqttPort":"1883"}';
+    } else {
+      if (cmnd == 'MqttHost') return '{"MqttHost":"$_brokerHost"}';
+      if (cmnd == 'MqttPort') return '{"MqttPort":"$_brokerPort"}';
+    }
     if (cmnd == 'SSId1') return '{"SSId1":"TestWifi"}';
     // Any write command accepted.
     return '{}';
@@ -432,6 +478,28 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  test(
+      'provisioning path contains no hardcoded broker endpoint literals '
+      '(the backend is the single source of truth for MqttHost/MqttPort)',
+      () {
+    final source =
+        File('lib/screens/provision_device_screen.dart').readAsStringSync();
+
+    expect(
+        source,
+        isNot(contains("TextEditingController(text: 'broker.emqx.io')")),
+        reason: 'the MqttHost controller must be empty until the backend '
+            'brokder info is fetched — never seeded with the factory default');
+    expect(source, isNot(contains("TextEditingController(text: '1883')")),
+        reason: 'the MqttPort controller must be empty until the backend '
+            'brokder info is fetched');
+    expect(source, isNot(contains("'broker.emqx.io'")),
+        reason: 'the wizard source must contain no factory-broker string '
+            'literal at all (host comes from GET /api/mqtt/broker-info)');
+    expect(source, isNot(contains('"broker.emqx.io"')),
+        reason: 'ditto for double-quoted literals');
+  });
+
   group('pre-claim duplicate gate runs BEFORE any WiFi provisioning', () {
     testWidgets(
         'new device: pre-flight says notFound, provisioning runs and the '
@@ -455,8 +523,8 @@ void main() {
       expect(api.provisionCalls, 1);
       expect(tasmota.provisioned, isTrue,
           reason: 'WiFi/config commands must actually be sent for a new device');
-      expect(tasmota.commands, contains('Backlog MqttHost broker.emqx.io; '
-              'MqttPort 1883'));
+      expect(tasmota.commands, contains('Backlog MqttHost $_testBrokerHost; '
+              'MqttPort $_testBrokerPort'));
       expect(
           tasmota.commands,
           contains('Backlog Topic $_canonicalDeviceId; '
@@ -1420,6 +1488,77 @@ void main() {
               'hard gate in _provision is the one certifier');
       expect(api.provisionCalls, 1);
       expect(tasmota.provisioned, isTrue);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'broker-info pre-fetch failure BLOCKS the wizard at Connect: no AP '
+        'probe, no probe timer, no device commands, no claim', (tester) async {
+      _mockSecureStorage(tester);
+      // The phone is offline / the backend is unreachable at wizard start, so
+      // the broker address can NEVER be learned. Provisioning to Tasmota's
+      // factory broker is the bug this regression guards against — the wizard
+      // must hard-stop BEFORE the user is sent to the offline setup AP.
+      final api = _FlowApi()..brokerInfoDown = true;
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota);
+
+      expect(find.textContaining('Could not load the MQTT broker'),
+          findsOneWidget,
+          reason: 'the blocking broker error renders on the Connect step');
+
+      await _tapContinue(tester);
+
+      expect(find.text('Test Wi-Fi & Continue'), findsNothing,
+          reason: 'broker-down must never reach the Configure form');
+      expect(find.textContaining('Could not load the MQTT broker'),
+          findsOneWidget,
+          reason: 'the blocking error survives the Continue attempt');
+      expect(api.provisionCalls, 0, reason: 'nothing is ever claimed');
+      expect(tasmota.provisioned, isFalse);
+      expect(tasmota.commands, isEmpty,
+          reason: 'no AP probe and therefore zero device touches: _startSearch '
+              'returned before _startApDetection armed its probe timer');
+      expect(read(), isNot(true));
+
+      await tester.pump(const Duration(seconds: 30));
+      expect(tasmota.commands, isEmpty,
+          reason: 'even after the AP probe grace elapses the wizard never '
+              'probed — the probe timer was never armed');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'device stuck on TASMOTA\u2019S FACTORY broker (broker.emqx.io) is '
+        'halted by the read-back verify: even a device that never got the MQTT '
+        'write is not certified or claimed', (tester) async {
+      _mockSecureStorage(tester);
+      // Real-hardware regression: write "MqttHost mqtt.stees.test" but the
+      // device still reports broker.emqx.io on read-back (e.g. it ignored the
+      // command, rebooted, or the Backlog write was dropped). The per-key
+      // read-back verify MUST catch the mismatch and abort before Restart 1.
+      final api = _FlowApi(); // broker served is mqtt.stees.test
+      final tasmota = _TasmotaFake()..stuckOnFactoryBroker = true;
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester);
+
+      expect(read(), isNot(true), reason: 'must never pop success');
+      expect(api.provisionCalls, 0,
+          reason: 'a device on the wrong broker must never be claimed');
+      expect(find.textContaining('did not accept all settings'),
+          findsWidgets,
+          reason: 'the read-back (MqttHost/MqttPort) failure is surfaced');
+      expect(tasmota.commands.any((c) => c == 'Restart 1'), isFalse,
+          reason: 'the verify halt happens BEFORE the final Restart 1');
+      expect(tasmota.commands.any((c) => c.startsWith('Backlog')),
+          isTrue,
+          reason: 'the config sweep ran (broker/identity wrote) but the read '
+              'verify stopped the flow before restart');
 
       await _unmount(tester);
     });

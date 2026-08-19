@@ -16,6 +16,7 @@ const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
 const { normalizeMac } = require('./services/macIdentity');
 const Device = require('./models/Device');
 
+const { configuredBrokerInfo } = require('./services/brokerInfo');
 const deviceRegistry = require('./services/deviceRegistry');
 const runtimeState = require('./services/runtimeState');
 const mqttGateway = require('./services/mqttGateway');
@@ -156,6 +157,22 @@ app.get('/api/health', (req, res) => {
 // easy to curl from anywhere for debugging.
 app.get('/api/mqtt/snapshot', (req, res) => {
   res.json(mqttGateway.snapshot());
+});
+
+// Broker host/port that provisioning should configure devices to use. Derived
+// from the SAME MQTT_BROKER_URL the gateway connects to, so the wizard can
+// never drift from the broker the backend talks to. Unauthenticated on purpose:
+// a broker address is not sensitive, and the provisioning wizard fetches it
+// before the phone leaves the home network for the device's offline soft-AP.
+app.get('/api/mqtt/broker-info', (req, res) => {
+  const info = configuredBrokerInfo();
+  if (!info) {
+    return res.status(503).json({
+      error: 'MQTT broker is not configured',
+      code: 'BROKER_NOT_CONFIGURED',
+    });
+  }
+  res.json(info);
 });
 
 app.use('/api/auth', authRoutes);
