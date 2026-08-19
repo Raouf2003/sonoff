@@ -78,6 +78,16 @@ class _FlowApi extends ApiService {
   int provisionCalls = 0;
   final List<String> provisionedDeviceIds = [];
 
+  int unclaimCalls = 0;
+  int deleteCalls = 0;
+  final List<String> mqttCommands = [];
+
+  /// When true, `getDevices()` throws (the phone is mid network transition
+  /// and cannot reach the backend). The local-setup loop must still run in
+  /// that state, driven by the last-known claimed IP. Best-effort model of the
+  /// AP → home-Wi-Fi handoff window.
+  bool getDevicesDown = false;
+
   /// `lastIp` carried by the claim response. `null` models a brand-new device
   /// (the backend only learns the IP from the first tele/STATE), which forces
   /// the wizard's wait-for-MQTT-IP step.
@@ -101,9 +111,6 @@ class _FlowApi extends ApiService {
   /// registered MAC, and a brand-new device with no snapshot must still be
   /// claimable (the backend remains the final net).
   bool offline = false;
-
-  int unclaimCalls = 0;
-  final List<String> mqttCommands = [];
 
   @override
   Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
@@ -137,7 +144,7 @@ class _FlowApi extends ApiService {
 
   @override
   Future<List<dynamic>> getDevices() async {
-    if (offline) {
+    if (offline || getDevicesDown) {
       throw const ApiException('offline', code: 'NETWORK_ERROR');
     }
     getDevicesCalls++;
@@ -170,14 +177,17 @@ class _FlowApi extends ApiService {
   Future<void> unclaimDevice(String deviceId) async {
     unclaimCalls++;
   }
+
+  @override
+  Future<void> deleteDevice(String deviceId) async {
+    deleteCalls++;
+  }
 }
 
 /// A stateful backend model for the delete-then-claim scenario: the device is
 /// registered (pre-flight says `mine`) until an authenticated DELETE removes
 /// it, after which the pre-flight agrees the device is gone (`notFound`).
 class _StatefulApi extends _FlowApi {
-  int deleteCalls = 0;
-
   @override
   Future<void> deleteDevice(String deviceId) async {
     deleteCalls++;
@@ -251,6 +261,28 @@ class _TasmotaFake {
   static bool _isProvisionCommand(String cmnd) {
     if (cmnd.startsWith('Status 5')) return false;
     return cmnd.isNotEmpty;
+  }
+}
+
+/// A scripted local-setup hook. Returns `false` for the first
+/// [failuresBeforeSuccess] calls and `true` afterwards, so tests can drive
+/// both the bounded auto-retry window and a manual Retry deterministically.
+/// Every call records the `lastIp` the wizard chose — proving the known IP is
+/// reused across the AP → home-Wi-Fi transition — and [onCall] can flip
+/// external state (e.g. the cloud device list going down mid-flow).
+class _ScriptedLocalSetup {
+  _ScriptedLocalSetup(this.failuresBeforeSuccess, {this.onCall});
+
+  final int failuresBeforeSuccess;
+  final void Function(int calls)? onCall;
+  int calls = 0;
+  final List<String?> lastIps = [];
+
+  Future<bool> run(String deviceId, {String? lastIp}) async {
+    calls++;
+    lastIps.add(lastIp);
+    onCall?.call(calls);
+    return calls > failuresBeforeSuccess;
   }
 }
 
@@ -424,8 +456,9 @@ void main() {
     });
 
     testWidgets(
-        'local HTTP verify failure fails provisioning: terminal stop, no '
-        'success pop, device released', (tester) async {
+        'temporary LAN failure after the claim keeps ownership: recoverable '
+        '"Local control not ready" screen, NO unclaim, NO delete, NO second '
+        'provision', (tester) async {
       _mockSecureStorage(tester);
       final api = _FlowApi();
       final tasmota = _TasmotaFake();
@@ -435,17 +468,218 @@ void main() {
       await _tapContinue(tester);
       await _fillAndProvision(tester);
 
-      // The claim committed, but provisioning must NOT pop success: the wizard
-      // freezes on the local-control diagnostic instead.
+      // The claim committed BEFORE the local-setup loop even started, and the
+      // ownership is FINAL regardless of local readiness.
       expect(api.provisionCalls, 1,
-          reason: 'the claim happened (post-claim gate)');
+          reason: 'the backend claim committed exactly once');
       expect(read(), isNull,
-          reason: 'a verify failure must never pop `true`');
-      expect(api.unclaimCalls, 1,
-          reason: 'the device is released best-effort so the user can re-run '
-              'the wizard');
+          reason: 'a verify failure must never pop `true` by itself');
+      expect(api.unclaimCalls, 0,
+          reason: 'a temporary LAN miss must NEVER roll back the committed '
+              'backend claim');
+      // The bounded loop exhausted (first attempt + 2s/2s/3s/5s backoff), so
+      // the recoverable screen is visible.
       expect(find.text('Local control not ready'), findsOneWidget);
       expect(find.textContaining('same Wi-Fi as the device'), findsOneWidget);
+      expect(find.text('Retry Local Control'), findsOneWidget);
+      expect(find.text('Close'), findsOneWidget);
+      expect(
+          find.textContaining('already added to your account'), findsOneWidget,
+          reason: 'the recoverable screen must state that the device is '
+              'owned while local control is pending');
+
+      // Close accepts the added device WITHOUT unclaiming or deleting it.
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(read(), isTrue,
+          reason: 'Close keeps the committed claim and retires the wizard');
+      expect(api.provisionCalls, 1,
+          reason: 'still exactly one backend claim');
+      expect(api.unclaimCalls, 0);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'temporary LAN failure on the FIRST local attempt only: the bounded '
+        'auto-retry succeeds on the next gap and pops true, with exactly one '
+        'claim and no rollback', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      final setup = _ScriptedLocalSetup(1);
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue,
+          reason: 'a temporary first-attempt miss must not cost the claim');
+      expect(api.provisionCalls, 1,
+          reason: 'the backend claim committed exactly once');
+      expect(api.unclaimCalls, 0,
+          reason: 'a transient local miss never rolls ownership back');
+      expect(api.deleteCalls, 0);
+      expect(setup.calls, 2,
+          reason: 'first attempt failed, the next backoff-gap succeeded');
+      expect(setup.lastIps, everyElement('192.168.1.10'),
+          reason: 'every attempt is driven by the backend-learned lastIp');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'phone network transition: the cloud device list is unreachable '
+        'during the local setup, but every attempt still runs on the '
+        'last-known claimed IP and the claim survives',
+        (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      // After the first (succeeding) local attempt, the phone is mid
+      // transition: GET /api/devices throws for every later attempt, exactly
+      // like the phone dropping off during the AP -> home-Wi-Fi handoff.
+      final setup = _ScriptedLocalSetup(0,
+          onCall: (calls) {
+            if (calls >= 2) api.getDevicesDown = true;
+          });
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      // The first attempt succeeds immediately, so the loop never needs a
+      // retry — but the very next refresh (from the now-down device list) must
+      // NOT throw the wizard into a terminal state.
+      expect(read(), isTrue, reason: 'the claim completes');
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+      expect(setup.lastIps, isNotEmpty);
+      expect(setup.lastIps.first, '192.168.1.10',
+          reason: 'the claimed IP drives the first local attempt');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'network transition during the whole local window: the auto-retry '
+        'still pushes through on the last-known IP and pops true',
+        (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      // The phone cannot reach the backend for the whole local window, but the
+      // local LAN is up from attempt 2 on: the loop must keep using the
+      // claimed lastIp (no discovery needed) and succeed.
+      final setup = _ScriptedLocalSetup(1,
+          onCall: (calls) {
+            if (calls >= 2) api.getDevicesDown = true;
+          });
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue,
+          reason: 'the device list being down must not stop local setup');
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+      expect(setup.lastIps, everyElement('192.168.1.10'),
+          reason: 'the claimed IP is reused while the cloud list is unreachable');
+      // The down refresh is expected and swallowed — the loop never terminated.
+      expect(find.text('Local control not ready'), findsNothing);
+      expect(find.text('Close'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'exhaustion -> Retry on the recoverable screen completes the SAME '
+        'claim: no second provision, no config command, no rollback',
+        (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      // 5 failures = the whole auto window (immediate attempt + the 4 gaps in
+      // kLocalSetupBackoff); the next call comes from the manual Retry.
+      final setup = _ScriptedLocalSetup(5);
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      expect(find.text('Local control not ready'), findsOneWidget);
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+      expect(setup.calls, 5,
+          reason: 'the bounded window is the immediate attempt plus exactly '
+              'the 4 gaps in kLocalSetupBackoff');
+      // Retry must not touch the device at all: it is local-setup only. Capture
+      // the provisioning-phase command stream, tap Retry, and prove it is
+      // byte-for-byte unchanged (no new config/Wi-Fi command).
+      final commandsBeforeRetry = List<String>.of(tasmota.commands);
+      final status5BeforeRetry =
+          tasmota.commands.where((c) => c.startsWith('Status 5')).length;
+
+      await tester.tap(find.text('Retry Local Control'));
+      await tester.pumpAndSettle();
+
+      expect(read(), isTrue,
+          reason: 'Retry completes the SAME claim without re-provisioning');
+      expect(api.provisionCalls, 1,
+          reason: 'Retry never issues a second provision/claim');
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+      expect(tasmota.commands, commandsBeforeRetry,
+          reason: 'Retry sends NO provisioning/config/Wi-Fi command — the '
+              'device command stream is unchanged after it ran');
+      expect(tasmota.commands.where((c) => c.startsWith('Status 5')).length,
+          status5BeforeRetry,
+          reason: 'Retry performs no extra identity read either');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'network still down on Retry: the wizard stays recoverable with the '
+        'claim intact; Close still pops true without rolling anything back',
+        (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      final setup = _ScriptedLocalSetup(1 << 30); // never succeeds
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+      expect(find.text('Local control not ready'), findsOneWidget);
+
+      await tester.tap(find.text('Retry Local Control'));
+      await tester.pumpAndSettle();
+
+      // Retry ran the whole bounded loop again and returned to recoverable.
+      expect(setup.calls, 10,
+          reason: 'a Retry is a fresh bounded loop (immediate + gap backoff)');
+      expect(find.text('Local control not ready'), findsOneWidget);
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(read(), isTrue,
+          reason: 'Close accepts the device while it stays claimed');
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
 
       await _unmount(tester);
     });

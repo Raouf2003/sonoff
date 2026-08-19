@@ -20,7 +20,7 @@ import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../widgets/device_type_picker.dart';
 
-enum _Step { connect, provision, waiting }
+enum _Step { connect, provision, waiting, localControl }
 
 /// Graded terminal-failure kind for the WAIT step's recovery UI.
 enum _TerminalKind {
@@ -36,18 +36,33 @@ enum _TerminalKind {
 
   /// The MAC is already a device in ANOTHER account. Close-only.
   alreadyRegistered,
-
-  /// The claim committed on the backend but the post-claim Local HTTP enable +
-  /// verify failed (device unreachable on the LAN, `SetOption128` not
-  /// confirmed, or `StatusNET.HTTP_API` still `0`). The device was released
-  /// from the account; the user retries the whole wizard. Close-only.
-  localControlFailed,
 }
 
 /// Result of the full Tasmota configuration sweep. [wifiTestFailed] is a
 /// distinct outcome so a failed Wi-Fi pre-flight test stays on Configure with a
 /// Wi-Fi-specific message (never a generic power-cycle/factory-reset error).
 enum _ConfigOutcome { ok, wifiTestFailed, configFailed }
+
+/// Post-claim Local HTTP enable+verify bounded retry/backoff for the
+/// AP → home-Wi-Fi transition. The backend claim has ALREADY committed before
+/// this loop runs, so a miss is a LOCAL-READINESS problem, never an ownership
+/// one. The first attempt runs immediately (the phone already reached the
+/// backend for the device-seen poll, so it is back on the home network); each
+/// following gap lets the phone/router/device settle. Deliberately SMALL and
+/// bounded (~12s window) — never the ever-growing 5,10,20,30… style of retry.
+/// Public so widget tests can pump through it deterministically.
+const List<Duration> kLocalSetupBackoff = [
+  Duration(seconds: 2),
+  Duration(seconds: 2),
+  Duration(seconds: 3),
+  Duration(seconds: 5),
+];
+
+/// Fallback diagnostic for the recoverable local-control screen when the
+/// repository produced no more specific reason.
+const String kLocalSetupFallbackMessage =
+    'Local HTTP control could not be enabled and verified on the device. '
+    'Make sure this phone is on the same Wi-Fi as the device, then try again.';
 
 /// STEES provisioning wizard. Replaces the workflow of typing MQTT/Wi-Fi
 /// settings into the raw Tasmota web page, using STEES-styled screens and the
@@ -291,6 +306,19 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   /// snapshot and accidentally skip Gate A.
   Future<void>? _claimedMacsAtStartLoad;
 
+  /// Post-claim Local HTTP readiness — deliberately DECOUPLED from the cloud
+  /// claim. The claim commits on the backend first ([_registerDevice]); only
+  /// these fields track whether direct LAN control has been enabled+verified.
+  /// A failure here is a local-readiness problem and must never roll back
+  /// ownership.
+  bool _localSetupInProgress = false;
+  bool _localSetupReady = false;
+  String? _localSetupError;
+
+  /// The most recent usable LAN IP (MQTT-learned or claim-carried) driving the
+  /// local bootstrap; retained so Retry resumes from the last known address.
+  String? _lastKnownIp;
+
   String get _phaseLabel {
     switch (_step) {
       case _Step.connect:
@@ -299,6 +327,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         return 'CONFIGURING';
       case _Step.waiting:
         return 'WAITING_FOR_DEVICE';
+      case _Step.localControl:
+        return 'LOCAL_CONTROL';
     }
   }
 
@@ -384,6 +414,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         }
         _waitTimer?.cancel();
         _pollDeviceSeen();
+      case _Step.localControl:
+        debugPrint(
+            '[PROVISION] phase=$_phaseLabel lifecycle resumed - local setup persists');
+        if (_isTerminal) return;
+        if (!_localSetupInProgress && !_localSetupReady) {
+          // The retry loop died with the process paused: resume the LOCAL-
+          // READINESS work only — the claim is still committed, so this is
+          // never a new provisioning attempt.
+          _startLocalSetup(_issuedDeviceId, _lastKnownIp);
+        }
     }
   }
 
@@ -1394,8 +1434,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       // of the claim row). The device just restarted onto home Wi-Fi and is
       // already connected to the broker (the seen/poll state confirmed it), so
       // its STATE — with IPAddress — lands within seconds. Poll the device list
-      // briefly so the hard gate below is driven by a real IP instead of failing
-      // on a null hint.
+      // briefly so the local-setup bootstrap below is driven by a real IP
+      // instead of failing on a null hint.
       String? lastIp = claimed['lastIp'] as String?;
       if (!isValidLocalIp(lastIp)) {
         lastIp = null;
@@ -1408,58 +1448,23 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         traceLog('CLAIM', 'LAST_IP_WAIT_END ip=$lastIp total=${_trace.elapsedMs}ms');
       }
 
-      // POST-CLAIM HARD GATE: BLOCKING Local HTTP enable + verify. The claim is
-      // already committed on the backend, but the flow only counts as SUCCESS
-      // (pops true) once the device itself confirms its HTTP API is enabled:
-      // referer'd `SetOption128 1` positively confirmed, then
-      // `StatusNET.HTTP_API == 1`, then a real referer-less State round-trip,
-      // driven by the backend-learned lastIp from the claim response.
-      //
-      // The old fire-and-forget MQTT `SetOption128 1` + `Restart 1` bootstrap is
-      // GONE: it was never verified and `Restart 1` silently reset SO128, which
-      // is exactly how provisioning used to "succeed" while `HTTP_API: 0`.
-      //
-      // On failure the device is released from the account (best-effort) and
-      // the wizard ends on a precise diagnostic — it never pops success.
-      traceLog('CLAIM', 'LOCAL_HTTP_SETUP_START total=${_trace.elapsedMs}ms');
-      final localOk = await _setupLocalControl(deviceId, lastIp: lastIp);
-      if (!localOk) {
-        debugPrint('[PROVISION] LOCAL_HTTP_SETUP_FAILED deviceId=$deviceId');
-        // Best-effort release so the account is not left with a device whose
-        // provisioning was reported as failed; the user simply re-runs the
-        // wizard. Bounded and silent on failure.
-        try {
-          await _api.unclaimDevice(deviceId).timeout(const Duration(seconds: 3));
-          await _deviceCache
-              .removeFromAccountSnapshot(deviceId)
-              .timeout(const Duration(seconds: 3));
-        } catch (_) {}
-        _claimed = false;
-        if (!mounted) return;
-        traceLog('CLAIM',
-            'LOCAL_HTTP_TERMINAL total=${_trace.elapsedMs}ms deviceId=$deviceId');
-        _enterTerminalState(
-          _TerminalKind.localControlFailed,
-          _repository.lastLocalSetupError ??
-              'Local HTTP control could not be enabled and verified on the '
-              'device. Make sure this phone is on the same Wi-Fi as the device, '
-              'then try again.',
-        );
-        return;
-      }
-      traceLog('CLAIM', 'LOCAL_HTTP_VERIFIED total=${_trace.elapsedMs}ms');
-
-      // Background local discovery warm-up: bounded, single-flight, never
-      // blocks the flow or affects the provisioning outcome.
-      unawaited(
-        _warmUpDevice({
-          'deviceId': deviceId,
-          'name': name,
-          'channels': _deviceType.channelCount,
-        }),
-      );
+      // The backend claim has COMMITTED — ownership is final. Local HTTP
+      // readiness is a SEPARATE concern from here on: a temporary LAN/network
+      // miss (phone still transitioning off the Tasmota AP, device HTTP server
+      // or router ARP still settling) must NEVER roll ownership back. No
+      // unclaim, no delete, no re-provision — the device stays claimed and
+      // cached; only the bounded local-setup loop below (plus its manual Retry
+      // on the recoverable screen) marks local control ready.
+      traceLog('CLAIM', 'PROVISION_OK total=${_trace.elapsedMs}ms '
+          'deviceId=$deviceId');
+      _lastKnownIp = lastIp;
       if (!mounted) return;
-      Navigator.of(context).pop(true);
+      setState(() {
+        _step = _Step.localControl;
+        _state = ProvisionState.settingUpLocalControl;
+      });
+      _startLocalSetup(deviceId, lastIp);
+      return;
     } on ApiException catch (e) {
       if (!mounted) return;
       _claimed = false;
@@ -1862,11 +1867,13 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   }
 
   // BLOCKING local HTTP enable + verify (SetOption128 1 + HTTP_API + real
-  // referer-less round-trip) after a successful claim. This is the wizard's
-  // post-claim hard gate: provisioning only pops success when it returns true.
-  // Test seam: provision widget tests inject it so no real mDNS browser / LAN
-  // request is created on the claim-success path, and so both the success and
-  // the failure branch can be driven deterministically.
+  // referer-less round-trip) after a successful claim. Runs the automatic
+  // bounded retry loop ([_startLocalSetup]) and the manual Retry. The cloud
+  // claim is ALREADY committed when this runs, so returning false only marks
+  // local control as NOT-YET-READY (recoverable) — it never unclaims or deletes
+  // the device. Test seam: provision widget tests inject it so no real mDNS
+  // browser / LAN request is created on the claim-success path, and so both the
+  // success and the failure branch can be driven deterministically.
   Future<bool> _setupLocalControl(String deviceId, {String? lastIp}) async {
     debugPrint('[local-setup] claim success deviceId=$deviceId lastIp=$lastIp');
     final hook = widget.testLocalSetup;
@@ -1886,6 +1893,148 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       debugPrint('[local-setup] failed: $e');
       return false;
     }
+  }
+
+  /// Reads the CURRENT authoritative LAN IP for [deviceId] from the backend
+  /// (the backend registry learns it from MQTT telemetry and may have updated
+  /// it since the claim). Best-effort: any failure keeps the previously-known
+  /// IP — the repository still has its persisted verified-IP cache and mDNS as
+  /// lower-priority fallbacks.
+  Future<String?> _refreshAuthoritativeIp(String deviceId) async {
+    try {
+      final devices = await _api.getDevices();
+      for (final raw in devices) {
+        if (raw is Map && raw['deviceId'] == deviceId) {
+          final ip = raw['lastIp'];
+          if (ip is String && isValidLocalIp(ip)) return ip;
+          return null;
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('[LOCAL HTTP] authoritative IP refresh unavailable ($e)');
+    }
+    return null;
+  }
+
+  /// Post-claim Local HTTP enable + verify with a SMALL bounded retry/backoff
+  /// for the AP → home-Wi-Fi transition ([kLocalSetupBackoff]). The claim has
+  /// ALREADY committed on the backend before this runs, so a failure here is a
+  /// LOCAL-READINESS problem, never an ownership problem: the device stays
+  /// claimed and cached. Each attempt re-reads the authoritative lastIp first,
+  /// then runs the referer'd SetOption128 1 bootstrap + HTTP_API verify +
+  /// real referer-less round-trip via [_setupLocalControl]. On exhaustion the
+  /// wizard shows a recoverable "Local control not ready" screen with Retry
+  /// (which re-runs ONLY this step — never provision, never config, never a
+  /// factory reset).
+  Future<void> _startLocalSetup(String deviceId, String? lastIp) async {
+    if (_isTerminal || _localSetupInProgress || !mounted) return;
+    traceLog('CLAIM',
+        'LOCAL_HTTP_SETUP_START total=${_trace.elapsedMs}ms deviceId=$deviceId');
+    debugPrint('[LOCAL HTTP] setup start deviceId=$deviceId lastIp=$lastIp');
+    setState(() {
+      _localSetupInProgress = true;
+      _localSetupReady = false;
+      _localSetupError = null;
+      _state = ProvisionState.settingUpLocalControl;
+    });
+    var knownIp = lastIp;
+    // Attempt count = gaps + 1: the first attempt runs immediately (the phone
+    // already reached the backend for the seen-poll, so it is back on the home
+    // network), then one bounded gap before each retry.
+    for (var attempt = 0; attempt <= kLocalSetupBackoff.length; attempt++) {
+      if (_isTerminal || !mounted) return;
+      if (attempt > 0) {
+        traceLog('LOCAL_HTTP',
+            'WAIT gap=${kLocalSetupBackoff[attempt - 1].inSeconds}s '
+            'total=${_trace.elapsedMs}ms');
+        if (!mounted) return;
+        setState(() => _state = ProvisionState.localSetupWaiting);
+        await Future<void>.delayed(kLocalSetupBackoff[attempt - 1]);
+        if (_isTerminal || !mounted) return;
+      }
+      // Authoritative IP first: the MQTT-learned / registry lastIp is the
+      // preferred address after the claim. A refresh failure keeps the last
+      // known IP; discovery/mDNS remains the repository's fallback.
+      final refreshed = await _refreshAuthoritativeIp(deviceId);
+      if (refreshed != null) knownIp = refreshed;
+      bool ok = false;
+      try {
+        ok = await _setupLocalControl(deviceId, lastIp: knownIp);
+      } on Object catch (e) {
+        debugPrint('[LOCAL HTTP] setup exception on attempt ${attempt + 1}: $e');
+      }
+      _lastKnownIp = knownIp;
+      traceLog('LOCAL_HTTP',
+          'ATTEMPT ${attempt + 1} ip=$knownIp result=${ok ? 'OK' : 'FAILED'} '
+          'total=${_trace.elapsedMs}ms');
+      if (ok) {
+        debugPrint(
+            '[LOCAL HTTP] setup VERIFIED on attempt ${attempt + 1} ip=$knownIp');
+        traceLog('CLAIM',
+            'LOCAL_HTTP_VERIFIED total=${_trace.elapsedMs}ms deviceId=$deviceId');
+        await _finishLocalControlReady(deviceId);
+        return;
+      }
+      debugPrint('[LOCAL HTTP] setup attempt ${attempt + 1} failed '
+          '(ip=$knownIp) — backing off');
+    }
+    if (!mounted || _isTerminal) return;
+    debugPrint('[LOCAL HTTP] setup EXHAUSTED after '
+        '${kLocalSetupBackoff.length + 1} attempts');
+    traceLog('CLAIM',
+        'LOCAL_HTTP_RECOVERABLE total=${_trace.elapsedMs}ms deviceId=$deviceId');
+    setState(() {
+      _localSetupInProgress = false;
+      _localSetupError = _repository.lastLocalSetupError ??
+          kLocalSetupFallbackMessage;
+    });
+  }
+
+  Future<void> _finishLocalControlReady(String deviceId) async {
+    if (!mounted || _isTerminal) return;
+    setState(() {
+      _localSetupInProgress = false;
+      _localSetupReady = true;
+      _state = ProvisionState.completed;
+    });
+    // Background local discovery warm-up: bounded, single-flight, never
+    // blocks the flow or affects the local-setup outcome.
+    final name = _deviceNameCtl.text.trim();
+    unawaited(
+      _warmUpDevice({
+        'deviceId': deviceId,
+        'name': name,
+        'channels': _deviceType.channelCount,
+      }),
+    );
+    if (!mounted) return;
+    Navigator.of(context).pop(true);
+  }
+
+  /// Manual Retry from the recoverable "Local control not ready" screen.
+  /// Re-runs ONLY the bounded local-setup loop — the device is already
+  /// claimed and configured, so nothing about the claim, the Wi-Fi settings or
+  /// the device identity is touched.
+  void _retryLocalSetup() {
+    if (_localSetupInProgress || _isTerminal) return;
+    if (!mounted) return;
+    setState(() {
+      _localSetupError = null;
+    });
+    _startLocalSetup(_issuedDeviceId, _lastKnownIp);
+  }
+
+  /// Close from the recoverable "Local control not ready" screen. The device
+  /// REMAINS claimed and cached (cloud control works); only local readiness is
+  /// postponed. The wizard pops `true` so the Devices page shows the added
+  /// device.
+  void _closeLocalControlReady() {
+    _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
+    _closeProvisionSocket();
+    traceLog('CLAIM',
+        'LOCAL_HTTP_POSTPONED total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
+    if (mounted) Navigator.of(context).pop(true);
   }
 
   // ──────────────────────────────────────────────────────────
@@ -1947,6 +2096,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         return _buildConfig(colors);
       case _Step.waiting:
         return _buildWaiting(colors);
+      case _Step.localControl:
+        return _buildLocalControl(colors);
     }
   }
 
@@ -2458,14 +2609,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           const SizedBox(height: AppSpacing.lg),
           if (_terminalKind == _TerminalKind.alreadyAdded ||
               _terminalKind == _TerminalKind.alreadyRegistered ||
-              _terminalKind == _TerminalKind.localControlFailed ||
               _terminalKind == _TerminalKind.identityUnreadable) ...[
             // Closed-loop failure: nothing to reconfigure and no point waiting.
             // A duplicate identity cannot become addable - the existing device
-            // must be deleted from the Devices page first - an unreadable
-            // identity has no recovery path - and a local-control failure has
-            // already released the device (re-run the wizard). Close is the
-            // only action.
+            // must be deleted from the Devices page first - and an unreadable
+            // identity has no recovery path. Close is the only action.
           ] else ...[
             SizedBox(
               width: double.infinity,
@@ -2534,6 +2682,123 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     );
   }
 
+  // Recoverable post-claim screen: the device was provisioned and the backend
+  // claim COMMITTED, but direct Local HTTP control could not be enabled and
+  // verified yet. The device stays owned and cached (cloud control works);
+  // Retry re-runs ONLY the local bootstrap, Close accepts the added device.
+  // Never a terminal state and never a second claim.
+  Widget _buildLocalControl(SteesColors colors) {
+    final failed = !_localSetupInProgress && !_localSetupReady;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: AppSpacing.xl),
+        _PhaseProgress(active: 2, colors: colors),
+        const SizedBox(height: AppSpacing.xxxl),
+        Center(
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: failed
+                  ? colors.danger.withValues(alpha: 0.06)
+                  : colors.stream.withValues(alpha: 0.06),
+              border: Border.all(
+                color: (failed ? colors.danger : colors.stream)
+                    .withValues(alpha: 0.12),
+              ),
+            ),
+            child: failed
+                ? Icon(Icons.warning_amber_outlined,
+                    size: 32,
+                    color: colors.danger.withValues(alpha: 0.6))
+                : Icon(Icons.wifi_tethering,
+                    size: 32,
+                    color: colors.stream.withValues(alpha: 0.5)),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xl),
+        Text(
+          failed ? 'Local control not ready' : 'Preparing local control…',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.sora(
+              fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Text(
+          failed
+              ? _localSetupError ?? kLocalSetupFallbackMessage
+              : 'The device has been added to your account. Enabling direct '
+                  'local control…',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.inter(
+              fontSize: 13, height: 1.5,
+              color: colors.mist.withValues(alpha: 0.7)),
+        ),
+        if (!failed) ...[
+          const SizedBox(height: AppSpacing.xxl),
+          Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+          ),
+        ],
+        if (failed) ...[
+          const SizedBox(height: AppSpacing.xl),
+          Container(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            decoration: BoxDecoration(
+              color: colors.well,
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+            ),
+            child: Text(
+              'The device is already added to your account — you can control '
+              'it through the cloud while local control is pending. Retry '
+              'enables direct local control without claiming the device again.',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(
+                  fontSize: 12, height: 1.4,
+                  color: colors.mist.withValues(alpha: 0.8)),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton(
+              onPressed: _retryLocalSetup,
+              style: _filledStyle(colors),
+              child: Text('Retry Local Control',
+                  style: GoogleFonts.sora(
+                      fontSize: 15, fontWeight: FontWeight.w700)),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: OutlinedButton(
+              onPressed: _closeLocalControlReady,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: colors.mist,
+                side: BorderSide(color: colors.mist.withValues(alpha: 0.35)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.xl),
+                ),
+              ),
+              child: Text('Close',
+                  style: GoogleFonts.sora(
+                      fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   // Re-arms the device wait for a fresh deadline window. The canonical deviceId
   // is still valid - this is a continuation, not a restart.
   void _retryWait() {
@@ -2596,8 +2861,6 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         return 'Device Already Registered';
       case _TerminalKind.identityUnreadable:
         return 'Device identity not readable';
-      case _TerminalKind.localControlFailed:
-        return 'Local control not ready';
       case _TerminalKind.generic:
         return 'Device is not connected yet';
     }

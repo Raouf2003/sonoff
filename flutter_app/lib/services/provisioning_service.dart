@@ -114,6 +114,8 @@ enum ProvisionState {
   deviceDetected,
   verifyingPossession,
   claiming,
+  settingUpLocalControl,
+  localSetupWaiting,
   completed,
   failed,
   cancelled,
@@ -158,6 +160,10 @@ String provisionUserLabel(ProvisionState state) {
       return 'Registering device…';
     case ProvisionState.claiming:
       return 'Registering device…';
+    case ProvisionState.settingUpLocalControl:
+      return 'Enabling local control…';
+    case ProvisionState.localSetupWaiting:
+      return 'Waiting for your Wi-Fi…';
     case ProvisionState.completed:
       return 'Device ready';
     case ProvisionState.failed:
