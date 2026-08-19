@@ -31,6 +31,63 @@ bool isCanonicalDeviceId(String value) {
   return _canonicalMacRe.hasMatch(value);
 }
 
+/// Immutable in-memory snapshot of the user's registered device MACs, taken
+/// once when the provisioning wizard opens (the phone is still on its home
+/// network, so the backend is reachable — on the Tasmota setup AP it never is).
+///
+/// Feeds the RAM-only EARLY duplicate gate at AP detection / Apply: a canonical
+/// MAC read off the setup AP that is already in this set stops the flow BEFORE
+/// any provisioning command, with no backend round-trip at all. The set is
+/// deliberately never refreshed mid-wizard — a device claimed after this
+/// snapshot is the backend pre-flight + provision check's job (the unchanged
+/// authoritative net).
+class ClaimDeviceSnapshot {
+  ClaimDeviceSnapshot._(this.macs);
+
+  /// MACs already registered to the current user, canonical ([normalizeMac])
+  /// form only.
+  final Set<String> macs;
+
+  /// Builds the snapshot from the backend device list (`GET /api/devices`).
+  /// Entries without a parseable MAC are skipped, never an error.
+  factory ClaimDeviceSnapshot.fromDevices(List<dynamic> devices) {
+    final normalized = <String>{};
+    for (final device in devices) {
+      if (device is! Map) continue;
+      final mac = device['deviceId'];
+      if (mac is String) {
+        final canonical = normalizeMac(mac);
+        if (canonical != null) normalized.add(canonical);
+      }
+    }
+    return ClaimDeviceSnapshot._(Set.unmodifiable(normalized));
+  }
+
+  /// Builds the snapshot from a collection of (possibly non-canonical) MACs,
+  /// e.g. a test seam. Unparseable entries are skipped.
+  factory ClaimDeviceSnapshot.fromMacs(Iterable<String> macs) {
+    final normalized = <String>{};
+    for (final mac in macs) {
+      final canonical = normalizeMac(mac);
+      if (canonical != null) normalized.add(canonical);
+    }
+    return ClaimDeviceSnapshot._(Set.unmodifiable(normalized));
+  }
+
+  /// Empty snapshot: the account held no devices when the wizard opened (or the
+  /// snapshot could not be loaded). The backend gates remain the authority.
+  factory ClaimDeviceSnapshot.empty() => ClaimDeviceSnapshot._(const {});
+
+  /// True when the (possibly non-canonical) [mac] read off the setup AP is one
+  /// of the registered MACs. A MAC that cannot be canonicalized is NEVER
+  /// treated as a duplicate — an unreadable identity falls back to the existing
+  /// gates instead of blocking.
+  bool containsMac(String? mac) {
+    final canonical = normalizeMac(mac);
+    return canonical != null && macs.contains(canonical);
+  }
+}
+
 /// Explicit provisioning state machine.
 ///
 /// The wizard drives through these states in a strictly sequential order. Only

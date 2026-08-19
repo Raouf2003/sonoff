@@ -87,6 +87,12 @@ class _FlowApi extends ApiService {
   int devicesCallsWithoutLastIpAfter = 0;
   int getDevicesCalls = 0;
 
+  /// Models a device that was ALREADY registered when the wizard opened: the
+  /// account's device list contains its MAC from the very first read, so the
+  /// wizard's once-at-start snapshot captures it and the RAM-only early
+  /// duplicate gate must stop the flow without any backend call.
+  bool registeredAtStart = false;
+
   int unclaimCalls = 0;
   final List<String> mqttCommands = [];
 
@@ -120,6 +126,15 @@ class _FlowApi extends ApiService {
   @override
   Future<List<dynamic>> getDevices() async {
     getDevicesCalls++;
+    // Until the claim commits, the account owns nothing — UNLESS the test
+    // models a device registered before the wizard opened. That is exactly
+    // what the wizard's once-at-start snapshot sees: an empty list (brand-new
+    // device, or a device that raced in AFTER the snapshot — the backend
+    // pre-flight / provision still stops it), or a list that already contains
+    // the canonical MAC (the RAM-only early gate stops it fully offline).
+    if (provisionCalls == 0 && !registeredAtStart) {
+      return <dynamic>[];
+    }
     final armed = getDevicesCalls > devicesCallsWithoutLastIpAfter;
     return <dynamic>[
       <String, dynamic>{
@@ -447,6 +462,86 @@ void main() {
       // No re-claim path exists in the wizard.
       expect(find.text('Remove Device'), findsNothing);
       expect(find.text('Delete'), findsNothing);
+      expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'existing device in the wizard-start snapshot: the RAM-only early gate '
+        'stops it with NO backend call, NO provisioning, NO claim',
+        (tester) async {
+      _mockSecureStorage(tester);
+      // The account already owns the device when the wizard opens, so the
+      // once-at-start `GET /api/devices` snapshot captures the canonical MAC.
+      // `preflightStatus` is left at `notFound` on purpose: the RAM gate must
+      // stop the flow fully offline — the backend is never consulted at all.
+      final api = _FlowApi()..registeredAtStart = true;
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+
+      // Frozen into the terminal duplicate state before Configure ever shows.
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      expect(find.text('Test Wi-Fi & Continue'), findsNothing);
+      // Only the read-only identity probe (Status 5) touched the device.
+      expect(tasmota.commands, ['Status 5'],
+          reason:
+              'a registered device must NEVER receive provisioning/config '
+              'commands or be connected to the user Wi-Fi');
+      expect(tasmota.provisioned, isFalse);
+      // No backend call at all: the snapshot alone certifies the duplicate.
+      expect(api.preflightCalls, 0,
+          reason: 'the RAM gate works with NO internet on the Tasmota AP — no '
+              'backend round-trip is needed to stop an already-owned device');
+      expect(api.provisionCalls, 0, reason: 'no claim: the flow never leaves the offline gate');
+      expect(api.unclaimCalls, 0,
+          reason: 'a duplicate is never claimed, so never unclaimed');
+      expect(find.text('Remove Device'), findsNothing);
+      expect(find.text('Delete'), findsNothing);
+      expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'MAC unreadable at AP detection: the snapshot gate in _provision still '
+        'stops a registered device before any config command', (tester) async {
+      _mockSecureStorage(tester);
+      // The account owns the device (snapshot hit), but its MAC could not be
+      // read at AP detection — so only the Apply-time identity re-read feeds
+      // the snapshot gate, which must still stop BEFORE a single config
+      // command reaches the device and with no backend call.
+      final api = _FlowApi()..registeredAtStart = true;
+      final tasmota = _TasmotaFake()
+        ..failFirstMacRead = true;
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      // Identity unreadable at detection: the wizard still reaches Configure
+      // (the MAC is re-read authority when Apply runs).
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      expect(find.text('read from the device when it connects'), findsOneWidget,
+          reason: 'the unreadable identity is shown as pending, not guessed');
+
+      await _fillAndProvision(tester);
+
+      // The snapshot gate ran once (in _provision), saw the duplicate, froze.
+      expect(api.preflightCalls, 0,
+          reason: 'the snapshot certifies the duplicate offline — the backend '
+              'pre-flight never needs to run');
+      expect(api.provisionCalls, 0);
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      // Only the two read-only Status 5 identity reads happened.
+      expect(tasmota.commands.where((c) => c.startsWith('Status 5')).length, 2,
+          reason: 'identity read at AP detection and again at Apply');
+      expect(tasmota.commands.where((c) => !c.startsWith('Status 5')), isEmpty,
+          reason: 'a registered device must never receive a config/Wi-Fi '
+              'command, regardless of when its MAC could first be read');
+      expect(tasmota.provisioned, isFalse);
       expect(read(), isNot(true));
 
       await _unmount(tester);

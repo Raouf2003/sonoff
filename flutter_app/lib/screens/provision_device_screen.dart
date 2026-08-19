@@ -247,7 +247,19 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // enforces the real duplicate/ownership check in
   // POST /api/devices/provision. The second gate stays for the one case it
   // exists for — the MAC was NOT readable at AP detection, so no gate ran yet.
+  // Note the RAM-only wizard-start snapshot ([_claimedMacsAtStart]) is checked
+  // FIRST, before any backend round-trip: it never touches this bookkeeping.
   String _preflightCheckedFor = '';
+
+  // The user's already-registered device MACs, snapshotted ONCE at wizard start
+  // (while the phone is on its home network and the backend is reachable — the
+  // Tasmota setup AP has no internet). The earliest duplicate gate compares the
+  // MAC read off the setup AP against this set BEFORE any provisioning command,
+  // so a device the user already owns is stopped fully offline. Deliberately
+  // never refreshed mid-wizard: a device claimed after this snapshot is the
+  // backend pre-flight + provision check's job (the unchanged authoritative
+  // net), so an entry here NEVER blocks a genuine re-claim after deletion.
+  ClaimDeviceSnapshot _claimedMacsAtStart = ClaimDeviceSnapshot.empty();
 
   String get _phaseLabel {
     switch (_step) {
@@ -287,6 +299,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
           ? _alreadyExistsMessage
           : 'This device is already registered to another account and cannot '
               'be added to this one.';
+    }
+    // Snapshot the user's registered devices once, at flow start. Loaded on the
+    // home network, where the backend is reachable; on the Tasmota AP it never
+    // is. Best-effort: any failure leaves the empty snapshot and the flow falls
+    // back to the existing backend duplicate gates (also authoritative).
+    if (code == null) {
+      unawaited(_loadClaimedMacsAtStart());
     }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
@@ -1437,6 +1456,21 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
+  // Loads the user's registered device MACs once, at wizard start, into the
+  // immutable [_claimedMacsAtStart] snapshot that powers the RAM-only early
+  // duplicate gate. Best-effort and silent: an unreachable backend (or no
+  // session) leaves the empty snapshot, and the existing backend pre-flight +
+  // provision checks remain the authoritative net.
+  Future<void> _loadClaimedMacsAtStart() async {
+    try {
+      final devices = await _api.getDevices();
+      if (_isTerminal || !mounted) return;
+      _claimedMacsAtStart = ClaimDeviceSnapshot.fromDevices(devices);
+    } catch (_) {
+      // Keep the empty snapshot; the backend gates still enforce duplicates.
+    }
+  }
+
   // Best-effort pre-flight duplicate check, run ONCE the canonical identity is
   // known, BEFORE any provisioning/configuration operation. Returns a terminal
   // kind to freeze on, or null to continue provisioning normally. Purely a UX
@@ -1463,13 +1497,16 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
-  // Duplicate gate (GET /api/devices/check). Runs whenever the canonical
-  // identity becomes available - at AP detection (the earliest possible point)
-  // and again in _provision() immediately before the first Tasmota config
-  // command, so an already-existing device NEVER gets configured or connected
-  // to the user's Wi-Fi. Returns true (and freezes the wizard into a terminal
-  // "already added / already registered" state) when the backend confirms the
-  // identity exists, false to continue provisioning. Best-effort: an
+  // Duplicate gate. Runs whenever the canonical identity becomes available - at
+  // AP detection (the earliest possible point) and again in _provision()
+  // immediately before the first Tasmota config command, so an already-existing
+  // device NEVER gets configured or connected to the user's Wi-Fi. Returns true
+  // (and freezes the wizard into a terminal "already added / already registered"
+  // state) when a duplicate is confirmed, false to continue provisioning.
+  //
+  // Layer 1 is the RAM-only wizard-start snapshot (fully offline, no backend
+  // round-trip). Layer 2 is the backend pre-flight (GET /api/devices/check),
+  // which catches a device claimed after the snapshot; it is best-effort — an
   // unreachable backend silently continues (see _preflightDuplicateCheck).
   //
   // The SAME canonical identity is only checked against the backend ONCE: the
@@ -1481,6 +1518,18 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // case it was added for: the MAC could not be read at AP detection, so no
   // gate ran for this identity yet.
   Future<bool> _stopIfAlreadyRegistered(String canonical) async {
+    // RAM-only early gate, fully offline — the phone can be on the Tasmota AP
+    // with no internet. The snapshot was taken at wizard start on the home
+    // network, so a MAC found here certifies the duplicate WITHOUT any backend
+    // round-trip (works even with no connectivity on the AP). A device claimed
+    // AFTER the snapshot is still caught by the backend pre-flight below and by
+    // POST /api/devices/provision itself.
+    if (_claimedMacsAtStart.containsMac(canonical)) {
+      debugPrint('[PROVISION] $canonical already registered (wizard-start '
+          'snapshot) — stopping before any provisioning command');
+      _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+      return true;
+    }
     if (_preflightCheckedFor == canonical) {
       debugPrint(
           '[PROVISION] duplicate gate already run for $canonical — skipping '
