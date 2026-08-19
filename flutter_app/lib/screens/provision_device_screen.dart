@@ -169,6 +169,17 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // home Wi-Fi during this window, before it can reach the MQTT broker.
   static const Duration _stageAdvance = Duration(seconds: 25);
 
+  // Staged label pacing during the reboot wait. PURE UX: the deadline and the
+  // polling cadence are untouched by these offsets. The device reboots, re-runs
+  // DHCP and joins the broker, so the labels tell the user what stage the wait
+  // is in instead of a single generic spinner.
+  static const Duration _stageRebootAdvance = Duration(seconds: 8);
+
+  // Backend device-seen poll cadence. The Socket.IO `device_seen` fast-path
+  // wakes the flow in (near) real time; this bounded poll is the authoritative
+  // fallback and also bounds recovery when the socket stalls.
+  static const Duration _seenPollInterval = Duration(milliseconds: 1500);
+
   // Absolute bound for the whole Tasmota configuration sweep (broker, topic,
   // fulltopic, device name, Wi-Fi, verify, restart). Each command already has
   // its own HTTP timeout and retry loop; this is a coarse backstop so a device
@@ -271,6 +282,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // Paces the WAIT stage labels: Wi-Fi for the early device-reboot window, then
   // MQTT. Labels are cosmetic pacing, never a functional timeout.
   Timer? _waitStageTimer;
+  Timer? _stageRebootTimer;
 
   // Pre-flight Wi-Fi validation (Tasmota WifiTest3) is a local device operation
   // that runs while the phone is still bound to the Tasmota AP. Keeps the
@@ -434,6 +446,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _reachTimer?.cancel();
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     _ssidCtl.dispose();
     _wifiPassCtl.dispose();
@@ -663,6 +676,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     if (await _isReachable()) {
       _reachTimer?.cancel();
       _waitStageTimer?.cancel();
+      _stageRebootTimer?.cancel();
       debugPrint('[PROVISION] device AP reachable');
       if (!mounted || _step != _Step.connect) return;
       // Derive the device identity as soon as the AP is reachable - offline
@@ -979,14 +993,25 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // ALWAYS publishes on tele/<topic>/STATE (and stat/<topic>/...). A leftover
   // custom FullTopic on the device would shift the deviceId to a different
   // topic segment and the wizard would never match it.
-  if (!await _setDeviceSetting('Topic', topic)) {
-    return _ConfigOutcome.configFailed;
+  //
+  // Topic + FullTopic are written in a SINGLE Backlog: writing either setting
+  // makes the device reboot back to the setup AP, so one Backlog collapses two
+  // write -> reboot -> AP-return cycles into one (the dominant App-controlled
+  // latency of the whole config sweep). Both values are read back and verified
+  // BEFORE any home-Wi-Fi credential is persisted and BEFORE Restart 1. If the
+  // device reboots mid-Backlog (Tasmota may restart on Topic) and a read-back
+  // then mismatches, the proven sequential per-setting path below is used —
+  // identical behavior to the pre-batch code, at worst one extra read-back.
+  if (!await _applyIdentityBatched(topic)) {
+    if (!await _setDeviceSetting('Topic', topic)) {
+      return _ConfigOutcome.configFailed;
+    }
+    _trace.debugTrace(ProvisionPhase.config, label: 'TOPIC_VERIFIED');
+    if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) {
+      return _ConfigOutcome.configFailed;
+    }
+    _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
   }
-  _trace.debugTrace(ProvisionPhase.config, label: 'TOPIC_VERIFIED');
-  if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) {
-    return _ConfigOutcome.configFailed;
-  }
-  _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
 
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
@@ -1061,6 +1086,25 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     if (!ok) return false;
     await _waitForDeviceOnAp();
     return _verifySetting(key, value);
+  }
+
+  // Writes Topic + FullTopic in ONE `Backlog` so the write-triggered reboot
+  // back to the setup AP happens exactly once instead of twice. Returns true
+  // only when the Backlog was accepted AND both read-backs match (each
+  // `_verifySetting` already retries across the transient reboot window). On
+  // any failure the caller falls back to the sequential [_setDeviceSetting]
+  // path, which is byte-for-byte the old behavior.
+  Future<bool> _applyIdentityBatched(String topic) async {
+    const fullTopic = '%prefix%/%topic%/';
+    final batched = 'Backlog Topic $topic; FullTopic $fullTopic';
+    final ok = await _sendCommand(batched);
+    debugPrint('[PROVISION] identity Backlog response=${ok ? 'OK' : 'FAILED'}');
+    if (!ok) return false;
+    await _waitForDeviceOnAp();
+    if (!await _verifySetting('Topic', topic)) return false;
+    if (!await _verifySetting('FullTopic', fullTopic)) return false;
+    _trace.debugTrace(ProvisionPhase.config, label: 'IDENTITY_BATCH_VERIFIED');
+    return true;
   }
 
   // Sends one cmnd command (write or action). A plain HTTP 200 is NOT enough -
@@ -1253,15 +1297,23 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _trace.enter(ProvisionPhase.mqtt, 'WAIT_MQTT_DEVICE');
     _waitStart = DateTime.now();
     _claimed = false;
-    // Stage label pacing: "Connecting device to Wi-Fi…" for the boot window,
-    // then "Connecting device to MQTT…". Pure UX - the deadline and polling
-    // cadence are untouched by it.
-    _state = ProvisionState.waitingForWifi;
+    // Stage label pacing: "Rebooting device…" for the immediate boot window,
+    // then "Connecting device to Wi-Fi…", then "Connecting device to MQTT…".
+    // Pure UX - the deadline and polling cadence are untouched by it.
+    _state = ProvisionState.waitingForReboot;
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _waitStageTimer = Timer(_stageAdvance, () {
       if (!mounted || _step != _Step.waiting || _isTerminal) return;
       setState(() {
         _state = ProvisionState.waitingForMqtt;
+      });
+    });
+    _stageRebootTimer = Timer(_stageRebootAdvance, () {
+      if (!mounted || _step != _Step.waiting || _isTerminal) return;
+      if (_state != ProvisionState.waitingForReboot) return;
+      setState(() {
+        _state = ProvisionState.waitingForWifi;
       });
     });
     // Authoritative polling: does this device announce on MQTT (source of truth).
@@ -1355,7 +1407,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     // Re-arm only if the terminal freeze did not happen while the poll was in
     // flight (e.g. a lifecycle resume racing with a duplicate result).
     if (_isTerminal) return;
-    _waitTimer = Timer(const Duration(seconds: 3), () => _pollDeviceSeen());
+    _waitTimer = Timer(_seenPollInterval, () => _pollDeviceSeen());
   }
 
   // Terminal stop of the wait loop. The device never appeared before the
@@ -1370,6 +1422,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   void _finishWaitFailed() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     _allowWaitRetry = true;
     traceLog('WAIT',
@@ -1390,6 +1443,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     if (_isTerminal) return;
     _claimed = true;
     _waitTimer?.cancel();
+    _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     _trace.enter(ProvisionPhase.backend, 'DEVICE_DETECTED');
     debugPrint('[PROVISION] DEVICE_SEEN via ${_watchAcked ? 'socket' : 'poll'}');
@@ -1398,6 +1453,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         _state = ProvisionState.deviceDetected;
       });
     }
+    // Tactile confirmation that the device was seen and is being registered.
+    unawaited(HapticFeedback.mediumImpact());
     await _registerDevice();
   }
 
@@ -1487,7 +1544,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       setState(() {
         _state = ProvisionState.waitingForMqtt;
       });
-      _waitTimer = Timer(const Duration(seconds: 3), () => _pollDeviceSeen());
+      _waitTimer = Timer(_seenPollInterval, () => _pollDeviceSeen());
     } catch (e) {
       if (!mounted) return;
       _claimed = false;
@@ -1498,7 +1555,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       setState(() {
         _state = ProvisionState.waitingForMqtt;
       });
-      _waitTimer = Timer(const Duration(seconds: 3), () => _pollDeviceSeen());
+      _waitTimer = Timer(_seenPollInterval, () => _pollDeviceSeen());
     }
   }
 
@@ -1741,6 +1798,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _reachTimer?.cancel();
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     // Cleanly disconnect from the device's setup AP. A duplicate stop never
     // configured the device and never sent Restart, so there is no reboot to
@@ -1832,8 +1890,13 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // HTTP enable+verify. The device is already confirmed on the broker at this
   // point, so STATE (with IPAddress) normally arrives within a second or two;
   // these bounds just keep a stuck device from pinning the wizard.
-  static const Duration _lastIpWaitInterval = Duration(seconds: 2);
-  static const int _lastIpWaitTries = 8;
+  static const Duration _lastIpWaitInterval = Duration(seconds: 1);
+  static const int _lastIpWaitTries = 4;
+
+  // Bounded background continuation after the user picks "Continue in
+  // background" on the recoverable local-control screen. Runs fully off the
+  // critical path (the wizard has already popped) and is deliberately tiny.
+  static const int _backgroundLocalSetupAttempts = 2;
 
   // Reads the backend-learned `lastIp` for the just-claimed device from the
   // device list (the claim response itself never carries it). `null` when the
@@ -1997,6 +2060,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       _localSetupReady = true;
       _state = ProvisionState.completed;
     });
+    // Tactile confirmation that provisioning finished end-to-end.
+    unawaited(HapticFeedback.heavyImpact());
     // Background local discovery warm-up: bounded, single-flight, never
     // blocks the flow or affects the local-setup outcome.
     final name = _deviceNameCtl.text.trim();
@@ -2031,10 +2096,59 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   void _closeLocalControlReady() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     traceLog('CLAIM',
         'LOCAL_HTTP_POSTPONED total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
     if (mounted) Navigator.of(context).pop(true);
+  }
+
+  /// Accept the device NOW (the claim stays committed) and finish local HTTP
+  /// readiness in the background. Unlike Close this does NOT just give up: a
+  /// bounded, non-blocking loop keeps trying to enable + verify while the user
+  /// already sees their Devices page. Failure there never touches the claim —
+  /// the device simply stays cloud-only until a later tap re-discovers it.
+  /// Pops `true` exactly like Close, so the wizard never blocks on readiness.
+  void _continueLocalSetupInBackground() {
+    if (_localSetupInProgress || _isTerminal) return;
+    final deviceId = _issuedDeviceId;
+    final lastIp = _lastKnownIp;
+    traceLog('CLAIM',
+        'LOCAL_HTTP_BACKGROUND total=${_trace.elapsedMs}ms deviceId=$deviceId');
+    if (mounted) Navigator.of(context).pop(true);
+    if (deviceId.isEmpty) return;
+    unawaited(_backgroundLocalSetup(deviceId, lastIp));
+  }
+
+  /// Bounded continuation of [_startLocalSetup] for the "Continue in
+  /// background" path. Deliberately never touches setState / Navigator (the
+  /// wizard may already be popped) and never issues a claim, unclaim, delete
+  /// or provisioning command — it only re-runs the Local HTTP enable+verify
+  /// bootstrap, exactly like a manual Retry would.
+  Future<void> _backgroundLocalSetup(String deviceId, String? lastIp) async {
+    if (_isTerminal) return;
+    var ip = lastIp;
+    for (var attempt = 0; attempt < _backgroundLocalSetupAttempts; attempt++) {
+      if (_isTerminal) return;
+      try {
+        final refreshed = await _refreshAuthoritativeIp(deviceId);
+        if (refreshed != null) ip = refreshed;
+      } on Object catch (e) {
+        debugPrint('[LOCAL HTTP] background refresh unavailable ($e)');
+      }
+      var ok = false;
+      try {
+        ok = await _setupLocalControl(deviceId, lastIp: ip);
+      } on Object catch (e) {
+        debugPrint('[LOCAL HTTP] background attempt ${attempt + 1} error: $e');
+      }
+      traceLog('LOCAL_HTTP',
+          'BACKGROUND_ATTEMPT ${attempt + 1} ip=$ip '
+          'result=${ok ? 'OK' : 'FAILED'}');
+      if (ok) return;
+      if (attempt + 1 >= _backgroundLocalSetupAttempts) return;
+      await Future<void>.delayed(kLocalSetupBackoff[attempt]);
+    }
   }
 
   // ──────────────────────────────────────────────────────────
@@ -2689,6 +2803,18 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   // Never a terminal state and never a second claim.
   Widget _buildLocalControl(SteesColors colors) {
     final failed = !_localSetupInProgress && !_localSetupReady;
+    // Smarter diagnostics: the repository records a precise reason when one is
+    // known (`_localSetupError`); when it stayed empty, the recurring pattern
+    // is that no address was ever known to the phone (null lastIp through the
+    // whole loop) — call that out explicitly instead of a generic fallback.
+    final localControlMessage = failed
+        ? (_lastKnownIp == null && _localSetupError == null
+            ? '${_localSetupError ?? kLocalSetupFallbackMessage}\n\n'
+                'The device address is not known to this phone yet — make sure '
+                'it is on the same Wi-Fi network as the device, then retry.'
+            : _localSetupError ?? kLocalSetupFallbackMessage)
+        : 'The device has been added to your account. Enabling direct '
+            'local control…';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2727,10 +2853,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         ),
         const SizedBox(height: AppSpacing.sm),
         Text(
-          failed
-              ? _localSetupError ?? kLocalSetupFallbackMessage
-              : 'The device has been added to your account. Enabling direct '
-                  'local control…',
+          localControlMessage,
           textAlign: TextAlign.center,
           style: GoogleFonts.inter(
               fontSize: 13, height: 1.5,
@@ -2781,6 +2904,24 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
             width: double.infinity,
             height: 50,
             child: OutlinedButton(
+              onPressed: _continueLocalSetupInBackground,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: colors.stream,
+                side: BorderSide(color: colors.stream.withValues(alpha: 0.35)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.xl),
+                ),
+              ),
+              child: Text('Continue in background',
+                  style: GoogleFonts.sora(
+                      fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: OutlinedButton(
               onPressed: _closeLocalControlReady,
               style: OutlinedButton.styleFrom(
                 foregroundColor: colors.mist,
@@ -2804,6 +2945,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   void _retryWait() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     if (!mounted) return;
     setState(() {
@@ -2823,6 +2965,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   void _startRecovery() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     _recoveryMode = true;
     traceLog('RECOVERY',
@@ -2845,6 +2988,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   void _leaveWizard() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     traceLog('EXIT', 'CANCELLED total=${_trace.elapsedMs}ms');
     if (mounted) Navigator.of(context).pop(false);

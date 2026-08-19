@@ -109,6 +109,7 @@ enum ProvisionState {
   wifiTestSucceeded,
   readyToRestart,
   restarting,
+  waitingForReboot,
   waitingForWifi,
   waitingForMqtt,
   deviceDetected,
@@ -150,6 +151,8 @@ String provisionUserLabel(ProvisionState state) {
       return 'Configuring device';
     case ProvisionState.restarting:
       return 'Connecting device to Wi-Fi…';
+    case ProvisionState.waitingForReboot:
+      return 'Rebooting device…';
     case ProvisionState.waitingForWifi:
       return 'Connecting device to Wi-Fi…';
     case ProvisionState.waitingForMqtt:

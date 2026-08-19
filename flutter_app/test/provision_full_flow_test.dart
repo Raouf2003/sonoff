@@ -220,6 +220,14 @@ class _TasmotaFake {
   /// Exercises the fallback hard-gate path in `_provision()`.
   bool failFirstMacRead = false;
 
+  /// When true, the FIRST `Topic` read-back returns a mismatching value, then
+  /// subsequent reads are correct. Models a device that rebooted mid-Backlog
+  /// (Tasmota restarts on Topic) and dropped the write: the batched identity
+  /// verify fails, forcing the sequential Topic/FullTopic fallback path, which
+  /// then re-writes and verifies both settings.
+  bool failFirstTopicReadback = false;
+  bool _topicMismatchDone = false;
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -244,7 +252,13 @@ class _TasmotaFake {
     if (cmnd.startsWith('WifiTest3')) return '{"WifiTest3":"Testing"}';
     if (cmnd == 'WifiTest') return '{"WifiTest":"Successful"}';
     // Read-back verifications.
-    if (cmnd == 'Topic') return '{"Topic":"$_canonicalDeviceId"}';
+    if (cmnd == 'Topic') {
+      if (failFirstTopicReadback && !_topicMismatchDone) {
+        _topicMismatchDone = true;
+        return '{"Topic":"WRONGTOPIC"}';
+      }
+      return '{"Topic":"$_canonicalDeviceId"}';
+    }
     if (cmnd == 'FullTopic') return '{"FullTopic":"%prefix%/%topic%/"}';
     if (cmnd == 'MqttHost') return '{"MqttHost":"broker.emqx.io"}';
     if (cmnd == 'MqttPort') return '{"MqttPort":"1883"}';
@@ -443,7 +457,17 @@ void main() {
           reason: 'WiFi/config commands must actually be sent for a new device');
       expect(tasmota.commands, contains('Backlog MqttHost broker.emqx.io; '
               'MqttPort 1883'));
-      expect(tasmota.commands, contains('Topic $_canonicalDeviceId'));
+      expect(
+          tasmota.commands,
+          contains('Backlog Topic $_canonicalDeviceId; '
+              'FullTopic %prefix%/%topic%/'),
+          reason: 'Topic + FullTopic are batched into ONE Backlog so the '
+              'write-triggered AP reboot happens once instead of twice');
+      expect(tasmota.commands.where((c) => c.startsWith('Topic ')), isEmpty,
+          reason: 'the batched identity Backlog replaces the standalone Topic '
+              'write — no separate round-trip for it');
+      expect(tasmota.commands.where((c) => c.startsWith('FullTopic ')), isEmpty,
+          reason: 'same for FullTopic: covered by the identity Backlog');
       expect(tasmota.commands, contains('WifiTest3 TestWifi+password'));
       expect(tasmota.commands, contains('WifiTest'));
       expect(tasmota.commands, contains('SSId1 TestWifi'));
@@ -451,6 +475,45 @@ void main() {
       expect(api.mqttCommands, isEmpty,
           reason: 'the fire-and-forget MQTT SetOption128/Restart bootstrap is '
               'gone — Local HTTP enable+verify is the only post-claim gate');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'identity Backlog read-back mismatch falls back to the sequential '
+        'Topic/FullTopic path and the claim still commits exactly once',
+        (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      // ONE Topic read-back returns a mismatch (models the device rebooting
+      // mid-Backlog and dropping the write); every later read is correct, so
+      // the sequential fallback re-writes Topic + FullTopic and recovers.
+      final tasmota = _TasmotaFake()..failFirstTopicReadback = true;
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      // The batch was attempted first...
+      expect(
+          tasmota.commands,
+          contains('Backlog Topic $_canonicalDeviceId; '
+              'FullTopic %prefix%/%topic%/'),
+          reason: 'the batching optimization ran first');
+      // ...its verify caught the dropped write, and the proven sequential path
+      // re-wrote both settings so the flow still verified + restarted.
+      expect(tasmota.commands, contains('Topic $_canonicalDeviceId'),
+          reason: 'the sequential fallback re-writes Topic after the batch '
+              'verify mismatch');
+      expect(tasmota.commands, contains('FullTopic %prefix%/%topic%/'),
+          reason: 'and FullTopic, preserving the verify-before-restart rule');
+      expect(read(), isTrue,
+          reason: 'the fallback restores the settings and the claim succeeds');
+      expect(api.provisionCalls, 1,
+          reason: 'exactly one backend claim — the fallback is a local-config '
+              'recovery, never a re-provision');
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
 
       await _unmount(tester);
     });
@@ -489,6 +552,8 @@ void main() {
               'owned while local control is pending');
 
       // Close accepts the added device WITHOUT unclaiming or deleting it.
+      await tester.ensureVisible(find.text('Close'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       expect(read(), isTrue,
@@ -628,6 +693,8 @@ void main() {
       final status5BeforeRetry =
           tasmota.commands.where((c) => c.startsWith('Status 5')).length;
 
+      await tester.ensureVisible(find.text('Retry Local Control'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Retry Local Control'));
       await tester.pumpAndSettle();
 
@@ -662,6 +729,8 @@ void main() {
       await _fillAndProvision(tester);
       expect(find.text('Local control not ready'), findsOneWidget);
 
+      await tester.ensureVisible(find.text('Retry Local Control'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Retry Local Control'));
       await tester.pumpAndSettle();
 
@@ -673,6 +742,8 @@ void main() {
       expect(api.unclaimCalls, 0);
       expect(api.deleteCalls, 0);
 
+      await tester.ensureVisible(find.text('Close'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       expect(read(), isTrue,
@@ -680,6 +751,55 @@ void main() {
       expect(api.provisionCalls, 1);
       expect(api.unclaimCalls, 0);
       expect(api.deleteCalls, 0);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'Continue in background accepts the device (claim intact) and finishes '
+        'local setup off the critical path', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      // The auto window (5 attempts) always fails; the background continuation
+      // adds exactly 2 more (immediate + one bounded gap) then stops.
+      final setup = _ScriptedLocalSetup(1 << 30);
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: setup.run);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      expect(find.text('Local control not ready'), findsOneWidget);
+      expect(find.text('Continue in background'), findsOneWidget);
+      expect(setup.calls, 5,
+          reason: 'the auto window exhausted exactly as with Close/Retry');
+
+      await tester.ensureVisible(find.text('Continue in background'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue in background'));
+      await tester.pumpAndSettle();
+
+      // Accepted immediately, the committed claim untouched, wizard retired —
+      // identical ownership semantics to Close.
+      expect(read(), isTrue,
+          reason: 'Continue pops true like Close — the wizard never blocks');
+      expect(api.provisionCalls, 1);
+      expect(api.unclaimCalls, 0);
+      expect(api.deleteCalls, 0);
+
+      // The bounded background continuation keeps working after the pop and
+      // uses the known claimed IP (no provisioning commands, ever).
+      expect(setup.calls, 6,
+          reason: 'the first background attempt runs immediately off the '
+              'critical path');
+      await tester.pump(kLocalSetupBackoff[0]);
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(setup.calls, 7,
+          reason: 'the second (last) background attempt ran after the bounded '
+              'gap and stopped');
+      expect(api.provisionCalls, 1,
+          reason: 'background continuation never re-provisions');
 
       await _unmount(tester);
     });
@@ -1258,8 +1378,15 @@ void main() {
       // The identity burned into the device (Topic == canonical MAC) is the
       // one the backend observed after it joined the LAN, and the final claim
       // registers under that exact canonical MAC - never a different one.
-      expect(tasmota.commands,
-          contains('Topic $_canonicalDeviceId'));
+      // Topic+FullTopic are batched into a single Backlog (one write-triggered
+      // reboot instead of two), so the identity is asserted through it.
+      expect(
+          tasmota.commands,
+          contains('Backlog Topic $_canonicalDeviceId; '
+              'FullTopic %prefix%/%topic%/'));
+      expect(tasmota.commands.where((c) => c.startsWith('Topic ')), isEmpty,
+          reason: 'the identity is written through the batch, not a standalone '
+              'Topic write');
       expect(api.seenDeviceIds, isNotEmpty,
           reason: 'the online device must be verified by its canonical MAC');
       expect(api.seenDeviceIds.every((id) => id == _canonicalDeviceId), isTrue);
