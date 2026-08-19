@@ -216,6 +216,46 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
+  // Programmatic soft-AP connect (Android, API 29+): WifiNetworkSpecifier +
+  // bindProcessToNetwork exposed as `stees/ap_connect`. Kept separate from the
+  // manual `stees/wifi_settings` / `stees/wifi_binding` channels: the
+  // specifier's `onAvailable` bind is the ONLY bind in programmatic mode, and
+  // reachability is still decided by the wizard's own 192.168.4.1 probe.
+  static const MethodChannel _apConnectChannel =
+      MethodChannel('stees/ap_connect');
+
+  /// Android SDK int reported by the native side (null until known). Programmatic
+  /// connect is only attempted when this is >= 29 AND the API-33+ NEARBY_WIFI_DEVICES
+  /// runtime permission was not denied this session.
+  int? _apConnectSdkInt;
+
+  /// True after NEARBY_WIFI_DEVICES was denied (or the channel rejected the
+  /// request): the wizard falls back to the manual Wi-Fi-settings flow for the
+  /// rest of this session instead of re-requesting the permission.
+  bool _apConnectDisabled = false;
+
+  /// True while a programmatic specifier connect is live and bound. While set,
+  /// [_ensureBoundToWifi] is a no-op (the specifier already bound the process)
+  /// and [_releaseWifiBinding] cancels through the specifier channel instead.
+  bool _apConnectMode = false;
+
+  int _apConnectAttempts = 0;
+
+  /// Optional staged label shown during the automatic connect (SSID discovery,
+  /// awaiting the system specifier dialog) so the spinner is self-explanatory.
+  String? _apConnectPending;
+
+  bool get _apConnectSupported =>
+      defaultTargetPlatform == TargetPlatform.android &&
+      (_apConnectSdkInt ?? -1) >= 29 &&
+      !_apConnectDisabled;
+
+  // Max specifier requests per [.. _runProgrammaticConnect]: the system can
+  // answer onUnavailable (no matching AP found / request rejected) even when
+  // the AP is in range, so a handful of bounded retries come first.
+  static const int _apConnectMaxAttempts = 3;
+  static const Duration _apConnectStateDeadline = Duration(seconds: 20);
+
   bool _wifiBound = false;
 
   late final ApiService _api;
@@ -410,6 +450,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       // _loadBrokerInfo): proceeding without a real broker would silently
       // reconfigure the device onto Tasmota's factory broker.
       _brokerInfoLoad = _loadBrokerInfo();
+      unawaited(_probeApConnectSupport());
     }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
@@ -522,6 +563,196 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
   }
 
+  // Reads the Android SDK int from `stees/ap_connect` once, at wizard start,
+  // so the Connect step knows whether programmatic soft-AP connect is usable.
+  // Any failure (MissingPlugin on iOS / in widget tests, etc.) disables it.
+  Future<void> _probeApConnectSupport() async {
+    try {
+      final info = await _apConnectChannel
+          .invokeMethod<Map<dynamic, dynamic>>('sdkInfo');
+      _apConnectSdkInt = info?['sdkInt'] as int?;
+      debugPrint('[PROVISION] ap_connect SDK support: ${_apConnectSdkInt ?? -1}');
+    } catch (e) {
+      debugPrint('[PROVISION] ap_connect support probe failed: $e');
+      _apConnectSdkInt = null;
+    }
+  }
+
+  // Smart connect entry: on Android API 29+ (when not disabled) it attempts a
+  // programmatic WifiNetworkSpecifier join — no Wi-Fi Settings jump, no
+  // captive-portal prompt. On API 24-28 / iOS / after a permission denial it
+  // falls back to the original manual [.. _openWifiSettings] unchanged.
+  Future<void> _connectToDeviceWifi() async {
+    if (_step != _Step.connect) return;
+    if (_apConnectSupported && !_apConnectMode) {
+      final ok = await _runProgrammaticConnect();
+      if (!mounted || _step != _Step.connect) return;
+      if (!ok) return; // error/recovery surfaced, or manual fallback in progress
+      _startApDetection();
+      return;
+    }
+    await _openWifiSettings();
+  }
+
+  // Programmatic connect: discover the exact device AP SSID, request it via
+  // WifiNetworkSpecifier, retry on onUnavailable. Returns true once the system
+  // reports the network as available (the 192.168.4.1 probe runs afterwards,
+  // unmodified, in _startApDetection).
+  Future<bool> _runProgrammaticConnect() async {
+    if (_step != _Step.connect) return false;
+    if (mounted) {
+      setState(() {
+        _searching = true;
+        _error = null;
+        _apConnectPending = 'Finding the device setup network…';
+      });
+    }
+    // WifiNetworkSpecifier needs the EXACT SSID; the wizard only knows the
+    // tasmota- prefix, so discover the real one via the existing passive scan.
+    String? ssid;
+    for (var attempt = 1; attempt <= 3 && ssid == null; attempt++) {
+      ssid = await _discoverDeviceApSsid();
+      if (ssid != null) break;
+      if (attempt < 3) {
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
+    }
+    if (ssid == null) {
+      _failProgrammatic(
+        'Could not find the device setup network (tasmota-XXXX). Make sure the '
+        'device is powered on and in setup mode, then try again.',
+      );
+      return false;
+    }
+    _apConnectAttempts = 0;
+    while (_apConnectAttempts < _apConnectMaxAttempts) {
+      _apConnectAttempts++;
+      if (mounted) {
+        setState(() => _apConnectPending = 'Connecting to $ssid automatically…');
+      }
+      final stage = await _requestApConnect(ssid);
+      if (stage == null) return false; // permission denied / channel fatal → manual fallback
+      if (stage == 'available') {
+        _apConnectMode = true;
+        _wifiBound = true;
+        _apConnectPending = null;
+        debugPrint('[PROVISION] programmatic AP connect bound; probing next');
+        return true;
+      }
+      // unavailable / lost / failed → short backoff, then a fresh request.
+      if (mounted) {
+        setState(() => _apConnectPending = 'Retrying connection to $ssid…');
+      }
+      await Future<void>.delayed(_apConnectBackoff(_apConnectAttempts));
+    }
+    _failProgrammatic(
+      'Could not connect to the device setup network $ssid. Make sure the '
+      'device is powered on and in setup mode, then try again or use Open '
+      'Wi-Fi Settings.',
+    );
+    return false;
+  }
+
+  Duration _apConnectBackoff(int attempt) {
+    switch (attempt) {
+      case 1:
+        return const Duration(milliseconds: 1200);
+      case 2:
+        return const Duration(milliseconds: 2000);
+      default:
+        return const Duration(milliseconds: 3000);
+    }
+  }
+
+  // Issues one specifier request and waits for it to settle. Returns:
+  //   'available'  → bound, proceed to the probe
+  //   other stage  → terminal specifier outcome (unavailable/lost/failed) → retry
+  //   null         → a hard fallback already happened (permission denied etc.)
+  Future<String?> _requestApConnect(String ssid) async {
+    try {
+      await _apConnectChannel.invokeMethod<void>('connectToAp', {'ssid': ssid});
+    } on PlatformException catch (e) {
+      debugPrint('[PROVISION] connectToAp PlatformException: ${e.code} ${e.message}');
+      if (e.code == 'PERMISSION_DENIED') {
+        // NEARBY_WIFI_DEVICES denied on API 33+: never hard-block. The user is
+        // sent to the (fully manual) Wi-Fi Settings flow for this session.
+        _apConnectDisabled = true;
+        _apConnectMode = false;
+        if (mounted) {
+          setState(() {
+            _searching = false;
+            _apConnectPending = null;
+          });
+        }
+        await _openWifiSettings();
+        return null;
+      }
+      if (e.code == 'UNSUPPORTED' || e.code == 'BAD_SSID') {
+        _apConnectDisabled = true;
+        if (mounted) {
+          setState(() {
+            _searching = false;
+            _apConnectPending = null;
+          });
+        }
+        await _openWifiSettings();
+        return null;
+      }
+      return 'failed';
+    } catch (e) {
+      debugPrint('[PROVISION] connectToAp threw: $e');
+      return 'failed';
+    }
+    final deadline = DateTime.now().add(_apConnectStateDeadline);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (!mounted || _step != _Step.connect) return null;
+      Map<dynamic, dynamic>? st;
+      try {
+        st =
+            await _apConnectChannel.invokeMethod<Map<dynamic, dynamic>>('getState');
+      } catch (e) {
+        debugPrint('[PROVISION] getState threw: $e');
+        return 'failed';
+      }
+      final stage = st?['stage'] as String?;
+      if (stage == 'available') return 'available';
+      if (stage == 'unavailable' || stage == 'lost' || stage == 'failed') {
+        debugPrint('[PROVISION] specifier stage=$stage; retrying');
+        return stage!;
+      }
+      // requesting / awaiting_system / idle → keep waiting inside the poll.
+    }
+    debugPrint('[PROVISION] specifier state deadline exceeded');
+    return 'failed';
+  }
+
+  Future<String?> _discoverDeviceApSsid() async {
+    try {
+      final res = await _wifiSettingsChannel
+          .invokeMethod<Map<dynamic, dynamic>>('scanWifi');
+      final networks =
+          (res?['networks'] as List?)?.cast<String>() ?? const <String>[];
+      for (final n in networks) {
+        if (n.toLowerCase().startsWith('tasmota-')) return n;
+      }
+    } catch (e) {
+      debugPrint('[PROVISION] AP SSID discovery scan failed: $e');
+    }
+    return null;
+  }
+
+  void _failProgrammatic(String message) {
+    debugPrint('[PROVISION] programmatic connect failed: $message');
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _apConnectPending = null;
+      _apConnectMode = false;
+      _error = message;
+    });
+  }
+
   Future<void> _startSearch() async {
     debugPrint('[PROVISION] phase=$_phaseLabel start search');
     // Broker info is fetched at wizard start on the home network (the Tasmota
@@ -546,11 +777,20 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       return;
     }
     // PHASE 1 (OFFLINE-AP): the phone is already on the Tasmota AP now (the
-    // user picked it in Wi-Fi Settings and returned here). No backend call is
-    // allowed from this point - the MAC, Wi-Fi config and WifiTest3 are all
-    // local device operations.
+    // user picked it in Wi-Fi Settings and returned here, or the programmatic
+    // connect below bound it). No backend call is allowed from this point - the
+    // MAC, Wi-Fi config and WifiTest3 are all local device operations.
     debugPrint('[PROVISION] OFFLINE_AP_PHASE_START');
     debugPrint('[PROVISION] AP_CONNECT_START');
+    // API 29+ (Android): attempt the programmatic WifiNetworkSpecifier join
+    // first — no settings jump, no captive-portal prompt. On API 24-28 / iOS /
+    // after a permission denial this is skipped and detection runs exactly as
+    // before against the manually selected network.
+    if (_apConnectSupported && !_apConnectMode) {
+      final ok = await _runProgrammaticConnect();
+      if (!mounted) return;
+      if (!ok) return; // error/recovery surfaced, or manual fallback in progress
+    }
     _startApDetection();
   }
 
@@ -560,6 +800,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // (e.g. the router) — getActiveNetwork() returns exactly the user's choice.
   Future<void> _ensureBoundToWifi() async {
     if (defaultTargetPlatform == TargetPlatform.iOS) return;
+    // In programmatic mode the specifier's `onAvailable` bind is the ONLY bind;
+    // the manual channel must never run concurrently (it could re-bind to the
+    // router network while the process is supposed to be pinned to the AP).
+    if (_apConnectMode) {
+      _wifiBound = true;
+      return;
+    }
     if (_wifiBound) return;
     final expected = _tasmotaApSsid;
     try {
@@ -591,6 +838,17 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   Future<void> _releaseWifiBinding() async {
     if (defaultTargetPlatform == TargetPlatform.iOS) return;
+    if (_apConnectMode) {
+      // Programmatic mode unbinds through the specifier channel (which also
+      // unregisters the callback and unbinds the process network).
+      try {
+        await _apConnectChannel.invokeMethod<void>('cancel');
+        debugPrint('[PROVISION] programmatic AP connect cancelled / binding released');
+      } catch (_) {}
+      _apConnectMode = false;
+      _wifiBound = false;
+      return;
+    }
     try {
       await _wifiBindChannel.invokeMethod<void>('releaseWifiBinding');
       debugPrint('[PROVISION] wifi binding released');
@@ -722,6 +980,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _apProbeStart = DateTime.now();
     _apAttempt = 0;
     _wifiBound = false;
+    _apConnectPending = null;
     debugPrint('[PROVISION] phase=$_phaseLabel app resumed/restarting detection, waiting for network stabilization');
     if (mounted) {
       setState(() {
@@ -2402,6 +2661,10 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
 
   Widget _buildConnect(SteesColors colors) {
     final recovering = _recoveryMode;
+    // On Android API 29+ the primary action joins the device AP programmatically
+    // (no settings jump, no captive-portal prompt); everywhere else it is the
+    // plain manual Wi-Fi-Settings open.
+    final smartConnect = _apConnectSupported;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2443,9 +2706,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                 width: double.infinity,
                 height: 50,
                 child: FilledButton.icon(
-                  onPressed: _openWifiSettings,
-                  icon: const Icon(Icons.settings_outlined, size: 18),
-                  label: const Text('Open Wi-Fi Settings'),
+                  onPressed: _connectToDeviceWifi,
+                  icon: Icon(
+                    smartConnect ? Icons.wifi_tethering : Icons.settings_outlined,
+                    size: 18,
+                  ),
+                  label: Text(
+                    smartConnect ? 'Connect Automatically' : 'Open Wi-Fi Settings',
+                  ),
                   style: _filledStyle(colors),
                 ),
               ),
@@ -2477,7 +2745,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     ),
                     const SizedBox(width: AppSpacing.sm),
                     Text(
-                      'Checking device connection…',
+                      _apConnectPending ?? 'Checking device connection…',
                       style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
                     ),
                   ],

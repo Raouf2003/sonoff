@@ -6,20 +6,20 @@ import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// EXPERIMENTAL POC (do not use in production).
+/// DEBUG DIAGNOSTIC screen for the production `stees/ap_connect` channel
+/// (debug-launcher only, never shown to users; shares NOTHING with the real
+/// provisioning flow).
 ///
 /// Questions under test on a real device:
 ///   1. Does WifiNetworkSpecifier connect to the Tasmota soft-AP at all?
 ///   2. When it does, does the OS STILL kick the user into the captive-portal
-///      browser / "Sign in to network" UI? (This is the thing we're testing —
-///      it can only be observed by eye, not asserted in code.)
-///   3. Does an HTTP GET to the Tasmota gateway (192.168.4.1) succeed over the
-///      specifier-bound network?
-///   4. Timings: request → onAvailable, and request → successful GET.
+///      browser / "Sign in to network" UI? (Observed by eye, not asserted.)
+///   3. Does `probeGateway` (GET the Tasmota gateway over the bound network)
+///      succeed?
+///   4. Timings: request → onAvailable, and request → successful probe.
 ///
-/// Android only, API 29+ (native side enforces this; this screen surfaces it).
-/// This screen shares NOTHING with the real provisioning flow and must stay
-/// that way — it exists purely to vet the approach before any rewrite.
+/// The production wizard never probes here — it uses its own 192.168.4.1
+/// reachability check after `connectToAp` succeeds.
 /// ─────────────────────────────────────────────────────────────────────────────
 class ApConnectPocScreen extends StatefulWidget {
   const ApConnectPocScreen({super.key});
@@ -29,7 +29,7 @@ class ApConnectPocScreen extends StatefulWidget {
 }
 
 class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
-  static const MethodChannel _channel = MethodChannel('stees/ap_connect_poc');
+  static const MethodChannel _channel = MethodChannel('stees/ap_connect');
   static const String _defaultGateway = 'http://192.168.4.1/';
 
   final TextEditingController _ssidCtl =
@@ -47,6 +47,8 @@ class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
   String _manualNote = '';
 
   Timer? _pollTimer;
+
+  bool _probeFired = false;
 
   @override
   void initState() {
@@ -100,9 +102,6 @@ class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
 
   Future<void> _startConnect() async {
     final ssid = _ssidCtl.text.trim();
-    final gateway = _gatewayCtl.text.trim().isEmpty
-        ? _defaultGateway
-        : _gatewayCtl.text.trim();
     if (ssid.isEmpty) {
       _manualNote = '';
       _logLine('Aborted: SSID is empty.');
@@ -112,17 +111,15 @@ class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
         'Manual check needed on the phone: was there a system "Connect to '
         'this network?" dialog, and AFTER confirming did any captive-portal / '
         '"Sign in to network" page auto-open?';
-    _logLine('Requested connect to "$ssid" via $gateway');
+    _logLine('Requested connect to "$ssid"');
     setState(() {
       _stage = 'requesting';
       _state = const {};
+      _probeFired = false;
     });
     _startPolling();
     try {
-      await _channel.invokeMethod<void>('connectToAp', {
-        'ssid': ssid,
-        'gatewayUrl': gateway,
-      });
+      await _channel.invokeMethod<void>('connectToAp', {'ssid': ssid});
     } on PlatformException catch (e) {
       _logLine('connectToAp failed (${e.code}): ${e.message}');
       setState(() => _stage = 'failed');
@@ -155,6 +152,18 @@ class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
       }
       if (!mounted) return;
       final stage = st?['stage'] as String? ?? 'unknown';
+      if (stage == 'available' && !_probeFired) {
+        _probeFired = true;
+        _logLine('Bound — firing diagnostic probeGateway(${_gatewayCtl.text.trim().isEmpty ? _defaultGateway : _gatewayCtl.text.trim()})');
+        try {
+          await _channel.invokeMethod<void>('probeGateway', {
+            'gatewayUrl':
+                _gatewayCtl.text.trim().isEmpty ? _defaultGateway : _gatewayCtl.text.trim(),
+          });
+        } catch (e) {
+          _logLine('probeGateway threw: $e');
+        }
+      }
       if (stage != _stage) {
         _stage = stage;
         _logLine(
@@ -182,7 +191,9 @@ class _ApConnectPocScreenState extends State<ApConnectPocScreen> {
       case 'awaiting_system':
         return 'awaiting user confirmation / system choice';
       case 'available':
-        return 'onAvailable — bound, probing gateway';
+        return 'onAvailable — bound; probe fires now';
+      case 'probing':
+        return 'probing gateway over bound network';
       case 'http_ok':
         return 'HTML probe OK';
       case 'http_failed':
