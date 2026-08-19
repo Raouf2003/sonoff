@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
+import 'package:smart_home_app/models/device_type.dart';
 import 'package:smart_home_app/screens/devices_page.dart';
 import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/services/api_service.dart';
@@ -266,6 +267,12 @@ class _TasmotaFake {
   /// `broker.emqx.io` instead of the backend's broker.
   bool stuckOnFactoryBroker = false;
 
+  /// When true, the fake reports the STOCK single-relay module (Sonoff Basic)
+  /// on `Module` read-back even after the wizard wrote `Module 23`. Models the
+  /// bug this feature fixes: a 4-channel device left on Tasmota's default
+  /// single-relay module, which the read-back verify must halt on.
+  bool ignoresModuleWrite = false;
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -309,6 +316,15 @@ class _TasmotaFake {
       if (cmnd == 'MqttPort') return '{"MqttPort":"$_brokerPort"}';
     }
     if (cmnd == 'SSId1') return '{"SSId1":"TestWifi"}';
+    // Module read-back. Firmware 15.x answers the bare `Module` command with the
+    // name map {"23":"Sonoff 4CH Pro"}. `ignoresModuleWrite` models a device
+    // stuck on the stock single-relay module (the bug): the wizard wrote
+    // `Module 23` but the read-back must still be caught as a mismatch.
+    if (cmnd == 'Module') {
+      return ignoresModuleWrite
+          ? '{"Module":{"1":"Sonoff Basic"}}'
+          : '{"Module":{"23":"Sonoff 4CH Pro"}}';
+    }
     // Any write command accepted.
     return '{}';
   }
@@ -432,7 +448,10 @@ Future<void> _tapContinue(WidgetTester tester) async {
 /// Tasmota answers every config command (broker backlog, topic/fulltopic,
 /// WifiTest3, credentials) and the online poll sees the device, so the whole
 /// flow runs to a successful claim without any real hardware.
-Future<void> _fillAndProvision(WidgetTester tester) async {
+Future<void> _fillAndProvision(
+  WidgetTester tester, {
+  DeviceType deviceType = DeviceType.fourRelay,
+}) async {
   // Open the Wi-Fi picker and choose manual entry so the SSID field appears.
   await tester.tap(find.text('Select Wi-Fi network'));
   await tester.pumpAndSettle();
@@ -454,6 +473,12 @@ Future<void> _fillAndProvision(WidgetTester tester) async {
         (w) => w is TextField && w.decoration?.hintText == 'Device Name'),
     'Controller',
   );
+  await tester.pump();
+
+  // Pick the physical relay layout (the wizard must turn the chosen channel
+  // count into the matching Tasmota module, not store metadata only).
+  await tester.ensureVisible(find.text(deviceType.label));
+  await tester.tap(find.text(deviceType.label));
   await tester.pump();
 
   // The Configure form is taller than the 600px test viewport; bring the
@@ -525,6 +550,10 @@ void main() {
           reason: 'WiFi/config commands must actually be sent for a new device');
       expect(tasmota.commands, contains('Backlog MqttHost $_testBrokerHost; '
               'MqttPort $_testBrokerPort'));
+      expect(tasmota.commands, contains('Module 23'),
+          reason: 'picking 4 Relays must pin the device to the Sonoff 4CH Pro '
+              'module (23), not leave it on Tasmota\u2019s stock single-relay '
+              'module');
       expect(
           tasmota.commands,
           contains('Backlog Topic $_canonicalDeviceId; '
@@ -543,6 +572,57 @@ void main() {
       expect(api.mqttCommands, isEmpty,
           reason: 'the fire-and-forget MQTT SetOption128/Restart bootstrap is '
               'gone — Local HTTP enable+verify is the only post-claim gate');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'picking 1 Relay leaves the Tasmota module untouched: no Module command '
+        'is ever written', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester, deviceType: DeviceType.oneRelay);
+
+      expect(read(), isTrue,
+          reason: 'a 1-relay choice still claims (stock Tasmota already has one '
+              'relay, so the module stays as-is)');
+      expect(api.provisionCalls, 1);
+      expect(tasmota.commands.any((c) => c.startsWith('Module ')), isFalse,
+          reason: 'oneRelay maps to NO module write — the factory single-relay '
+              'layout is left alone');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'device that IGNORES the Module 23 write is halted by the read-back '
+        'verify: still on the stock single-relay module, so it is never '
+        'restarted or claimed as a 4-channel device', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi(); // fourRelay (default) -> Module 23
+      final tasmota = _TasmotaFake()..ignoresModuleWrite = true;
+      final read = await _launcher(tester, api, tasmota);
+
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+      await _fillAndProvision(tester);
+
+      expect(tasmota.commands, contains('Module 23'),
+          reason: 'the wizard writes the 4CH Pro module for a 4-relay device');
+      expect(read(), isNot(true),
+          reason: 'a device that never accepted the 4-relay module must not be '
+              'certified as one');
+      expect(api.provisionCalls, 0,
+          reason: 'the wrong-module device is never claimed');
+      expect(find.textContaining('did not accept all settings'), findsWidgets,
+          reason: 'the Module read-back mismatch surfaces the errored step');
+      expect(tasmota.commands.any((c) => c == 'Restart 1'), isFalse,
+          reason: 'the Module verify halt happens BEFORE the final Restart 1');
 
       await _unmount(tester);
     });

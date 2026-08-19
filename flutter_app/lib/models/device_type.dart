@@ -27,4 +27,23 @@ extension DeviceTypeInfo on DeviceType {
         return '4 Relays';
     }
   }
+
+  /// Tasmota built-in module number that maps the physical GPIO layout to
+  /// exactly [channelCount] relays, written during provisioning so a stock
+  /// Tasmota flash (which starts on a single-relay module) actually exposes all
+  /// the relays the user asked for. `null` means "leave the factory module
+  /// untouched" — a stock Tasmota already exposes one relay, but a "4 Relays"
+  /// device must be pinned to the Sonoff 4CH Pro layout (module 23) or Tasmota
+  /// would keep presenting a single channel even though the app stores 4.
+  ///
+  /// Module numbers + `Module`/`Status 0` read-back shapes verified against
+  /// Tasmota 15.5.0 on the Sonoff 4CH Pro.
+  int? get tasmotaModule {
+    switch (this) {
+      case DeviceType.oneRelay:
+        return null;
+      case DeviceType.fourRelay:
+        return 23; // Sonoff 4CH Pro: relays on GPIO12/5/4/15, buttons + LED.
+    }
+  }
 }

@@ -1092,6 +1092,22 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
   }
 
+  // Physical relay layout: pin the Tasmota module to one exposing exactly the
+  // channels the user selected. Stock Tasmota starts on a SINGLE-relay module,
+  // so picking "4 Relays" but never writing the module leaves a 4-channel
+  // device reporting only POWER1 — exactly the bug this fixes. oneRelay writes
+  // nothing (a stock Tasmota already exposes one relay).
+  final module = _deviceType.tasmotaModule;
+  if (module != null) {
+    debugPrint(
+        '[PROVISION] configuring module $module for ${_deviceType.name} '
+        '(${_deviceType.channelCount} relay(s))...');
+    if (!await _applyModule(module)) {
+      return _ConfigOutcome.configFailed;
+    }
+    _trace.debugTrace(ProvisionPhase.config, label: 'MODULE_VERIFIED');
+  }
+
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
   if (!nameOk) return _ConfigOutcome.configFailed;
@@ -1165,6 +1181,59 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     if (!ok) return false;
     await _waitForDeviceOnAp();
     return _verifySetting(key, value);
+  }
+
+  // Writes the physical relay-layout module and verifies the device actually
+  // switched to it. Reboot-prone like _setDeviceSetting (Tasmota restarts after
+  // a module change), so we wait for the device to return on the setup AP too.
+  // The bare `Module` command's read-back is NOT a plain scalar: firmware 15.x
+  // answers {"Module":{"23":"Sonoff 4CH Pro"}} and older builds
+  // {"Module":"23 (Sonoff 4CH Pro)"} — the generic _verifySetting string
+  // compare would always fail, so this accepts any of those shapes.
+  Future<bool> _applyModule(int module) async {
+    final ok = await _sendCommand('Module $module');
+    debugPrint('[PROVISION] Module write response=${ok ? 'OK' : 'FAILED'}');
+    if (!ok) return false;
+    await _waitForDeviceOnAp();
+    return _verifyModule(module);
+  }
+
+  Future<bool> _verifyModule(int module) async {
+    for (var attempt = 1; attempt <= 6; attempt++) {
+      try {
+        final uri = Uri.parse('$_deviceUrl/cm')
+            .replace(queryParameters: {'cmnd': 'Module'});
+        debugPrint('[PROVISION] read-back GET $uri (attempt $attempt)');
+        final res = await _httpGet(uri).timeout(const Duration(seconds: 3));
+        final body = res.body.trim();
+        if (res.statusCode != 200) {
+          debugPrint('[PROVISION] read-back Module HTTP ${res.statusCode}');
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          continue;
+        }
+        final decoded = jsonDecode(body);
+        final got = decoded is Map ? decoded['Module'] : null;
+        final wanted = '$module';
+        final matched = got is int
+            ? got == module
+            : got is String
+                ? got == wanted || got.startsWith('$wanted ')
+                : got is Map
+                    ? got.containsKey(wanted)
+                    : false;
+        if (!matched) {
+          debugPrint('[PROVISION] VERIFY FAILED: Module=$got expected=$wanted');
+          return false;
+        }
+        debugPrint('[PROVISION] verification OK: Module=$got');
+        return true;
+      } catch (e) {
+        debugPrint('[PROVISION] read-back Module exception (attempt $attempt): $e');
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    debugPrint('[PROVISION] VERIFY FAILED: Module unreachable after retries');
+    return false;
   }
 
   // Writes Topic + FullTopic in ONE `Backlog` so the write-triggered reboot
