@@ -106,6 +106,54 @@ bool _confirmsSetOption128Enabled(String body) {
   }
 }
 
+/// Reads the `StatusNET.HTTP_API` field from a Tasmota `Status 5` body, no
+/// matter how Tasmota wraps it (`{"StatusNET":{"HTTP_API":1,...}}` directly, or
+/// `{"Command":{"StatusNET":{...}}}` through the `/cm` web layer). Returns the
+/// numeric value (`0` or `1`) or null when the field is absent / unparseable.
+///
+/// This is the definitive post-enable proof: a device with `SetOption128 1`
+/// applied reports `HTTP_API: 1` in `Status 5`; a device still in the
+/// referer-check (OFF) state reports `0`.
+int? extractHttpApiFromStatus5(String body) {
+  final trimmed = body.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    return _findHttpApiValue(jsonDecode(trimmed));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Depth-first search for the first numeric value under a case-insensitive
+/// `http_api` key (JSON `1`, `0`, or a numeric string).
+int? _findHttpApiValue(Object? node) {
+  if (node is Map) {
+    for (final entry in node.entries) {
+      if (entry.key is String &&
+          (entry.key as String).toLowerCase() == 'http_api') {
+        return _asInt(entry.value);
+      }
+    }
+    for (final v in node.values) {
+      final found = _findHttpApiValue(v);
+      if (found != null) return found;
+    }
+  } else if (node is List) {
+    for (final v in node) {
+      final found = _findHttpApiValue(v);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+
+int? _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value.trim());
+  return null;
+}
+
 /// Normalizes a raw address (from the cache, mDNS, or telemetry) into an
 /// `host[:port]` form safe for `http://$address/...`. Strips any scheme that
 /// slipped in, removes trailing slashes, and brackets IPv6 (encoding a zone
@@ -475,6 +523,35 @@ class LocalDeviceTransport implements DeviceTransport {
       throw failure;
     }
     debugPrint('[LOCAL] HTTP API enabled (SetOption128) at $address');
+  }
+
+  /// Definitive post-enable proof the device now accepts referer-less HTTP API
+  /// commands. Runs a referer'd `Status 5` (safe in BOTH the pre- and post-SO128
+  /// states) and requires that (a) the reported MAC still matches this device
+  /// AND (b) `StatusNET.HTTP_API` is `1`. A device that returned HTTP 200 for
+  /// `SetOption128 1` but still reports `HTTP_API: 0` (or refuses the probe,
+  /// or a foreign MAC) is NOT considered enabled — the caller must fail setup.
+  ///
+  /// Pure probe: any transport failure is reported as `false`, never thrown.
+  Future<bool> verifyHttpApiEnabled() async {
+    try {
+      final body = await _cm('Status%205');
+      if (_isRefererDenied(body)) {
+        debugPrint('[LOCAL] HTTP_API verify REFERERDENIED at $address');
+        return false;
+      }
+      final mac = normalizeMac(extractMacFromStatus5(body));
+      if (mac == null || mac != deviceId) {
+        debugPrint('[LOCAL] HTTP_API verify MAC ${mac ?? 'n/a'} != $deviceId at $address');
+        return false;
+      }
+      final httpApi = extractHttpApiFromStatus5(body);
+      debugPrint('[LOCAL] HTTP_API verify StatusNET.HTTP_API=$httpApi at $address');
+      return httpApi == 1;
+    } on Object catch (e) {
+      debugPrint('[LOCAL] HTTP_API verify failed at $address: $e');
+      return false;
+    }
   }
 
   @override

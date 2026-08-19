@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -427,7 +427,7 @@ class _DevicesPageState extends State<DevicesPage>
         // up as referer-gated (SO128 off) are repaired afterwards (see the
         // repository helper) so an already-registered pre-SO128 box regains
         // local control without being re-claimed.
-        unawaited(_warmUpAndRepair(_devices));
+        unawaited(_warmUpDevices(_devices));
       }
     } catch (_) {
       // Storage unavailable: fall through to the normal cloud path.
@@ -457,7 +457,7 @@ class _DevicesPageState extends State<DevicesPage>
       }
       // Background local discovery warm-up so relay taps use a verified IP
       // instead of waiting on mDNS. Never blocks the UI.
-      unawaited(_warmUpAndRepair(_devices));
+      unawaited(_warmUpDevices(_devices));
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -470,17 +470,16 @@ class _DevicesPageState extends State<DevicesPage>
     }
   }
 
-  /// Background local warm-up followed by the automatic pre-SO128 repair for
-  /// devices whose warm-up classified them referer-gated. Never blocks the UI
-  /// and is safe to re-run (both warm-up and repair are single-flight and the
-  /// repair is at-most-once per device).
-  Future<void> _warmUpAndRepair(List<Map<String, dynamic>> devices) async {
+  /// Background local warm-up for every registered device (cached verified IP
+  /// first, then bounded mDNS). Never blocks the UI and is safe to re-run
+  /// (warm-up is single-flight per device). Old-device SO128 repair was
+  /// deliberately removed: only the claim flow enables local HTTP control.
+  Future<void> _warmUpDevices(List<Map<String, dynamic>> devices) async {
     try {
       await _repository.warmUp(devices);
     } catch (e) {
       debugPrint('[DEVICES] warm-up failed: $e');
     }
-    await _repository.repairGatedDevices(devices);
   }
 
   void _retryLoad() {
@@ -670,7 +669,7 @@ class _DevicesPageState extends State<DevicesPage>
     if (!mounted) return;
     _pollFailures = 0;
     _fetchStatus(silent: true);
-    unawaited(_warmUpAndRepair(_devices));
+    unawaited(_warmUpDevices(_devices));
   }
 
   // On a confirmed cloud outage, immediately re-read status through the normal

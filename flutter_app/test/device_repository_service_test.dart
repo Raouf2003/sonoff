@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,7 +10,8 @@ import 'package:smart_home_app/services/local_device_cache.dart';
 import 'package:smart_home_app/services/local_device_discovery.dart';
 
 const _deviceId = '34987AC30304';
-const _macBody = '{"StatusNET":{"Mac":"34:98:7A:C3:03:04"}}';
+const _macBody = '{"StatusNET":{"Mac":"34:98:7A:C3:03:04","HTTP_API":1}}';
+const _macBodyHttpApi0 = '{"StatusNET":{"Mac":"34:98:7A:C3:03:04","HTTP_API":0}}';
 const _foreignMacBody = '{"StatusNET":{"Mac":"00:11:22:33:44:55"}}';
 const _statusBody = '{"POWER1":"ON","POWER2":"OFF"}';
 
@@ -77,10 +78,17 @@ class _CmFake {
   final Map<String, List<String>> macByAddress;
   bool unreachable = false;
 
-  /// Models a Tasmota with SetOption128 OFF: EVERY referer-less `/cm` command
-  /// answers the referer-denial warning (HTTP 200, no MAC/state), exactly the
-  /// real-device behavior that used to kill the automatic setup. Referer'd
-  /// commands proceed to the normal `responses` table.
+  /// Current POWER1 relay state as `State` would report it. Flips to `ON`
+  /// after a `Power1%20ON` command and back on `Power1%20OFF`, mirroring a real
+  /// device read-back. Used by tests that script the whole post-claim lifecycle
+  /// (setup → status → relay) without per-command `State` bodies.
+  String powerState = 'OFF';
+
+  /// Models a Tasmota with SetOption128 OFF: every referer-less `/cm` command
+  /// answers the referer-denial warning (HTTP 200, no MAC/state) exactly like
+  /// the real device. Once a `SetOption128%201` has been sent (called), the
+  /// fake transitions to the enabled state where referer-less commands work —
+  /// mirroring a real device after the enable takes effect.
   bool preSO128 = false;
   final List<String> called = [];
   final Map<String, String?> refererByCommand = {};
@@ -100,7 +108,9 @@ class _CmFake {
     if (unreachable) {
       throw const DeviceTransportException('unreachable');
     }
-    if (preSO128 && (referer == null || referer.isEmpty)) {
+    if (preSO128 &&
+        (referer == null || referer.isEmpty) &&
+        !called.contains('SetOption128%201')) {
       return '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}';
     }
     if (command == 'Status%205') {
@@ -108,6 +118,19 @@ class _CmFake {
       if (queue != null && queue.isNotEmpty) {
         return queue.removeAt(0);
       }
+    }
+    if (command == 'Power1%20ON') {
+      powerState = 'ON';
+      return '{"POWER1":"ON"}';
+    }
+    if (command == 'Power1%20OFF') {
+      powerState = 'OFF';
+      return '{"POWER1":"OFF"}';
+    }
+    if (command == 'State') {
+      final body = responses['State'];
+      if (body != null) return body;
+      return '{"POWER1":"$powerState"}';
     }
     final body = responses[command];
     if (body == null) {
@@ -1421,55 +1444,64 @@ void main() {
           await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
 
       expect(ok, isTrue);
-      // Every request carried the bootstrap Referer — the identity probe too.
+      // Every request carried the bootstrap Referer — the identity probe too —
+      // EXCEPT the final read-back, which must run on the NORMAL (referer-less)
+      // transport: proof that a real relay command works once SO128 is ON.
       expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
       expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
-      expect(cm.refererByCommand['State'], 'http://192.168.1.33/');
+      expect(cm.refererByCommand['State'], isNull,
+          reason: 'the final read-back is referer-less — the device must now '
+              'accept normal local control');
       expect(locator.candidateStores, 1,
           reason: 'the backend lastIp was seeded as the bootstrap hint');
       expect(locator.lastStored, '192.168.1.33');
       expect(repo.lastSource, DeviceTransportSource.local);
     });
 
-    test('re-claim (no lastIp, no cache): referer-gated mDNS candidate is '
-        'bootstrapped, not discarded', () async {
-      // THE re-claim failure. The device was deleted and re-provisioned (fresh
-      // flash, SO128 OFF), so the provision response carries NO lastIp and the
-      // app cache has nothing either. Discovery only finds the box via mDNS,
-      // whose referer-less Status 5 is denied pre-SO128 — previously classified
-      // as identity MISMATCH and discarded, so local setup silently failed.
-      // Now the gated candidate is kept and drained through the referer'd
-      // enable-first bootstrap.
+    test('verify-failure (StatusNET.HTTP_API still 0) fails the gate, nothing '
+        'persisted', () async {
+      // The device accepted `SetOption128 1` (HTTP 200, positive body) but its
+      // Status 5 still reports HTTP_API 0. This is the exact "success with
+      // HTTP_API:0" bug the hard gate exists to catch: the enable was NOT
+      // proven, so provisioning must fail even though every HTTP call returned
+      // 200.
+      final cm = _CmFake(responses: {
+        'SetOption128%201': '{"SetOption128":"1"}',
+        'Status%205': _macBodyHttpApi0,
+      });
+      final locator = _FakeLocator(candidates: const []);
+      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
+
+      final ok =
+          await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
+
+      expect(ok, isFalse,
+          reason: 'HTTP_API:0 after the enable must fail the hard gate');
+      expect(cm.called, isNot(contains('State')),
+          reason: 'verification stops at the HTTP_API probe — the final '
+              'referer-less read-back is never reached');
+      expect(repo.lastLocalSetupError, isNotNull,
+          reason: 'the wizard needs a precise diagnostic');
+      expect(repo.lastSource, isNull,
+          reason: 'no local transport result was produced');
+    });
+
+    test('SetOption128 denial (referer-check still blocking) fails the gate',
+        () async {
       final cm = _CmFake(responses: {
         'Status%205': _macBody,
-        'SetOption128%201': '{"SetOption128":"1"}',
-        'State': '{"POWER1":"ON"}',
-      })..preSO128 = true;
-      final locator = _FakeLocator(
-        cached: null,
-        candidates: const ['192.168.1.33'],
-      );
+        'SetOption128%201':
+            '{"WARNING":"Referer \'\' denied. Use \'SO128 1\' for HTTP API commands."}',
+      });
+      final locator = _FakeLocator(candidates: ['192.168.1.5']);
       final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
 
       final ok = await repo.enableLocalHttpApi(_deviceId);
 
-      expect(ok, isTrue);
-      // The mDNS probe was referer-less and DENIED (recorded first), then the
-      // gated-recovery bootstrap re-probed with the device-matching Referer —
-      // so the last recorded referer per command is the bootstrap's.
-      expect(cm.called,
-          ['Status%205', 'SetOption128%201', 'Status%205', 'State']);
-      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
-      expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
-      expect(cm.refererByCommand['State'], 'http://192.168.1.33/');
-      expect(locator.mDnsQueries, 1,
-          reason: 'the gated recovery must not re-run mDNS');
-      expect(locator.candidateStores, 0,
-          reason: 'there is no lastIp to seed');
-      expect(locator.discards, 0,
-          reason: 'a referer-gated pre-SO128 box is never a repurposed IP');
-      expect(locator.lastStored, '192.168.1.33');
-      expect(repo.lastSource, DeviceTransportSource.local);
+      expect(ok, isFalse,
+          reason: 'a denied/inconclusive enable fails the hard gate');
+      expect(cm.called, ['Status%205', 'SetOption128%201'],
+          reason: 'verification stops at the denied enable');
     });
 
     test('Case 3: no local IP -> clean skip, claim untouched, no HTTP',
@@ -1518,7 +1550,7 @@ void main() {
       final ok = await repo.enableLocalHttpApi(_deviceId);
 
       expect(ok, isFalse,
-          reason: 'setup failure must NEVER make the claim look failed');
+          reason: 'a denied/inconclusive enable fails the hard gate');
       // The only verified write is the discovery promotion from MAC-verifying
       // the box; the failed setup adds no further verified write and the
       // read-back verification is never reached.
@@ -1541,139 +1573,38 @@ void main() {
     });
   });
 
-  group('repairGatedDevices (auto-SO128 repair for already-registered devices)',
-      () {
-    test('a warm-up referer-gated registered device is repaired via the '
-        'referer\'d enable-first bootstrap', () async {
-      // The real-device regression: a device registered BEFORE the auto-SO128
-      // flow existed is reachable on the LAN but SetOption128 is OFF, so the
-      // referer-less status probe is denied. The claim wizard never runs again
-      // for it (it is already registered), so local control can only be
-      // restored by the Devices page repair after a background warm-up.
-      final cm = _CmFake(responses: {
+  group('post-claim local control (hard gate produced a verified endpoint)', () {
+    test('a verified enable keeps relay taps LOCAL and referer-less', () async {
+      // THE end-state this whole feature exists to guarantee: once the
+      // claim-time enable + verify succeeded, a subsequent Power ON/OFF must be
+      // served by the verified LAN transport WITHOUT any Referer (SO128 is ON)
+      // and without any cloud round-trip.
+final cm = _CmFake(responses: {
         'SetOption128%201': '{"SetOption128":"1"}',
         'Status%205': _macBody,
-        'State': '{"POWER1":"ON"}',
-      })..preSO128 = true;
-      final locator = _FakeLocator(
-        cached: '192.168.1.33',
-        candidates: const [],
-      );
-      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
-
-      // Background warm-up discovers the device; the referer-less probe is
-      // denied and the IP is remembered as referer-gated (never a mismatch).
-      await repo.warmUp(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-
-      // The automatic repair (run unawaited after warm-up on the Devices page)
-      // bootstraps SetOption128 ON with the device-matching Referer and
-      // persists the verified IP.
-      await repo.repairGatedDevices(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-
-      expect(cm.called, containsAll(['Status%205', 'SetOption128%201', 'State']),
-          reason: 'the repair re-probes the gated candidate and enables it');
-      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/');
-      expect(cm.refererByCommand['Status%205'], 'http://192.168.1.33/');
-      expect(locator.lastStored, '192.168.1.33',
-          reason: 'a repaired device gets its verified IP persisted');
-      expect(repo.lastSource, DeviceTransportSource.local);
-    });
-
-    test('at most one repair attempt per device per run even on failure',
-        () async {
-      // The repair FAILS (SetOption128 stays denied), but the at-most-once
-      // fence must prevent a second attempt on a later warm-up / resume.
-      final cm = _CmFake();
-      cm.preSO128 = true;
-      // Every request — including a referer'd enable — is denied, so the
-      // repair bootstrap cannot succeed.
-      final locator = _FakeLocator(
-        cached: '192.168.1.33',
-        candidates: const [],
-      );
-      final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
-
-      await repo.warmUp(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-      expect(cm.called, isNotEmpty,
-          reason: 'warm-up probed the candidate (referer-less) and clarified '
-              'it as referer-gated');
-
-      final enableCallsAfterWarmUp = cm.called
-          .where((c) => c == 'SetOption128%201')
-          .length;
-
-      await repo.repairGatedDevices(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-      // The FIRST repair does attempt the enable (the device is gated).
-      final enableCallsAfterFirst = cm.called
-          .where((c) => c == 'SetOption128%201')
-          .length;
-      expect(enableCallsAfterFirst, greaterThan(enableCallsAfterWarmUp),
-          reason: 'the first repair attempts the (failing) enable');
-
-      // A second repair pass (e.g. another lifecycle resume) must NOT re-run
-      // the enable: the device was already attempted once this run.
-      await repo.repairGatedDevices(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-      expect(
-          cm.called.where((c) => c == 'SetOption128%201').length,
-          enableCallsAfterFirst,
-          reason: 'the at-most-once fence blocks a repeated enable attempt');
-    });
-
-    test('an already-enabled (non-gated) device still gets exactly one '
-        'idempotent repair', () async {
-      // An already-enabled device answers the warm-up probe normally, so it is
-      // verified — not gated. The repair is STILL sent once: because for an
-      // already-registered device the pre-SO128 state is not reliably
-      // observable (cached IP / mDNS are environmental), the idempotent
-      // `SetOption128 1` re-confirm runs for every registered device exactly
-      // once per run and persists the verified IP.
-      final cm = _CmFake(responses: {
-        'Status%205': _macBody,
-        'State': '{"POWER1":"ON"}',
-        'SetOption128%201': '{"SetOption128":"1"}',
       });
-      final locator = _FakeLocator(
-        cached: '192.168.1.33',
-        candidates: const [],
-      );
+      final locator = _FakeLocator(candidates: const []);
       final repo = _repo(_FakeCloudApi(), locator: locator, cm: cm);
 
-      await repo.warmUp(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-      expect(cm.called, contains('Status%205'));
-      // The single repair for this run is the unconditional-repair policy.
-      await repo.repairGatedDevices(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
+      final ok =
+          await repo.enableLocalHttpApi(_deviceId, lastIp: '192.168.1.33');
+      expect(ok, isTrue);
+      expect(repo.hasVerifiedLocalIp(_deviceId), isTrue,
+          reason: 'the verified IP is warm-cached for immediate local taps');
 
-      expect(cm.refererByCommand['SetOption128%201'], 'http://192.168.1.33/',
-          reason: 'the repair re-confirms SO128 with the device-matching '
-              'Referer, harmlessly, even for an already-enabled box');
-      expect(locator.lastStored, '192.168.1.33',
-          reason: 'an already-enabled device also gets its verified IP '
-              'persisted by the single repair');
+      final off = await repo.getStatus(_deviceId);
+      expect(off.online, isTrue);
+      expect(off.channels[1]?.state, 'OFF');
 
-      // A second repair pass must not re-send: at-most-once per device per run.
-      final enableCalls = cm.called
-          .where((c) => c == 'SetOption128%201')
-          .length;
-      await repo.repairGatedDevices(const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ]);
-      expect(
-          cm.called.where((c) => c == 'SetOption128%201').length, enableCalls,
-          reason: 'the at-most-once fence blocks a repeated repair attempt');
+      final on = await repo.control(_deviceId, 1, 'ON', cloudDown: true);
+      expect(on.channels[1]?.state, 'ON',
+          reason: 'Power1 ON is confirmed by the read-back');
+expect(cm.called, contains('Power1%20ON'));
+      expect(cm.refererByCommand['Power1%20ON'], isNull,
+          reason: 'the relay command must be referer-less — the post-enable '
+              'transport is the normal local control transport');
+      expect(cm.refererByCommand['State'], isNull);
+      expect(repo.lastSource, DeviceTransportSource.local);
     });
   });
 }

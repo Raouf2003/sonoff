@@ -14,6 +14,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/device_repository_service.dart';
 import '../services/local_device_cache.dart';
+import '../services/local_ip.dart';
 import '../services/provisioning_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
@@ -35,6 +36,12 @@ enum _TerminalKind {
 
   /// The MAC is already a device in ANOTHER account. Close-only.
   alreadyRegistered,
+
+  /// The claim committed on the backend but the post-claim Local HTTP enable +
+  /// verify failed (device unreachable on the LAN, `SetOption128` not
+  /// confirmed, or `StatusNET.HTTP_API` still `0`). The device was released
+  /// from the account; the user retries the whole wizard. Close-only.
+  localControlFailed,
 }
 
 /// Result of the full Tasmota configuration sweep. [wifiTestFailed] is a
@@ -84,11 +91,14 @@ class ProvisionDeviceScreen extends StatefulWidget {
   @visibleForTesting
   final Future<void> Function(List<Map<String, dynamic>> devices)? testWarmUp;
 
-  /// Test seam: replaces the automatic local HTTP API setup (SetOption128)
-  /// that runs after a successful claim. Widget tests inject it so no real
-  /// mDNS browser or LAN request is created on the claim-success path.
+  /// Test seam: replaces the BLOCKING post-claim Local HTTP enable + verify
+  /// hard gate (SetOption128 + HTTP_API verification). Widget tests inject it so
+  /// no real mDNS browser or LAN request is created on the claim-success path,
+  /// and so both the success and the failure branch can be exercised. Returning
+  /// `false` must make the wizard fail provisioning (terminal diagnostic, no
+  /// success pop).
   @visibleForTesting
-  final Future<void> Function(String deviceId, {String? lastIp})? testLocalSetup;
+  final Future<bool> Function(String deviceId, {String? lastIp})? testLocalSetup;
 
   /// Test seam: injects an [http.Client] that answers the Tasmota setup-AP
   /// HTTP calls (reachability probe, Status 5 MAC read, config commands,
@@ -1322,27 +1332,62 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
       debugPrint('[PROVISION] total provisioning elapsed ${_trace.elapsedMs}ms');
       await _cacheUpsertDevice(deviceId, name);
 
-      // Enable local HTTP API on the device via MQTT so the app can control it
-      // directly on the LAN without internet. This runs fire-and-forget after
-      // registration; we send SetOption128 1 then Restart 1 to apply it.
-      // Fire-and-forget: the provisioning flow doesn't wait for the restart
-      // since the device is already registered and the user will be redirected.
-      unawaited(_api.sendMqttCommand(deviceId, 'SetOption128 1'));
-      unawaited(_api.sendMqttCommand(deviceId, 'Restart 1'));
+      // A brand-new claim response carries NO lastIp: the backend learns the
+      // LAN IP only from the device's first tele/STATE over MQTT (it is not part
+      // of the claim row). The device just restarted onto home Wi-Fi and is
+      // already connected to the broker (the seen/poll state confirmed it), so
+      // its STATE — with IPAddress — lands within seconds. Poll the device list
+      // briefly so the hard gate below is driven by a real IP instead of failing
+      // on a null hint.
+      String? lastIp = claimed['lastIp'] as String?;
+      if (!isValidLocalIp(lastIp)) {
+        lastIp = null;
+        traceLog('CLAIM', 'LAST_IP_WAIT total=${_trace.elapsedMs}ms');
+        for (var i = 0; i < _lastIpWaitTries; i++) {
+          await Future<void>.delayed(_lastIpWaitInterval);
+          lastIp = await _awaitClaimLastIp(deviceId);
+          if (isValidLocalIp(lastIp)) break;
+        }
+        traceLog('CLAIM', 'LAST_IP_WAIT_END ip=$lastIp total=${_trace.elapsedMs}ms');
+      }
 
-      // Automatic LOCAL HTTP API setup: when the phone can already reach the
-      // device on the LAN, enable SetOption128 1 through the local transport
-      // (device-matching Referer bootstrap) and verify it, so local control
-      // works immediately — no Tasmota console, no restart. The claim
-      // response's backend-learned lastIp is passed in as an UNVERIFIED IP
-      // hint: the existing discovery ladder identity-verifies it (`Status 5`)
-      // before use, so the setup no longer depends solely on mDNS. Strictly
-      // best-effort and independent of the (already successful) cloud claim: a
-      // LAN miss just leaves cloud control in charge, and later discovery can
-      // still establish local control.
-      unawaited(
-        _setupLocalControl(deviceId, lastIp: claimed['lastIp'] as String?),
-      );
+      // POST-CLAIM HARD GATE: BLOCKING Local HTTP enable + verify. The claim is
+      // already committed on the backend, but the flow only counts as SUCCESS
+      // (pops true) once the device itself confirms its HTTP API is enabled:
+      // referer'd `SetOption128 1` positively confirmed, then
+      // `StatusNET.HTTP_API == 1`, then a real referer-less State round-trip,
+      // driven by the backend-learned lastIp from the claim response.
+      //
+      // The old fire-and-forget MQTT `SetOption128 1` + `Restart 1` bootstrap is
+      // GONE: it was never verified and `Restart 1` silently reset SO128, which
+      // is exactly how provisioning used to "succeed" while `HTTP_API: 0`.
+      //
+      // On failure the device is released from the account (best-effort) and
+      // the wizard ends on a precise diagnostic — it never pops success.
+      traceLog('CLAIM', 'LOCAL_HTTP_SETUP_START total=${_trace.elapsedMs}ms');
+      final localOk = await _setupLocalControl(deviceId, lastIp: lastIp);
+      if (!localOk) {
+        debugPrint('[PROVISION] LOCAL_HTTP_SETUP_FAILED deviceId=$deviceId');
+        // Best-effort release so the account is not left with a device whose
+        // provisioning was reported as failed; the user simply re-runs the
+        // wizard. Bounded and silent on failure.
+        try {
+          await _api.unclaimDevice(deviceId).timeout(const Duration(seconds: 3));
+        } catch (_) {}
+        _claimed = false;
+        if (!mounted) return;
+        traceLog('CLAIM',
+            'LOCAL_HTTP_TERMINAL total=${_trace.elapsedMs}ms deviceId=$deviceId');
+        _enterTerminalState(
+          _TerminalKind.localControlFailed,
+          _repository.lastLocalSetupError ??
+              'Local HTTP control could not be enabled and verified on the '
+              'device. Make sure this phone is on the same Wi-Fi as the device, '
+              'then try again.',
+        );
+        return;
+      }
+      traceLog('CLAIM', 'LOCAL_HTTP_VERIFIED total=${_trace.elapsedMs}ms');
 
       // Background local discovery warm-up: bounded, single-flight, never
       // blocks the flow or affects the provisioning outcome.
@@ -1596,6 +1641,33 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     }
   }
 
+  // How long the post-claim hard gate waits for the backend to learn the
+  // device's LAN IP from its first MQTT tele/STATE before running the Local
+  // HTTP enable+verify. The device is already confirmed on the broker at this
+  // point, so STATE (with IPAddress) normally arrives within a second or two;
+  // these bounds just keep a stuck device from pinning the wizard.
+  static const Duration _lastIpWaitInterval = Duration(seconds: 2);
+  static const int _lastIpWaitTries = 8;
+
+  // Reads the backend-learned `lastIp` for the just-claimed device from the
+  // device list (the claim response itself never carries it). `null` when the
+  // record is not there yet or the address is still the transient `0.0.0.0`.
+  Future<String?> _awaitClaimLastIp(String deviceId) async {
+    try {
+      final devices = await _api.getDevices();
+      for (final raw in devices) {
+        if (raw is Map && raw['deviceId'] == deviceId) {
+          final ip = raw['lastIp'];
+          if (ip is String && isValidLocalIp(ip)) return ip;
+          return null;
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('[PROVISION] lastIp read failed: $e');
+    }
+    return null;
+  }
+
   // Background discovery warm-up after a successful claim so the first relay
   // tap on the devices page uses a verified LAN IP. Test seam: widget tests
   // replace this with a no-op so no real mDNS browser/timer is created.
@@ -1608,24 +1680,30 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     await _repository.warmUp([device]);
   }
 
-  // Automatic local HTTP API preparation (SetOption128 1) after a successful
-  // claim, so the device can be controlled on the LAN without a manual console
-  // command. Test seam: provision widget tests replace it so no real mDNS
-  // browser / LAN request is created on the claim-success path. Never affects
-  // the claim outcome — a LAN miss or failure just leaves cloud control in
-  // charge (later discovery can still establish local control).
-  Future<void> _setupLocalControl(String deviceId, {String? lastIp}) async {
+  // BLOCKING local HTTP enable + verify (SetOption128 1 + HTTP_API + real
+  // referer-less round-trip) after a successful claim. This is the wizard's
+  // post-claim hard gate: provisioning only pops success when it returns true.
+  // Test seam: provision widget tests inject it so no real mDNS browser / LAN
+  // request is created on the claim-success path, and so both the success and
+  // the failure branch can be driven deterministically.
+  Future<bool> _setupLocalControl(String deviceId, {String? lastIp}) async {
     debugPrint('[local-setup] claim success deviceId=$deviceId lastIp=$lastIp');
     final hook = widget.testLocalSetup;
     if (hook != null) {
-      await hook(deviceId, lastIp: lastIp);
-      return;
+      return hook(deviceId, lastIp: lastIp);
     }
     debugPrint('[local-setup] setup started');
     try {
-      await _repository.enableLocalHttpApi(deviceId, lastIp: lastIp);
+      final ok = await _repository.enableLocalHttpApi(deviceId, lastIp: lastIp);
+      if (!ok) {
+        debugPrint(
+            '[local-setup] failed: '
+            '${_repository.lastLocalSetupError ?? 'no reachable LAN endpoint'}');
+      }
+      return ok;
     } on Object catch (e) {
       debugPrint('[local-setup] failed: $e');
+      return false;
     }
   }
 
@@ -2199,11 +2277,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           const SizedBox(height: AppSpacing.lg),
           if (_terminalKind == _TerminalKind.alreadyAdded ||
               _terminalKind == _TerminalKind.alreadyRegistered ||
+              _terminalKind == _TerminalKind.localControlFailed ||
               _terminalKind == _TerminalKind.identityUnreadable) ...[
             // Closed-loop failure: nothing to reconfigure and no point waiting.
             // A duplicate identity cannot become addable - the existing device
-            // must be deleted from the Devices page first - and an unreadable
-            // identity has no recovery path. Close is the only action.
+            // must be deleted from the Devices page first - an unreadable
+            // identity has no recovery path - and a local-control failure has
+            // already released the device (re-run the wizard). Close is the
+            // only action.
           ] else ...[
             SizedBox(
               width: double.infinity,
@@ -2334,6 +2415,8 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
         return 'Device Already Registered';
       case _TerminalKind.identityUnreadable:
         return 'Device identity not readable';
+      case _TerminalKind.localControlFailed:
+        return 'Local control not ready';
       case _TerminalKind.generic:
         return 'Device is not connected yet';
     }

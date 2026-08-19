@@ -96,18 +96,14 @@ class DeviceRepositoryService {
   /// duplicate `Status 5` on operations that immediately follow that probe.
   final Map<String, DateTime> _identityTrustedAt = {};
 
-  /// Candidate IPs (keyed by deviceId) that answered the discovery probe with
-  /// Tasmota's referer-denial warning: reachable but SetOption128 OFF. These
-  /// are the device pre-SO128 — never discarded as a mismatch — and the
-  /// claim-time setup drains them through the referer'd enable-first bootstrap
-  /// when no lastIp hint exists (e.g. re-claim / re-flash).
-  final Map<String, Set<String>> _gatedCandidates = {};
+  /// Last reason the claim-time local HTTP setup failed (for the wizard's
+  /// terminal diagnostic). `null` before the first setup attempt or after a
+  /// success.
+  String? _lastSetupError;
 
-  /// Devices already handed to the automatic pre-SO128 repair in this
-  /// repository lifetime. Guards the at-most-once policy so a permanently
-  /// referer-gated device is never hammered with `SetOption128 1` on every
-  /// warm-up / lifecycle resume.
-  final Set<String> _so128RepairAttempted = {};
+  /// Latest `enableLocalHttpApi` failure reason to surface on the wizard's
+  /// diagnostic screen. `null` when setup never ran or last succeeded.
+  String? get lastLocalSetupError => _lastSetupError;
 
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
@@ -138,56 +134,12 @@ class DeviceRepositoryService {
     }
   }
 
-  /// Automatic local HTTP API repair for ALREADY-REGISTERED devices whose
-  /// discovery classified them as referer-gated (reachable, but SetOption128
-  /// OFF). The claim wizard's `enableLocalHttpApi` only runs at claim time, so
-  /// a device that was registered BEFORE the auto-SO128 flow existed (or whose
-  /// enable later failed) has no way back to local control: the Devices page
-  /// would keep probing it referer-less and Tasmota keeps answering
-  /// `Referer '' denied`. Running after a [warmUp] pass repairs exactly those
-  /// devices through the same referer'd enable-first bootstrap — at most once
-  /// per repository lifetime per device, best-effort, and never blocking the
-  /// UI (the caller runs it unawaited after warm-up).
-  ///
-  /// The bootstrap is run for EVERY registered device (not only the ones
-  /// warm-up classified as referer-gated), because for an ALREADY-registered
-  /// device the pre-SO128 state is not reliably observable: whether the phone
-  /// has a seeded cached IP or mDNS enumerates correctly are both environmental,
-  /// so a warm-up that finds nothing would wrongly skip the device. Sending the
-  /// idempotent `SetOption128 1` to an already-enabled device is harmless (it
-  /// merely re-confirms) and [enableLocalHttpApi] also persists the verified
-  /// IP, so every registered device benefits from exactly one repair attempt
-  /// per app run.
-  Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {
-    for (final d in devices) {
-      final id = d['deviceId'];
-      if (id is! String || id.isEmpty) continue;
-      if (!_so128RepairAttempted.add(id)) continue;
-      _logSetup('repairing registered device $id (pre-SO128 bootstrap)');
-      try {
-        // No lastIp hint: the bootstrap ladder (cached candidate first, then
-        // the gated candidates discovered during warm-up) drives the
-        // referer'd enable-first sequence. Exactly the claim-time recovery.
-        await enableLocalHttpApi(id).timeout(
-          // Warm-up discovery already consumed most of the mDNS budget; the
-          // enable-first bootstrap is a couple of referer'd LAN round trips.
-          const Duration(seconds: 10),
-        );
-      } on Object catch (e) {
-        _logSetup('repair failed for $id (${_describe(e)})');
-      }
-    }
-  }
-
-  /// Best-effort automatic local HTTP API preparation, run immediately after a
-  /// successful cloud claim so the app can control the device on the LAN
-  /// WITHOUT a manual Tasmota console command (`SetOption128 1`).
-  ///
-  /// The cloud claim and this local setup are DIFFERENT concerns: the caller
-  /// has already committed the claim and this NEVER rolls it back. Any failure
-  /// (device not on the phone's LAN, unreachable, timeout, referer-denied)
-  /// returns `false` and cloud control keeps working — the normal warm-up path
-  /// can establish local control later.
+  /// BLOCKING local HTTP API enable + verify, the claim wizard's hard gate:
+  /// run immediately after a successful cloud claim for a FRESH device so local
+  /// `/cm` control works out of the box, and only returns `true` once the
+  /// enable is positively confirmed AND `StatusNET.HTTP_API` reports `1` AND a
+  /// real (referer-less) relay command round-trips. The caller fails
+  /// provisioning when this returns `false`.
   ///
   /// [lastIp] is the LAN IP the CLAIM RESPONSE carried, learned by the backend
   /// from MQTT telemetry. When present, the setup uses it as a DIRECT bootstrap
@@ -201,6 +153,7 @@ class DeviceRepositoryService {
   /// locator mechanism so the devices page (a separate repository instance)
   /// uses it locally on the next tap.
   Future<bool> enableLocalHttpApi(String deviceId, {String? lastIp}) async {
+    _lastSetupError = null;
     _logSetup('setup started');
 
     String? cached;
@@ -226,6 +179,7 @@ class DeviceRepositoryService {
     // enable.
     if (lastIp != null && lastIp.isNotEmpty) {
       if (!isValidLocalIp(lastIp)) {
+        _lastSetupError = 'The backend-reported LAN IP $lastIp was invalid.';
         _logSetup('backend lastIp rejected (invalid): $lastIp');
       } else {
         _logSetup('backend lastIp accepted');
@@ -242,6 +196,10 @@ class DeviceRepositoryService {
           bootstrap: true,
         );
         if (await _directBootstrap(transport, deviceId)) return true;
+        // The direct bootstrap failed for a concrete reason; record it so the
+        // wizard's diagnostic is precise even if a later ladder step finally
+        // succeeds (the string is just the most recent failure).
+        _logSetup('direct lastIp bootstrap failed');
       }
     }
 
@@ -260,16 +218,16 @@ class DeviceRepositoryService {
 
     // LAST RESORT: the normal discovery ladder (warm cache / verified cache /
     // mDNS). Its referer-less identity probe only works once SO128 is already
-    // ON, so this covers the idempotent re-run on an enabled device. During the
-    // probe, any candidate that answers with the referer-denial warning (a
-    // reachable pre-SO128 box) is remembered as a gated candidate instead of
-    // being discarded as a mismatch.
+    // ON, so this covers the idempotent re-run on an enabled device.
     LocalDeviceTransport? local;
     try {
       // `urgent` keeps the mDNS window short (2s) so the candidate probe + a
       // possible mDNS sweep stay inside kLocalBudget.
       local = await _findLocal(deviceId, urgent: true).timeout(kLocalBudget);
     } on Object catch (e) {
+      _lastSetupError =
+          'Local discovery failed (${_describe(e)}). Make sure this phone is '
+          'on the same Wi-Fi as the device.';
       _logSetup('discovery lookup failed: ${_describe(e)}');
       return false;
     }
@@ -278,80 +236,75 @@ class DeviceRepositoryService {
       return _directBootstrap(local, deviceId);
     }
 
-    // GATED-CANDIDATE RECOVERY: `_findLocal` found no identity-verifiable
-    // endpoint, but it may have probed reachable devices whose referer-less
-    // `Status 5` was denied because SetOption128 is OFF. Those are OUR device
-    // pre-SO128 (re-claim / re-flash / fresh boot where no lastIp hint exists).
-    // Run the same referer'd enable-first bootstrap against each — no lastIp,
-    // no backend, no claim-flow change.
-    final gated = _gatedCandidates[deviceId];
-    if (gated != null && gated.isNotEmpty) {
-      _logSetup('gated recovery: ${gated.join(', ')}');
-      for (final ip in List<String>.of(gated)) {
-        _logSetup('selected IP: $ip (referer-gated recovery)');
-        final transport = LocalDeviceTransport(
-          address: ip,
-          deviceId: deviceId,
-          fetcher: _fetch,
-          bootstrap: true,
-        );
-        if (await _directBootstrap(transport, deviceId)) return true;
-        // Failed to enable/verify this candidate — drop just it and move on.
-        gated.remove(ip);
-      }
-    }
+    _lastSetupError ??=
+        'No local HTTP endpoint was reachable for the device. Make sure this '
+        'phone is on the same Wi-Fi as the device, then try again.';
     _logSetup('failed: no reachable LAN endpoint');
     return false;
   }
 
   /// The direct claim-time bootstrap sequence for a KNOWN candidate IP:
   /// referer'd `SetOption128 1` FIRST (no identity discovery, no referer-less
-  /// request), then identity/state verification, then persisting the verified
-  /// address. Any failure returns `false` and never touches the claim.
+  /// request), then the definitive `StatusNET.HTTP_API` enable-proof, then a
+  /// real referer-less read-back and persistence. Any failure returns `false`
+  /// and records a precise reason for the wizard's diagnostic.
   Future<bool> _directBootstrap(LocalDeviceTransport transport, String deviceId) async {
     _logSetup('before enableHttpApi');
     try {
       await transport.enableHttpApi();
       _logSetup('enableHttpApi result: SetOption128 accepted');
     } on Object catch (e) {
+      _lastSetupError =
+          'The device rejected or did not confirm the SetOption128 enable '
+          '(${_describe(e)}).';
       _logSetup('enableHttpApi result: ${_describe(e)}');
       return false;
     }
-    _logSetup('before identity verification');
-    final check = await transport.checkIdentity();
-    _logSetup('after identity verification: $check');
-    if (check != LocalIdentityCheck.verified) {
-      _logSetup('identity verification failed ($check) — not persisting');
+    // Definitive proof the enable actually took: the device must now report
+    // `StatusNET.HTTP_API == 1` (referer'd probe, MAC-verified).
+    _logSetup('before HTTP_API verification');
+    if (!await transport.verifyHttpApiEnabled()) {
+      _lastSetupError =
+          'The device did not confirm its HTTP API is enabled '
+          '(StatusNET.HTTP_API != 1). Restart the wizard or check the device '
+          'console.';
+      _logSetup('HTTP_API verification failed');
       return false;
     }
+    _logSetup('after HTTP_API verification: HTTP_API=1');
     _identityTrustedAt[deviceId] = DateTime.now();
     return _verifyAndPersist(transport, deviceId);
   }
 
   /// Read-only state verification + persistence of the now-verified IP. The
-  /// warm cache deliberately stores a NORMAL (non-bootstrap) transport so the
-  /// subsequent relay/status path stays referer-less.
+  /// final read deliberately runs on a NORMAL (non-bootstrap, referer-less)
+  /// transport — the exact transport the app uses for every relay tap — proving
+  /// a real command round-trips once SO128 is ON. The warm cache stores that
+  /// same normal transport so the subsequent relay/status path stays referer-less.
   Future<bool> _verifyAndPersist(LocalDeviceTransport transport, String deviceId) async {
     try {
-      final status = await transport.getStatus(
-        deviceId,
-        identityVerified: _canSkipIdentityVerify(deviceId),
-      );
-      _logSetup('final verification result: OK');
-      await _locator
-          .storeVerifiedAddress(deviceId, transport.address)
-          .timeout(const Duration(seconds: 2));
-      _warmCache[deviceId] = LocalDeviceTransport(
+      final normal = LocalDeviceTransport(
         address: transport.address,
         deviceId: deviceId,
         fetcher: _fetch,
       );
+      final status = await normal.getStatus(
+        deviceId,
+        identityVerified: _canSkipIdentityVerify(deviceId),
+      );
+      _logSetup('final verification result: OK (referer-less State read)');
+      await _locator
+          .storeVerifiedAddress(deviceId, transport.address)
+          .timeout(const Duration(seconds: 2));
+      _warmCache[deviceId] = normal;
       _warmVerifiedAt[deviceId] = DateTime.now();
       _lastSource = DeviceTransportSource.local;
       _maybeLearnIp(deviceId, transport.address, status);
       _logSetup('persisted verified IP: ${transport.address}');
       return true;
     } on Object catch (e) {
+      _lastSetupError =
+          'The final referer-less state check failed (${_describe(e)}).';
       _logSetup('final verification failed: ${_describe(e)}');
       return false;
     }
@@ -968,13 +921,11 @@ class DeviceRepositoryService {
             break;
           case LocalIdentityCheck.refererGated:
             // The box IS reachable but SetOption128 is OFF, so the referer-less
-            // probe could not confirm the MAC. That is our device pre-SO128,
-            // not a repurposed IP — keep it (as a hint, like unavailable) and
-            // remember it so the claim-time setup can run the referer'd
-            // bootstrap against it.
+            // probe could not confirm the MAC. Out-of-scope old devices are
+            // never repaired: keep the address as a hint only (like unavailable)
+            // and let the claim-time setup handle pre-SO128 boxes.
             _tl(opId, deviceId, channel, 'Cached IP probe result: gated');
-            _log('cached IP referer-gated (SetOption128 OFF) — kept for bootstrap');
-            _gatedCandidates.putIfAbsent(deviceId, () => <String>{}).add(cached);
+            _log('cached IP referer-gated (SetOption128 OFF) — kept as hint');
             break;
           case LocalIdentityCheck.unavailable:
             if (isVerified) {
@@ -1020,11 +971,10 @@ class DeviceRepositoryService {
           _log('mDNS candidate unreachable — skipped');
           break;
         case LocalIdentityCheck.refererGated:
-          // Pre-SO128 box: reachable but referer-less probes are denied. Keep
-          // the IP so the claim-time setup can bootstrap it (referer'd
-          // SetOption128), never a "mismatch".
-          _log('mDNS candidate referer-gated (SetOption128 OFF) — kept for bootstrap');
-          _gatedCandidates.putIfAbsent(deviceId, () => <String>{}).add(ip);
+          // Pre-SO128 box: reachable but referer-less probes are denied. Not a
+          // "mismatch", but old devices are out of scope — no repair, no
+          // bootstrap outside the claim flow.
+          _log('mDNS candidate referer-gated (SetOption128 OFF) — kept as hint');
           break;
       }
     }

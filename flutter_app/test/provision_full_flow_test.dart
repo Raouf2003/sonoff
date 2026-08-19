@@ -62,8 +62,9 @@ void _mockWifiChannels(WidgetTester tester) {
 
 /// A controllable [ApiService] that models the backend over the whole flow:
 /// duplicate pre-flight (`mine` / `notFound`), the online device-seen poll, the
-/// authoritative provision call, and the fire-and-forget MQTT commands that run
-/// after a successful claim (stubbed so no real broker is contacted).
+/// authoritative provision call, and the post-claim lastIp learning (the claim
+/// response itself never carries `lastIp` for a brand-new device — the wizard
+/// must re-read the device list so the Local HTTP gate has a real IP).
 class _FlowApi extends ApiService {
   DeviceDuplicateStatus preflightStatus = DeviceDuplicateStatus.notFound;
   int preflightCalls = 0;
@@ -74,6 +75,20 @@ class _FlowApi extends ApiService {
 
   int provisionCalls = 0;
   final List<String> provisionedDeviceIds = [];
+
+  /// `lastIp` carried by the claim response. `null` models a brand-new device
+  /// (the backend only learns the IP from the first tele/STATE), which forces
+  /// the wizard's wait-for-MQTT-IP step.
+  String? claimLastIp = '192.168.1.10';
+
+  /// How many `getDevices()` calls return WITHOUT a usable lastIp before the
+  /// device's record "catches up" with its MQTT telemetry. Starts at 0: the
+  /// device is already known by the first read.
+  int devicesCallsWithoutLastIpAfter = 0;
+  int getDevicesCalls = 0;
+
+  int unclaimCalls = 0;
+  final List<String> mqttCommands = [];
 
   @override
   Future<DeviceDuplicateStatus> preflightDeviceCheck(String deviceId) async {
@@ -96,12 +111,34 @@ class _FlowApi extends ApiService {
   }) async {
     provisionCalls++;
     provisionedDeviceIds.add(deviceId);
-    return <String, dynamic>{'ok': true, 'lastIp': '192.168.1.10'};
+    return <String, dynamic>{
+      'ok': true,
+      if (claimLastIp != null) 'lastIp': claimLastIp,
+    };
+  }
+
+  @override
+  Future<List<dynamic>> getDevices() async {
+    getDevicesCalls++;
+    final armed = getDevicesCalls > devicesCallsWithoutLastIpAfter;
+    return <dynamic>[
+      <String, dynamic>{
+        'deviceId': _canonicalDeviceId,
+        'name': 'Controller',
+        'channels': 4,
+        if (armed) 'lastIp': '192.168.1.10',
+      },
+    ];
   }
 
   @override
   Future<void> sendMqttCommand(String deviceId, String command) async {
-    // Fire-and-forget after a successful claim; never contact a real broker.
+    mqttCommands.add(command);
+  }
+
+  @override
+  Future<void> unclaimDevice(String deviceId) async {
+    unclaimCalls++;
   }
 }
 
@@ -192,8 +229,9 @@ class _TasmotaFake {
 Future<bool? Function()> _launcher(
   WidgetTester tester,
   _FlowApi api,
-  _TasmotaFake tasmota,
-) async {
+  _TasmotaFake tasmota, {
+  Future<bool> Function(String deviceId, {String? lastIp})? localSetup,
+}) async {
   _mockWifiChannels(tester);
   bool? result;
   await tester.pumpWidget(
@@ -210,7 +248,8 @@ Future<bool? Function()> _launcher(
                       testApi: api,
                       testHttpClient: tasmota.client,
                       testWarmUp: (_) async {},
-                      testLocalSetup: (_, {lastIp}) async {},
+                      testLocalSetup:
+                          localSetup ?? (_, {lastIp}) async => true,
                     ),
                   ),
                 );
@@ -316,6 +355,63 @@ void main() {
       expect(tasmota.commands, contains('WifiTest'));
       expect(tasmota.commands, contains('SSId1 TestWifi'));
       expect(tasmota.commands, contains('Restart 1'));
+      expect(api.mqttCommands, isEmpty,
+          reason: 'the fire-and-forget MQTT SetOption128/Restart bootstrap is '
+              'gone — Local HTTP enable+verify is the only post-claim gate');
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'local HTTP verify failure fails provisioning: terminal stop, no '
+        'success pop, device released', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: (_, {lastIp}) async => false);
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      // The claim committed, but provisioning must NOT pop success: the wizard
+      // freezes on the local-control diagnostic instead.
+      expect(api.provisionCalls, 1,
+          reason: 'the claim happened (post-claim gate)');
+      expect(read(), isNull,
+          reason: 'a verify failure must never pop `true`');
+      expect(api.unclaimCalls, 1,
+          reason: 'the device is released best-effort so the user can re-run '
+              'the wizard');
+      expect(find.text('Local control not ready'), findsOneWidget);
+      expect(find.textContaining('same Wi-Fi as the device'), findsOneWidget);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'brand-new claim (lastIp null) learns the IP from the device list '
+        'before the hard gate runs', (tester) async {
+      _mockSecureStorage(tester);
+      final api = _FlowApi()
+        ..claimLastIp = null // brand-new device: claim carries no IP
+        ..devicesCallsWithoutLastIpAfter = 2; // tele/STATE lands on the 3rd read
+      final tasmota = _TasmotaFake();
+      String? setupLastIp;
+      final read = await _launcher(tester, api, tasmota,
+          localSetup: (deviceId, {lastIp}) async {
+        setupLastIp = lastIp;
+        return true;
+      });
+
+      await _tapContinue(tester);
+      await _fillAndProvision(tester);
+
+      expect(read(), isTrue, reason: 'the gate still succeeds once an IP exists');
+      expect(api.getDevicesCalls, greaterThanOrEqualTo(3),
+          reason: 'the wizard waits for the MQTT-learned IP before enabling');
+      expect(setupLastIp, '192.168.1.10',
+          reason: 'the hard gate is driven by the real learned LAN IP');
 
       await _unmount(tester);
     });
@@ -346,6 +442,8 @@ void main() {
       expect(api.provisionCalls, 0);
       expect(api.preflightCalls, 1,
           reason: 'a single gate at AP detection certifies the duplicate');
+      expect(api.unclaimCalls, 0,
+          reason: 'a duplicate is never claimed, so never unclaimed');
       // No re-claim path exists in the wizard.
       expect(find.text('Remove Device'), findsNothing);
       expect(find.text('Delete'), findsNothing);
@@ -526,9 +624,6 @@ final _fakeRepo = _FakeRepo();
 class _FakeRepo extends DeviceRepositoryService {
   @override
   Future<void> warmUp(List<Map<String, dynamic>> devices) async {}
-
-  @override
-  Future<void> repairGatedDevices(List<Map<String, dynamic>> devices) async {}
 
   @override
   Future<List<Map<String, dynamic>>> getDevices() async => const [

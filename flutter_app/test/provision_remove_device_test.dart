@@ -73,7 +73,7 @@ Future<void> _pumpWizard(
                     testDeviceId: '34987AC30304',
                     testFailureCode: code,
                     testWarmUp: (_) async {},
-                    testLocalSetup: (_, {lastIp}) async {},
+                    testLocalSetup: (_, {lastIp}) async => true,
                   ),
                 ),
               ),
