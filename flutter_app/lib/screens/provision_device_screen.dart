@@ -59,7 +59,8 @@ class ProvisionDeviceScreen extends StatefulWidget {
         testFailureCode = null,
         testWarmUp = null,
         testLocalSetup = null,
-        testHttpClient = null;
+        testHttpClient = null,
+        testIsDeviceRegistered = null;
 
   /// Test-only constructor: seeds the wizard directly into a terminal (duplicate)
   /// failure state and injects an [ApiService] so widget tests can exercise the
@@ -75,6 +76,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
     this.testWarmUp,
     this.testLocalSetup,
     this.testHttpClient,
+    this.testIsDeviceRegistered,
   });
 
   @visibleForTesting
@@ -107,6 +109,15 @@ class ProvisionDeviceScreen extends StatefulWidget {
   /// [http.get]).
   @visibleForTesting
   final http.Client? testHttpClient;
+
+  /// Test seam: replaces the AUTHORITATIVE provisioning-boundary duplicate
+  /// check (Gate B), which in production consults the repository's
+  /// registered-device authority (`DeviceRepositoryService.isDeviceRegistered`:
+  /// cloud list + persisted local mirror). Widget tests inject a controlled
+  /// verdict so no real network / LocalDeviceCache is touched while the
+  /// boundary-gate-before-any-config-command behavior is exercised.
+  @visibleForTesting
+  final Future<bool> Function(String canonical)? testIsDeviceRegistered;
 
   @override
   State<ProvisionDeviceScreen> createState() => _ProvisionDeviceScreenState();
@@ -253,13 +264,17 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   // The user's already-registered device MACs, snapshotted ONCE at wizard start
   // (while the phone is on its home network and the backend is reachable — the
-  // Tasmota setup AP has no internet). The earliest duplicate gate compares the
-  // MAC read off the setup AP against this set BEFORE any provisioning command,
-  // so a device the user already owns is stopped fully offline. Deliberately
-  // never refreshed mid-wizard: a device claimed after this snapshot is the
-  // backend pre-flight + provision check's job (the unchanged authoritative
-  // net), so an entry here NEVER blocks a genuine re-claim after deletion.
+  // Tasmota setup AP has no internet). Gate A: the fastest duplicate check,
+  // fully offline, runs the moment the canonical MAC is first derived. Deliber-
+  // ately never refreshed mid-wizard, so it must NOT be the only protection:
+  // Gate B (see _stopIfRegisteredAtBoundary) re-verifies at the authoritative
+  // provisioning boundary against the repository's registered-device authority.
   ClaimDeviceSnapshot _claimedMacsAtStart = ClaimDeviceSnapshot.empty();
+
+  /// In-flight registration of the once-at-start snapshot load. Gate B awaits
+  /// it (it is normally already complete) so a fast reopen cannot race the
+  /// snapshot and accidentally skip Gate A.
+  Future<void>? _claimedMacsAtStartLoad;
 
   String get _phaseLabel {
     switch (_step) {
@@ -305,7 +320,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     // is. Best-effort: any failure leaves the empty snapshot and the flow falls
     // back to the existing backend duplicate gates (also authoritative).
     if (code == null) {
-      unawaited(_loadClaimedMacsAtStart());
+      _claimedMacsAtStartLoad = _loadClaimedMacsAtStart();
     }
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
@@ -732,17 +747,24 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _issuedDeviceId = canonical;
     debugPrint('[PROVISION] device identity (canonical MAC): $canonical');
 
-    // HARD duplicate gate BEFORE any provisioning operation: even if the MAC
-    // read failed at AP-detection time (so the Configure step was entered
-    // without a check), the identity is guaranteed right now. If the backend
-    // confirms it already exists, the wizard freezes into the terminal
-    // "already added / already registered" state and NEVER sends a single
-    // Tasmota configuration command - no WiFi provisioning, no config changes,
-    // no re-claim. Same best-effort semantics as the AP-detection gate: an
-    // unreachable backend (no internet while on the Tasmota AP) silently
-    // continues, and the backend's authoritative check in
-    // POST /api/devices/provision remains the final backstop.
+    // Gate A — hard duplicate check BEFORE any provisioning operation: even if
+    // the MAC read failed at AP-detection time (so the Configure step was
+    // entered without a check), the identity is guaranteed right now. The RAM
+    // snapshot is checked first (fully offline), then the backend pre-flight.
+    // An unreachable backend (no internet while on the Tasmota AP) silently
+    // continues — which is why Gate B below, at the authoritative provision
+    // boundary, re-verifies against the repository before ANY config command.
     if (await _stopIfAlreadyRegistered(canonical)) return;
+
+    // Gate B — AUTHORITATIVE provisioning-boundary duplicate check. Runs
+    // immediately before the first Tasmota configuration command and re-verifies
+    // the MAC against the repository's registered-device authority (cloud list +
+    // persisted local mirror), NOT transient wizard state. This is what makes
+    // the duplicate rule a hard invariant: closing the wizard, reopening Add
+    // Device, recreating the widget, an unloaded session snapshot, a stale UI
+    // state, or another code path calling into provisioning can never let an
+    // already-registered MAC reach the configuration phase.
+    if (await _stopIfRegisteredAtBoundary(canonical)) return;
 
     final outcome = await _sendTasmotaConfig().timeout(
       _configStepDeadline,
@@ -1457,17 +1479,20 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   }
 
   // Loads the user's registered device MACs once, at wizard start, into the
-  // immutable [_claimedMacsAtStart] snapshot that powers the RAM-only early
-  // duplicate gate. Best-effort and silent: an unreachable backend (or no
-  // session) leaves the empty snapshot, and the existing backend pre-flight +
-  // provision checks remain the authoritative net.
+  // immutable [_claimedMacsAtStart] snapshot that powers Gate A (the early
+  // offline duplicate gate). Best-effort and silent: an unreachable backend (or
+  // no session) leaves the empty snapshot — Gate B at the provisioning boundary
+  // re-verifies against the repository authority, so a stale/empty snapshot can
+  // NEVER let an existing MAC into provisioning.
   Future<void> _loadClaimedMacsAtStart() async {
     try {
       final devices = await _api.getDevices();
       if (_isTerminal || !mounted) return;
       _claimedMacsAtStart = ClaimDeviceSnapshot.fromDevices(devices);
+      debugPrint('[PROVISION] wizard-start registered snapshot loaded: '
+          '${_claimedMacsAtStart.macs.length} device(s)');
     } catch (_) {
-      // Keep the empty snapshot; the backend gates still enforce duplicates.
+      debugPrint('[PROVISION] wizard-start registered snapshot unavailable');
     }
   }
 
@@ -1546,6 +1571,61 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
               'be added to this one.';
       _enterTerminalState(duplicateKind, msg);
       return true;
+    }
+    return false;
+  }
+
+  // Gate B — the AUTHORITATIVE duplicate check at the provisioning boundary.
+  // Called in _provision() immediately before the first Tasmota configuration
+  // command. Unlike Gate A / the backend pre-flight (UX best-effort, both able
+  // to silently pass when the AP has no internet), this consults the
+  // repository's registered-device authority, which does NOT depend on
+  // transient wizard state:
+  //
+  //   1. the once-at-start session snapshot is awaited and re-checked (so a
+  //      fast reopen can never race it);
+  //   2. then `DeviceRepositoryService.isDeviceRegistered` — the cloud-authorised
+  //      registered list (bounded) plus the PERSISTED local mirror — certifies
+  //      the MAC against every source the app itself trusts, offline included.
+  //
+  // A MAC registered in ANY of those sources freezes the wizard into the
+  // terminal duplicate state and NEVER sends a configuration command. Returns
+  // true only when the flow must stop.
+  Future<bool> _stopIfRegisteredAtBoundary(String canonical) async {
+    final load = _claimedMacsAtStartLoad;
+    if (load != null) await load;
+    if (_claimedMacsAtStart.containsMac(canonical)) {
+      debugPrint('[PROVISION] $canonical already registered (session snapshot) '
+          '— stopping at the provisioning boundary');
+      _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+      return true;
+    }
+    final hook = widget.testIsDeviceRegistered;
+    if (hook != null) {
+      final registered = await hook(canonical);
+      if (registered) {
+        debugPrint('[PROVISION] $canonical already registered (test boundary '
+            'verdict) — stopping before any provisioning command');
+        _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+      }
+      return registered;
+    }
+    try {
+      final registered = await _repository
+          .isDeviceRegistered(canonical)
+          .timeout(const Duration(seconds: 4));
+      if (registered) {
+        debugPrint('[PROVISION] $canonical already registered (authoritative '
+            'repository check) — stopping before any provisioning command');
+        _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+        return true;
+      }
+    } on Object catch (e) {
+      // The authoritative sources are unreachable (deep offline). The session
+      // snapshot was already checked above; the backend pre-claim check +
+      // POST /api/devices/provision remain the net for a duplicate that only
+      // exists on another phone.
+      debugPrint('[PROVISION] authoritative registered check unavailable: $e');
     }
     return false;
   }

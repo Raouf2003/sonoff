@@ -349,6 +349,76 @@ void main() {
     });
   });
 
+  group('isDeviceRegistered (hard provisioning-boundary duplicate invariant)', () {
+    test('cloud list contains the MAC: registered', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = const [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ];
+      final repo = _repo(cloud);
+
+      expect(await repo.isDeviceRegistered(_deviceId), isTrue);
+      expect(await repo.isDeviceRegistered('34987AC30304'), isTrue,
+          reason: 'canonical form identifies the same device');
+      expect(cloud.devicesCalls, 2);
+    });
+
+    test('MAC matching is normalized (dotted list entry, canonical query)', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = const [
+          {'deviceId': '34:98:7A:C3:03:04', 'name': 'Controller', 'channels': 4},
+        ];
+      final repo = _repo(cloud);
+
+      expect(await repo.isDeviceRegistered('34987AC30304'), isTrue);
+    });
+
+    test('a different / unlisted MAC is NOT registered', () async {
+      final cloud = _FakeCloudApi()
+        ..devices = const [
+          {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+        ];
+      final repo = _repo(cloud);
+
+      expect(await repo.isDeviceRegistered('18FE34A1B2C3'), isFalse);
+      expect(await repo.isDeviceRegistered('not-a-mac'), isFalse,
+          reason: 'an unparseable identity is never a duplicate');
+    });
+
+    test('cloud unreachable: the PERSISTED local mirror still certifies the '
+        'MAC (survives wizard reopen / offline AP)', () async {
+      final cache = LocalDeviceCache();
+      await cache.replaceAll(const [
+        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+      ]);
+      // Cloud is down, exactly like the phone sitting on the Tasmota setup AP.
+      final cloud = _FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, cache: cache);
+
+      expect(await repo.isDeviceRegistered(_deviceId), isTrue,
+          reason: 'a device claimed on this phone stays blocked even when the '
+              'backend cannot be reached');
+      // A FRESH repository instance (reopening Add Device spins up a new
+      // repository) reads the SAME persisted mirror: reopening cannot bypass.
+      final reopened = _repo(_FakeCloudApi()..devicesError = const ApiException(
+          'down', code: 'NETWORK_ERROR'));
+      expect(await reopened.isDeviceRegistered(_deviceId), isTrue,
+          reason: 'the persisted mirror is SharedPreferences-backed, so a '
+              'brand-new repository instance still sees the registered MAC');
+    });
+
+    test('cloud unreachable AND empty mirror: failsafe false (offline race)',
+        () async {
+      final repo = _repo(_FakeCloudApi()
+        ..devicesError = const ApiException('down', code: 'NETWORK_ERROR'));
+
+      expect(await repo.isDeviceRegistered(_deviceId), isFalse,
+          reason: 'a device claimed on ANOTHER phone is unknown offline here — '
+              'the backend pre-claim check + provision stay the final net');
+    });
+  });
+
   group('control: cloud-first, local fallback on availability only', () {
     test('cloud success returns the cloud result; the LAN is never touched',
         () async {

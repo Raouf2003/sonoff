@@ -166,9 +166,11 @@ class _StatefulApi extends _FlowApi {
   @override
   Future<void> deleteDevice(String deviceId) async {
     deleteCalls++;
-    // The DELETE removes the existing registration; a subsequent claim's
-    // pre-flight and authoritative provision will no longer see this MAC.
+    // The DELETE removes the existing registration: a subsequent claim's
+    // pre-flight agrees the device is gone (`notFound`) and the account's
+    // registered list (wizard-start snapshot + boundary verdict) is now empty.
     preflightStatus = DeviceDuplicateStatus.notFound;
+    registeredAtStart = false;
   }
 }
 
@@ -246,6 +248,7 @@ Future<bool? Function()> _launcher(
   _FlowApi api,
   _TasmotaFake tasmota, {
   Future<bool> Function(String deviceId, {String? lastIp})? localSetup,
+  Future<bool> Function(String canonical)? isRegistered,
 }) async {
   _mockWifiChannels(tester);
   bool? result;
@@ -263,6 +266,11 @@ Future<bool? Function()> _launcher(
                       testApi: api,
                       testHttpClient: tasmota.client,
                       testWarmUp: (_) async {},
+                      testIsDeviceRegistered:
+                          isRegistered ??
+                              (canonical) async =>
+                                  api.registeredAtStart &&
+                                  canonical == _canonicalDeviceId,
                       testLocalSetup:
                           localSetup ?? (_, {lastIp}) async => true,
                     ),
@@ -504,6 +512,90 @@ void main() {
       expect(read(), isNot(true));
 
       await _unmount(tester);
+    });
+
+    testWidgets(
+        'Gate B authority: even with an EMPTY session snapshot and a silent '
+        'backend pre-flight, an existing MAC is stopped at the provisioning '
+        'boundary before ANY config command', (tester) async {
+      _mockSecureStorage(tester);
+      // Models the bypass scenario: the wizard-start snapshot did not capture
+      // the MAC (load failed/raced on a reopen) and the backend pre-flight
+      // silently passed (no internet on the Tasmota AP). The authoritative
+      // boundary gate (Gate B) must still stop the device at _provision, before
+      // a single provisioning/configuration command is sent.
+      final api = _FlowApi(); // registeredAtStart=false -> empty snapshot; preflightStatus=notFound
+      final tasmota = _TasmotaFake();
+      final read = await _launcher(tester, api, tasmota,
+          isRegistered: (canonical) async => canonical == _canonicalDeviceId);
+
+      // Gate A and the backend pre-flight both passed -> the wizard reached the
+      // Configure form (proving this test targets the boundary gate in _provision).
+      await _tapContinue(tester);
+      expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
+
+      await _fillAndProvision(tester);
+
+      // Gate B froze the wizard at the provisioning boundary.
+      expect(find.textContaining('delete it before claiming it again'),
+          findsOneWidget);
+      expect(api.provisionCalls, 0, reason: 'no claim: the boundary gate stopped it');
+      expect(api.preflightCalls, 1,
+          reason: 'the legacy backend pre-flight ran at AP detection and passed '
+              '— it must NOT be the last line of defense');
+      // Only the two read-only Status 5 identity reads happened.
+      expect(tasmota.commands.where((c) => c.startsWith('Status 5')).length, 2,
+          reason: 'identity read at AP detection and again at Apply');
+      expect(tasmota.commands.where((c) => !c.startsWith('Status 5')), isEmpty,
+          reason: 'an existing MAC must NEVER receive a config/Wi-Fi command, '
+              'even when every earlier best-effort gate was fooled');
+      expect(tasmota.provisioned, isFalse);
+      expect(read(), isNot(true));
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+        'reopening Add Device after Close re-blocks the same existing device on '
+        'every attempt (3x) — widget recreated each time', (tester) async {
+      _mockSecureStorage(tester);
+      // One account, one physical device, one shared Tasmota responder. Each
+      // loop iteration launches a BRAND-NEW wizard widget tree (= widget
+      // recreation), exactly like the user closing Add Device and reopening it.
+      final api = _FlowApi()..registeredAtStart = true;
+      final tasmota = _TasmotaFake();
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        final read = await _launcher(tester, api, tasmota);
+        await _tapContinue(tester);
+
+        expect(find.textContaining('delete it before claiming it again'),
+            findsOneWidget,
+            reason: 'attempt $attempt must freeze into the duplicate terminal');
+        expect(find.text('Test Wi-Fi & Continue'), findsNothing,
+            reason: 'attempt $attempt must never reach the Configure form');
+        expect(find.text('Remove Device'), findsNothing,
+            reason: 'the wizard never offers a delete/re-claim path');
+        expect(find.text('Delete'), findsNothing);
+        expect(api.provisionCalls, 0,
+            reason: 'attempt $attempt must never claim the device');
+        expect(read(), isNot(true),
+            reason: 'attempt $attempt must never pop success');
+
+        await _unmount(tester);
+      }
+      expect(api.preflightCalls, 0,
+          reason: 'every stop happened fully offline at the snapshot/boundary '
+              'gate with NO backend round-trip');
+      expect(api.unclaimCalls, 0,
+          reason: 'nothing was ever claimed, so nothing is ever unclaimed');
+      expect(tasmota.provisioned, isFalse,
+          reason: 'Close is NOT a transition to claimable — the MAC stays '
+              'blocked until it is deleted from the Devices page');
+      expect(tasmota.commands.every((c) => c == 'Status 5'), isTrue,
+          reason: 'across all 3 attempts only the read-only identity probe '
+              'touched the device — zero provisioning commands');
+      expect(tasmota.commands.length, 3 * 1,
+          reason: 'exactly one identity read per attempt');
     });
 
     testWidgets(

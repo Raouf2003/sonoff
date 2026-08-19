@@ -8,6 +8,7 @@ import 'local_device_cache.dart';
 import 'local_device_discovery.dart';
 import 'local_device_transport.dart';
 import 'local_ip.dart';
+import 'provisioning_service.dart';
 
 /// How long a single LOCAL attempt (cached-IP probe + possible quick mDNS
 /// window + identity verify + command + read-back) may take before the
@@ -28,6 +29,13 @@ const Duration kTapMdnWindow = Duration(seconds: 2);
 /// mDNS browse window for BACKGROUND warm-up discovery (page load / resume /
 /// reconnect / after provisioning).
 const Duration kWarmMdnWindow = Duration(seconds: 5);
+
+/// Bound for the authoritative registered-MAC check (`isDeviceRegistered`) at
+/// the provisioning boundary. The phone may be on the Tasmota setup AP, which
+/// usually has no internet — so the cloud list must fail fast and let the
+/// persisted local mirror answer, never blocking provisioning behind the
+/// cloud's 15s API timeout.
+const Duration kRegisteredCheckLimit = Duration(seconds: 4);
 
 /// A verified IP is trusted without re-probing for this long. After the TTL it
 /// is re-verified with `Status 5` before use (cheap, one LAN round trip).
@@ -356,6 +364,41 @@ class DeviceRepositoryService {
       _log('cached device list unavailable (${_describe(e)})');
       return const [];
     }
+  }
+
+  /// HARD provisioning invariant, consulted at the authoritative provisioning
+  /// boundary immediately before the first Tasmota configuration command.
+  ///
+  /// True when [canonicalMac] is already registered to the current user. Unlike
+  /// a UI/session snapshot, this is NOT a function of transient wizard state:
+  /// it sources the same registered-data authority the Devices page list and
+  /// Local Mode use — the cloud-authorised registered list (bounded) first,
+  /// then the PERSISTED local mirror of that list ([LocalDeviceCache], written
+  /// only by cloud-verified claim/delete/list flows). A MAC present in EITHER
+  /// source is registered, so the rule survives closing the wizard, reopening
+  /// Add Device, recreating the widget, and offline / setup-AP conditions.
+  ///
+  /// Failsafe for the genuinely-offline race (a device just claimed on another
+  /// phone while THIS phone is on the setup AP with no internet): returns false
+  /// rather than deadlocking an offline provisioning flow — the backend
+  /// pre-claim check and POST /api/devices/provision remain the final authority
+  /// and still reject the duplicate before the WIZARD can leave the WAIT phase.
+  Future<bool> isDeviceRegistered(String canonicalMac) async {
+    bool found = false;
+    try {
+      final devices = await _cloud.getDevices().timeout(kRegisteredCheckLimit);
+      found = ClaimDeviceSnapshot.fromDevices(devices).containsMac(canonicalMac);
+    } on Object catch (e) {
+      _log('registered-MAC cloud check unavailable (${_describe(e)})');
+    }
+    if (found) return true;
+    try {
+      final cached = await _cache.cachedDevices();
+      found = ClaimDeviceSnapshot.fromDevices(cached).containsMac(canonicalMac);
+    } on Object catch (e) {
+      _log('registered-MAC mirror check unavailable (${_describe(e)})');
+    }
+    return found;
   }
 
   /// Best-effort, non-authoritative: persists each device's cloud-learned LAN
