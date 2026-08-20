@@ -76,11 +76,15 @@ enum RegistrationState {
 
 /// The single service the devices page uses for relay control and status.
 ///
-/// Relay CONTROL is CLOUD-FIRST (the tap reaches MQTT immediately; the LAN is
-/// the fallback when the cloud/backend is genuinely unavailable), while STATUS
-/// reads remain LOCAL-FIRST (the device's own HTTP report is the freshest
-/// truth). The two transports are never combined for one user action — the
-/// first transport that succeeds wins, never both.
+/// Relay CONTROL is routed by NETWORK (same WiFi → local-only, else cloud-only,
+/// decided once per tap from the page's live reachability state). Each tap
+/// dispatches to ONE primary transport; on an AVAILABILITY failure alone the
+/// bounded single-fallback safety net retries the OTHER transport exactly once
+/// before surfacing an error. STATUS reads remain LOCAL-FIRST (the device's own
+/// HTTP report is the freshest truth), falling back to the cloud only when the
+/// LAN cannot reach the device. The two transports are never combined for one
+/// user action beyond that single retry — the first transport that succeeds
+/// wins, never both.
 ///
 /// Logical rejections (identity mismatch, unconfirmed command) are NEVER
 /// rerouted: an identity violation is a security/ownership matter and an
@@ -605,18 +609,22 @@ class DeviceRepositoryService {
     }
   }
 
-  /// Relay command, dispatched to EXACTLY ONE transport per tap — chosen once
-  /// by the view's [routingPolicy] from the same-WiFi detection:
+  /// Relay command, dispatched to ONE primary transport per tap — chosen once
+  /// by the view's [routingPolicy] from the live reachability state:
   ///
   /// - [ControlRoute.localOnly] → the command runs over the LAN (cached/warm
-  ///   verified IP only, no mDNS, no cloud round-trip). If the LAN fails, the
-  ///   command FAILS — it is never rerouted to the cloud.
+  ///   verified IP only, no mDNS, no cloud round-trip).
   /// - [ControlRoute.cloudOnly] → the command runs through the backend/MQTT and
-  ///   the LAN is never touched, even when a local endpoint exists.
+  ///   the LAN is not attempted first.
   ///
-  /// Every logical rejection — auth/ownership, validation, command conflicts,
-  /// coded 409, MAC identity mismatches — is surfaced to the user and NEVER
-  /// rerouted to the other transport.
+  /// On an AVAILABILITY failure of the primary transport (connection failure,
+  /// timeout, backend 5xx, device-offline 409) the bounded safety net retries
+  /// the OPPOSITE transport exactly once — this covers a stale same-WiFi
+  /// verdict during a network transition, when the routing choice was made a
+  /// moment before the network actually changed. Every LOGICAL rejection —
+  /// auth/ownership, validation, command conflicts, coded 409, MAC identity
+  /// mismatches — is surfaced to the user and NEVER rerouted to the other
+  /// transport.
   ///
   /// [opId] threads the per-tap correlation id into the [ControlTimeline].
   Future<RelayStatusResult> control(
@@ -629,69 +637,80 @@ class DeviceRepositoryService {
     _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
 
-    if (route == ControlRoute.localOnly) {
+    final attempts = <ControlRoute>[route, route.opposite];
+    Object? firstError;
+    for (var i = 0; i < attempts.length; i++) {
+      final attempt = attempts[i];
       try {
-        _tl(opId, deviceId, channel, 'Local attempt start');
-        final local = await _localControlFast(deviceId, channel, state, opId: opId)
-            .timeout(kLocalBudget);
-        _tl(opId, deviceId, channel, 'Local attempt done');
-        _lastSource = DeviceTransportSource.local;
-        _log('local control success for $deviceId channel $channel');
-        return parseRelayStatus(
-          local,
-          source: DeviceTransportSource.local,
-          seq: ++_seq,
-        );
+        if (attempt == ControlRoute.localOnly) {
+          _tl(opId, deviceId, channel, 'Local attempt start');
+          final local = await _localControlFast(deviceId, channel, state, opId: opId)
+              .timeout(kLocalBudget);
+          _tl(opId, deviceId, channel, 'Local attempt done');
+          _lastSource = DeviceTransportSource.local;
+          _log('local control success for $deviceId channel $channel');
+          return parseRelayStatus(
+            local,
+            source: DeviceTransportSource.local,
+            seq: ++_seq,
+          );
+        } else {
+          _tl(opId, deviceId, channel, 'Cloud request start');
+          final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
+          _tl(opId, deviceId, channel, 'Cloud response received');
+          _lastSource = DeviceTransportSource.cloud;
+          await _seedOneCandidate(deviceId, cloud['lastIp']);
+          _log('cloud control success for $deviceId channel $channel');
+          return parseRelayStatus(
+            cloud,
+            source: DeviceTransportSource.cloud,
+            seq: seq,
+          );
+        }
       } on Object catch (e) {
-        if (e is DeviceTransportException &&
-            e.kind == TransportFailureKind.logical) {
-          _tl(opId, deviceId, channel, 'Local attempt rejected');
-          _log('local control REJECTED for $deviceId (${_describe(e)})');
+        if (_isLogicalRejection(e)) {
+          _tl(opId, deviceId, channel, '$attempt attempt rejected');
+          _log('$attempt control REJECTED for $deviceId (${_describe(e)})');
           rethrow;
         }
-        _tl(opId, deviceId, channel, 'Local attempt failed');
-        _log('local control failed for $deviceId (${_describe(e)})');
+        if (i == 0) {
+          // Availability failure: the primary path is unusable RIGHT NOW, which
+          // is exactly when a stale routing verdict during a network transition
+          // bites. Retry the opposite transport exactly once.
+          firstError = e;
+          _tl(opId, deviceId, channel,
+              '$attempt attempt failed — single fallback to ${attempts[1]}');
+          _log('$attempt control failed for $deviceId (${_describe(e)}); '
+              'trying the ${attempts[1]} transport');
+          continue;
+        }
+        // The single fallback also failed with availability: the device is
+        // genuinely unreachable on BOTH transports. Surface the combined error
+        // with the first (primary) failure preserved as the cause.
+        _tl(opId, deviceId, channel, 'Both transports unavailable');
+        _log('$attempt control failed for $deviceId (${_describe(e)}); '
+            'both transports exhausted');
         throw DeviceTransportException(
-          'The device could not be reached on your network.',
-          cause: e is DeviceTransportException
-              ? e
-              : DeviceTransportException('Local control failed: $e'),
+          'The device could not be reached locally or online.',
+          cause: firstError,
         );
       }
     }
+    throw StateError('unreachable');
+  }
 
-    // Cloud-only: the LAN is never attempted, even if a local endpoint exists.
-    try {
-      _tl(opId, deviceId, channel, 'Cloud request start');
-      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
-      _tl(opId, deviceId, channel, 'Cloud response received');
-      _lastSource = DeviceTransportSource.cloud;
-      await _seedOneCandidate(deviceId, cloud['lastIp']);
-      _log('cloud control success for $deviceId channel $channel');
-      return parseRelayStatus(
-        cloud,
-        source: DeviceTransportSource.cloud,
-        seq: seq,
-      );
-    } on Object catch (e) {
-      if (e is ApiException && !isAvailabilityFailure(e)) {
-        _tl(opId, deviceId, channel, 'Cloud request rejected');
-        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
-        rethrow;
-      }
-      if (e is DeviceTransportException &&
-          e.kind == TransportFailureKind.logical) {
-        _tl(opId, deviceId, channel, 'Cloud request rejected');
-        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
-        rethrow;
-      }
-      _tl(opId, deviceId, channel, 'Cloud request failed (availability)');
-      _log('cloud control unavailable for $deviceId (${_describe(e)})');
-      throw DeviceTransportException(
-        'The device could not be reached via the cloud.',
-        cause: e,
-      );
+  /// True for a rejection that must surface as-is and NEVER be rerouted to the
+  /// other transport: a logical `DeviceTransportException` (identity/ownership)
+  /// or a classified backend rejection (`ApiException` that is not an
+  /// availability failure — 4xx, coded 409, etc.).
+  bool _isLogicalRejection(Object e) {
+    if (e is DeviceTransportException) {
+      return e.kind == TransportFailureKind.logical;
     }
+    if (e is ApiException) {
+      return !isAvailabilityFailure(e);
+    }
+    return false;
   }
 
   /// Fast same-WiFi detection for tap routing. Returns true when the device is

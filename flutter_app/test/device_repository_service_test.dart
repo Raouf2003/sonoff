@@ -546,44 +546,66 @@ void main() {
           reason: 'no local discovery runs before the cloud when it is reachable');
     });
 
-    test('cloudOnly + cloud availability failure → wrapped error; LAN untouched',
+    test('cloudOnly + cloud availability failure → single fallback to the LAN succeeds',
         () async {
+      // The 504 scenario: a same-WiFi device was routed cloud-first (stale
+      // verdict), the cloud times out (availability), and the bounded safety
+      // net retries the LAN exactly once — which succeeds.
       final cloud = _FakeCloudApi()
         ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _localRelayCm();
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
 
-      await expectLater(
-        repo.control(_deviceId, 1, 'ON', route: ControlRoute.cloudOnly),
-        throwsA(
-          isA<DeviceTransportException>()
-              .having((e) => e.cause, 'cause', isNotNull)
-              .having((e) => e.message, 'message', contains('via the cloud')),
-        ),
-      );
-      expect(cloud.controlCalls, 1);
-      expect(cm.called, isEmpty,
-          reason: 'a cloud-only tap never falls back to the LAN');
-      expect(locator.cachedQueries, 0,
-          reason: 'no LAN discovery runs behind a cloud-only tap');
+      final result =
+          await repo.control(_deviceId, 1, 'ON', route: ControlRoute.cloudOnly);
+
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud was attempted exactly once before the fallback');
+      expect(result.source, DeviceTransportSource.local,
+          reason: 'the LAN fallback completed the command');
+      expect(result.channels[1]!.state, 'ON');
+      expect(cm.called, containsAll(['Status%205', 'Power1%20ON', 'State']));
+      expect(locator.cachedQueries, 1,
+          reason: 'the fallback ran exactly one local probe, no more');
     });
 
-    test('cloudOnly + cloud 5xx → wrapped error; the LAN is never touched '
-        '(the 504 regression)', () async {
+    test('cloudOnly + cloud 5xx → single fallback to the LAN succeeds '
+        '(the 504 regression fix)', () async {
       final cloud = _FakeCloudApi()
         ..controlError = const ApiException('boom', statusCode: 503);
       final cm = _localRelayCm();
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
 
+      final result =
+          await repo.control(_deviceId, 1, 'ON', route: ControlRoute.cloudOnly);
+
+      expect(cloud.controlCalls, 1);
+      expect(result.source, DeviceTransportSource.local,
+          reason: 'a 5xx is availability: the bounded fallback reaches the LAN');
+      expect(cm.called, containsAll(['Status%205', 'Power1%20ON', 'State']));
+    });
+
+    test('cloudOnly + BOTH cloud and LAN unavailable → combined error, '
+        'exactly one attempt per transport', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, locator: _FakeLocator()); // no local device
+
       await expectLater(
         repo.control(_deviceId, 1, 'ON', route: ControlRoute.cloudOnly),
-        throwsA(isA<DeviceTransportException>()),
+        throwsA(
+          isA<DeviceTransportException>().having(
+            (e) => e.message,
+            'message',
+            contains('locally or online'),
+          ),
+        ),
       );
-      expect(cloud.controlCalls, 1);
-      expect(cm.called, isEmpty,
-          reason: 'the LAN is never attempted behind a cloud-only tap');
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud was tried once, then the LAN once — no retry loop');
+      expect(cloud.controlCalls, lessThanOrEqualTo(1));
     });
 
     test('cloudOnly business rejection is surfaced; the LAN is never touched',
@@ -608,6 +630,31 @@ void main() {
       expect(cm.called, isEmpty,
           reason: 'a business rejection must never fall back to the LAN');
       expect(locator.cachedQueries, 0);
+    });
+
+    test('cloud logical rejection is surfaced even when the LAN would succeed',
+        () async {
+      // A rejection is NOT availability: it must surface immediately and never
+      // fall back, even though the LAN endpoint exists and would work.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('Forbidden', statusCode: 403);
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON', route: ControlRoute.cloudOnly),
+        throwsA(
+          isA<ApiException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            403,
+          ),
+        ),
+      );
+      expect(cloud.controlCalls, 1);
+      expect(cm.called, isEmpty,
+          reason: 'a logical rejection must never trigger the LAN fallback');
     });
 
     test('coded cloud 409 (device offline) is surfaced; the LAN is untouched',
@@ -657,9 +704,27 @@ void main() {
       expect(cm.called, containsAll(['Status%205', 'Power1%20ON', 'State']));
     });
 
-    test('localOnly + LAN availability failure throws; the cloud is never called',
+    test('localOnly + LAN availability failure → single fallback to the cloud succeeds',
         () async {
+      // A stale same-WiFi verdict sent the tap local-first; the LAN is
+      // unreachable (device moved networks) but the cloud is up — the bounded
+      // safety net retries the cloud exactly once and completes the command.
       final cloud = _FakeCloudApi();
+      final repo = _repo(cloud, locator: _FakeLocator()); // no local device
+
+      final result =
+          await repo.control(_deviceId, 1, 'ON', route: ControlRoute.localOnly);
+
+      expect(cloud.controlCalls, 1,
+          reason: 'the cloud was tried exactly once as the single fallback');
+      expect(result.source, DeviceTransportSource.cloud);
+      expect(result.channels[1]!.state, 'ON');
+    });
+
+    test('localOnly + BOTH LAN and cloud unavailable → combined error, exactly '
+        'one attempt per transport', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final repo = _repo(cloud, locator: _FakeLocator()); // no local device
 
       await expectLater(
@@ -668,12 +733,13 @@ void main() {
           isA<DeviceTransportException>().having(
             (e) => e.message,
             'message',
-            contains('on your network'),
+            contains('locally or online'),
           ),
         ),
       );
-      expect(cloud.controlCalls, 0,
-          reason: 'a local-only tap must not be chased by a cloud round-trip');
+      expect(cloud.controlCalls, 1,
+          reason: 'the fallback fired once and stopped — no retry loop');
+      expect(cloud.controlCalls, lessThanOrEqualTo(1));
     });
 
     test('localOnly + LAN logical rejection is surfaced; the cloud is untouched',
@@ -1323,7 +1389,12 @@ void main() {
     });
 
     test('an unreachable candidate is KEPT (device may be off)', () async {
-      final cloud = _FakeCloudApi();
+      // Both transports unavailable (candidate off AND cloud down): the local
+      // fast path keeps the cloud-learned hint for next time (never discards an
+      // unconfirmed candidate) and the combined error surfaces after the single
+      // fallback — the local-only fast path never runs mDNS.
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
       final cm = _CmFake()..unreachable = true;
       final locator = _FakeLocator(cached: '192.168.1.5');
       final repo = _repo(cloud, locator: locator, cm: cm);
@@ -1332,9 +1403,9 @@ void main() {
         repo.control(_deviceId, 1, 'ON', route: ControlRoute.localOnly),
         throwsA(
           isA<DeviceTransportException>().having(
-            (e) => e.cause,
-            'cause',
-            isNotNull,
+            (e) => e.message,
+            'message',
+            contains('locally or online'),
           ),
         ),
       );
@@ -1342,7 +1413,8 @@ void main() {
           reason: 'a cloud-learned hint survives transient unavailability');
       expect(locator.mDnsQueries, 0,
           reason: 'the local-only fast path never starts an mDNS browser');
-      expect(cloud.controlCalls, 0);
+      expect(cloud.controlCalls, 1,
+          reason: 'the single fallback fired once and stopped');
     });
 
     test('a candidate with a foreign MAC is discarded', () async {

@@ -487,6 +487,26 @@ void main() {
     test('different network → cloud-only control', () {
       expect(routingPolicy(sameWifi: false), ControlRoute.cloudOnly);
     });
+
+    test('different network but cloud socket not ready (mid-reconnect) → '
+        'local-only, so a known-unready cloud call is never the first attempt',
+        () {
+      expect(
+        routingPolicy(sameWifi: false, cloudSocketReady: false),
+        ControlRoute.localOnly,
+      );
+    });
+
+    test('same WiFi is local-only regardless of cloud socket state', () {
+      expect(
+        routingPolicy(sameWifi: true, cloudSocketReady: false),
+        ControlRoute.localOnly,
+      );
+      expect(
+        routingPolicy(sameWifi: true, cloudSocketReady: true),
+        ControlRoute.localOnly,
+      );
+    });
   });
 
   group('evaluateCloudReachability', () {

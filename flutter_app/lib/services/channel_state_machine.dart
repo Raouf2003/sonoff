@@ -26,7 +26,16 @@ enum CloudReachability { up, down }
 ///   directly over LAN, no cloud round-trip.
 /// - [cloudOnly]: the device is on a different network — control it through
 ///   the cloud, no LAN attempt.
-enum ControlRoute { localOnly, cloudOnly }
+enum ControlRoute {
+  localOnly,
+  cloudOnly;
+
+  /// The other transport. Used exactly once by the repository's bounded
+  /// fallback safety net when the PRIMARY transport is unavailable — never for
+  /// a logical rejection (auth/ownership/validation/identity).
+  ControlRoute get opposite =>
+      this == ControlRoute.localOnly ? ControlRoute.cloudOnly : ControlRoute.localOnly;
+}
 
 /// Device-level connectivity. Only [online]/[offline] are shown; everything
 /// else is [syncing].
@@ -742,9 +751,18 @@ CloudReachability evaluateCloudReachability({required bool socketConnected}) =>
     socketConnected ? CloudReachability.up : CloudReachability.down;
 
 /// Routes a tap by NETWORK, not by cloud reachability. Same WiFi → direct
-/// local control (the device is reachable on the phone's subnet); anything
-/// else → cloud-only (a LAN attempt could not succeed and would only add
-/// latency). Ambiguous detection (no cached IP, probe timeout, identity
-/// mismatch) returns false → the safe cloud default.
-ControlRoute routingPolicy({required bool sameWifi}) =>
-    sameWifi ? ControlRoute.localOnly : ControlRoute.cloudOnly;
+/// local control (the device is reachable on the phone's subnet). Otherwise the
+/// cloud is the only path that can reach the device — UNLESS the cloud socket is
+/// not ready (mid-reconnect after a network change): firing a known-unready
+/// cloud call first would waste a timeout, so the tap starts on the LAN and the
+/// repository's single-fallback safety net still gets a cloud chance if the LAN
+/// misses. Ambiguous same-WiFi detection (no cached IP, probe timeout, identity
+/// mismatch) is `false` → the safe cloud default when the socket is ready.
+ControlRoute routingPolicy({
+  required bool sameWifi,
+  bool cloudSocketReady = true,
+}) {
+  if (sameWifi) return ControlRoute.localOnly;
+  if (!cloudSocketReady) return ControlRoute.localOnly;
+  return ControlRoute.cloudOnly;
+}

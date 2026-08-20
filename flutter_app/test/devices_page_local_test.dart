@@ -13,6 +13,7 @@ import 'package:smart_home_app/services/device_repository_service.dart';
 import 'package:smart_home_app/services/device_transport.dart';
 import 'package:smart_home_app/services/local_device_cache.dart';
 import 'package:smart_home_app/services/local_device_discovery.dart';
+import 'package:smart_home_app/services/reachability_monitor.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
 
 const _deviceId = '34987AC30304';
@@ -206,12 +207,13 @@ class _FakeRepo extends DeviceRepositoryService {
   });
 
   final bool gateControl;
-  final DeviceTransportSource source;
+  DeviceTransportSource source;
   final List<Map<String, dynamic>> devices;
   final Completer<void> releaseControl = Completer<void>();
   int controlCalls = 0;
   int statusCalls = 0;
   bool sameWifi = false;
+  int sameWifiProbes = 0;
   ControlRoute? lastRoute;
 
   @override
@@ -224,7 +226,10 @@ class _FakeRepo extends DeviceRepositoryService {
   Future<List<Map<String, dynamic>>> getDevices() async => devices;
 
   @override
-  Future<bool> isDeviceOnSameNetwork(String deviceId) async => sameWifi;
+  Future<bool> isDeviceOnSameNetwork(String deviceId) async {
+    sameWifiProbes++;
+    return sameWifi;
+  }
 
   @override
   Future<RelayStatusResult> control(
@@ -461,6 +466,7 @@ Future<void> _pumpDevicesPage(
   required DeviceRepositoryService repo,
   io.Socket Function(String url, Map<String, dynamic> options)? socketFactory,
   Future<bool> Function()? healthCheck,
+  ReachabilityMonitor? monitor,
 }) async {
   _mockSecureStorage(tester);
   await tester.pumpWidget(
@@ -474,6 +480,7 @@ Future<void> _pumpDevicesPage(
           // Healthy cloud by default so the fast reachability probe never
           // disturbs existing tests; fast-failure tests inject their own probe.
           testHealthCheck: healthCheck ?? () async => true,
+          testMonitor: monitor,
         ),
       ),
     ),
@@ -679,10 +686,18 @@ void main() {
     },
   );
 
-  testWidgets('route passed to control follows same-WiFi detection', (tester) async {
+  testWidgets('route passed to control follows the live reachability state', (
+    tester,
+  ) async {
     final repo = _FakeRepo();
     final socket = _ScriptableSocket();
-    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    final monitor = ReachabilityMonitor(repo);
+    await _pumpDevicesPage(
+      tester,
+      repo: repo,
+      socketFactory: (u, o) => socket,
+      monitor: monitor,
+    );
 
     // Unknown / no local evidence: the safe cloud default.
     await tester.tap(find.text('CHANNEL 1'));
@@ -690,17 +705,24 @@ void main() {
     expect(
       repo.lastRoute,
       ControlRoute.cloudOnly,
-      reason: 'ambiguous same-WiFi detection must default to cloud-only',
+      reason: 'ambiguous/unknown reachability must default to cloud-only',
     );
 
-    // Confirmed same WiFi → the tap is local-only (no cloud round-trip).
-    repo.sameWifi = true;
+    // The background monitor confirms same WiFi → the tap is local-only with
+    // ZERO probe latency (no fresh probe at tap time).
+    repo.sameWifiProbes = 0;
+    monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
     await tester.tap(find.text('CHANNEL 2'));
     await tester.pump();
     expect(repo.lastRoute, ControlRoute.localOnly);
+    expect(
+      repo.sameWifiProbes,
+      0,
+      reason: 'the tap reads the live state; it must not start a fresh probe',
+    );
 
-    // Back to a different network → cloud-only again.
-    repo.sameWifi = false;
+    // The monitor confirms a different network → cloud-only again.
+    monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
     await tester.tap(find.text('CHANNEL 3'));
     await tester.pump();
     expect(repo.lastRoute, ControlRoute.cloudOnly);
@@ -708,13 +730,20 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets(
-      'same-WiFi tap is dispatched local-only (no cloud round-trip)',
+  testWidgets('same-WiFi tap is dispatched local-only (no cloud round-trip)',
       (tester) async {
-    final repo = _FakeRepo(source: DeviceTransportSource.local)..sameWifi = true;
+    final repo = _FakeRepo(source: DeviceTransportSource.local);
     final socket = _ScriptableSocket();
-    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    final monitor = ReachabilityMonitor(repo);
+    await _pumpDevicesPage(
+      tester,
+      repo: repo,
+      socketFactory: (u, o) => socket,
+      monitor: monitor,
+    );
 
+    // The background monitor confirmed the device is on the same network.
+    monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
@@ -731,10 +760,18 @@ void main() {
 
   testWidgets('different-network tap is dispatched cloud-only (no LAN attempt)',
       (tester) async {
-    final repo = _FakeRepo(source: DeviceTransportSource.cloud)..sameWifi = false;
+    final repo = _FakeRepo(source: DeviceTransportSource.cloud);
     final socket = _ScriptableSocket();
-    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+    final monitor = ReachabilityMonitor(repo);
+    await _pumpDevicesPage(
+      tester,
+      repo: repo,
+      socketFactory: (u, o) => socket,
+      monitor: monitor,
+    );
 
+    // Background state: different network + cloud socket connected.
+    monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
@@ -743,6 +780,154 @@ void main() {
     expect(repo.controlCalls, 1);
 
     await _unmount(tester);
+  });
+
+  group('background reachability monitor (continuous routing state)', () {
+    testWidgets(
+      'network-change events trigger exactly one debounced re-probe (no burst)',
+      (tester) async {
+        final repo = _FakeRepo();
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        repo.sameWifiProbes = 0;
+        // A real network transition fires several OS events in a burst: the
+        // debounce must collapse them into ONE probe after the transition
+        // settles, never one per event.
+        monitor.notifyNetworkChanged(_deviceId);
+        monitor.notifyNetworkChanged(_deviceId);
+        monitor.notifyNetworkChanged(_deviceId);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(repo.sameWifiProbes, 0,
+            reason: 'still inside the settle window — no probe yet');
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(
+          repo.sameWifiProbes,
+          1,
+          reason: 'the trailing edge of the burst fires exactly one probe',
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          repo.sameWifiProbes,
+          1,
+          reason: 'no second probe fires after the debounced one',
+        );
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'badge flips to LAN automatically when the background monitor confirms '
+      'same-WiFi after the cloud socket drops — no tap required',
+      (tester) async {
+        final repo = _FakeRepo(source: DeviceTransportSource.local);
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        // Cloud socket up + same WiFi confirmed: the badge stays ONLINE.
+        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+        await tester.pump();
+        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsNothing);
+
+        // The socket drops (cloud outage): the SAME background state now flips
+        // the badge to LAN immediately — no toggle tap, no status poll needed.
+        socket.fireDisconnect();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'tap during a genuine transition still succeeds via the single fallback '
+      '(stale same-WiFi verdict → LAN fails → cloud completes)',
+      (tester) async {
+        final repo = _FakeRepo(source: DeviceTransportSource.cloud);
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        // Let the initial status fetch resolve so the tap toggles from the
+        // confirmed OFF baseline (otherwise its late all-OFF result would
+        // overwrite the REST-confirmed ON).
+        await tester.pumpAndSettle();
+
+        // The background monitor still says same-WiFi (stale during the
+        // transition), so the tap routes local-only even though the command
+        // will complete over the cloud via the repository's internal fallback.
+        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+        await tester.tap(find.text('CHANNEL 1'));
+        // Single pump (not pumpAndSettle): the ripple animates forever, so
+        // settle would advance fake time into the 15s status poll and its
+        // all-OFF result would overwrite the REST-confirmed ON.
+        await tester.pump();
+        await tester.pump();
+
+        // The repository's bounded fallback completed the command (cloud
+        // result) even though the tap was routed local-only from stale state:
+        // the card confirms and no hard error is surfaced.
+        expect(repo.lastRoute, ControlRoute.localOnly);
+        expect(repo.source, DeviceTransportSource.cloud);
+        expect(find.text('FLOWING'), findsOneWidget);
+        expect(find.textContaining('not be reached'), findsNothing);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'status reads feed the monitor so the tap route stays fresh with no '
+      'extra probes',
+      (tester) async {
+        final repo = _FakeRepo(source: DeviceTransportSource.cloud);
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        // The initial status read resolved via the cloud: the monitor now knows
+        // the device is not on the local network, with no dedicated probe.
+        expect(monitor.state.value.sameWifi, isFalse);
+        expect(monitor.state.value.isUnknown, isFalse);
+
+        // A later local read (device reconnected to the same WiFi) updates the
+        // routing state passively: the next tap is local-only.
+        repo.source = DeviceTransportSource.local;
+        socket.fireConnect(); // reconnect path triggers a fresh status read
+        await tester.pump();
+        await tester.pump();
+        expect(monitor.state.value.sameWifi, isTrue);
+        await tester.tap(find.text('CHANNEL 1'));
+        await tester.pump();
+        expect(repo.lastRoute, ControlRoute.localOnly);
+
+        await _unmount(tester);
+      },
+    );
   });
 
   group('cloud-unavailable device list', () {

@@ -13,6 +13,7 @@ import '../services/device_repository_service.dart';
 import '../services/device_transport.dart';
 import '../services/local_device_cache.dart';
 import '../services/provisioning_service.dart';
+import '../services/reachability_monitor.dart';
 import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
@@ -30,7 +31,8 @@ class DevicesPage extends StatefulWidget {
       : testRepository = null,
         testSocketFactory = null,
         testHealthCheck = null,
-        testApi = null;
+        testApi = null,
+        testMonitor = null;
 
   /// Test seam: injects a fake repository / socket connector / cloud health
   /// probe so widget tests exercise the relay gate and cloud→local fallback
@@ -43,6 +45,7 @@ class DevicesPage extends StatefulWidget {
     this.testSocketFactory,
     this.testHealthCheck,
     this.testApi,
+    this.testMonitor,
   });
 
   final DeviceRepositoryService? testRepository;
@@ -50,6 +53,11 @@ class DevicesPage extends StatefulWidget {
       testSocketFactory;
   final Future<bool> Function()? testHealthCheck;
   final ApiService? testApi;
+
+  /// Injected reachability monitor so widget tests can drive background
+  /// same-WiFi/cloud readiness state directly (network-change debounce,
+  /// badge reactivity) without touching a real probe.
+  final ReachabilityMonitor? testMonitor;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -60,6 +68,13 @@ class _DevicesPageState extends State<DevicesPage>
   late final DeviceRepositoryService _repository =
       widget.testRepository ?? DeviceRepositoryService();
   late final ApiService _api = widget.testApi ?? ApiService();
+
+  /// Continuous background reachability source for routing. Taps READ this live
+  /// state (near-zero latency, no fresh probe); the monitor is fed by the
+  /// existing socket events, the 15s status poll, lifecycle resumes, and
+  /// network-change notifications.
+  late final ReachabilityMonitor _monitor =
+      widget.testMonitor ?? ReachabilityMonitor(_repository);
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
   bool _loadError = false;
@@ -230,6 +245,11 @@ class _DevicesPageState extends State<DevicesPage>
   void _applyStatusResult(RelayStatusResult result, {Set<int>? skipChannels}) {
     final now = DateTime.now();
     final isLocal = result.source == DeviceTransportSource.local;
+    // Feed the reachability monitor with zero extra probes: a local source
+    // proves same-network reachability, a cloud source means the LAN could not
+    // reach the device.
+    final id = _selectedDeviceId;
+    if (id != null) _monitor.noteStatusResult(id, result.source);
     _dispatchDevice(
       isLocal
           ? LocalReport(const ChannelReport(null)) as ChannelEvent
@@ -250,9 +270,12 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   /// Re-evaluates cloud reachability from transport facts and feeds the result
-  /// into the device reducer as a [CloudHealth] event (only on change).
+  /// into the device reducer as a [CloudHealth] event (only on change). Also
+  /// folds the socket fact into the reachability monitor so tap-time routing
+  /// sees the same live signal.
   void _refreshCloudReachability() {
     if (!mounted) return;
+    _monitor.setCloudSocketReady(_socketConnected);
     final now = DateTime.now();
     final reach = evaluateCloudReachability(socketConnected: _socketConnected);
     if (reach != _deviceState.cloud) {
@@ -289,11 +312,14 @@ class _DevicesPageState extends State<DevicesPage>
     _loadDevices();
     _connectSocket();
     _startCloudHealthMonitor();
+    // Badge reactivity: rebuild whenever the background reachability changes so
+    // LAN/Online reflects the live routing mode without requiring a tap.
+    _monitor.state.addListener(_onReachabilityChanged);
     _statusTimer = Timer.periodic(
       const Duration(seconds: 15),
       (_) {
         _refreshCloudReachability();
-        _fetchStatus(silent: true);
+        _fetchStatus(silent: true); // its result also refreshes reachability
       },
     );
   }
@@ -304,6 +330,8 @@ class _DevicesPageState extends State<DevicesPage>
     _statusTimer?.cancel();
     _cloudHealthTimer?.cancel();
     _cloudHealthTimer = null;
+    _monitor.state.removeListener(_onReachabilityChanged);
+    _monitor.dispose();
     // Cancel all pending indicator timers.
     for (final timer in _pendingIndicatorTimers.values) {
       timer.cancel();
@@ -320,10 +348,17 @@ class _DevicesPageState extends State<DevicesPage>
     super.dispose();
   }
 
+  void _onReachabilityChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
       _startCloudHealthMonitor();
+      // The network may have changed while the app was backgrounded: re-probe
+      // same-WiFi (debounced) so routing/badge reflect the new network fast.
+      _monitor.notifyNetworkChanged(_selectedDeviceId);
       _syncAfterReconnect();
     } else if (state != AppLifecycleState.resumed) {
       // Pause the fast reachability probe in the background: it exists to make
@@ -442,6 +477,9 @@ class _DevicesPageState extends State<DevicesPage>
     }
     _stopRipples();
     _refreshCloudReachability();
+    // Reset the reachability verdict for the newly selected device so the next
+    // tap never reuses the previous device's same-WiFi result.
+    _monitor.selectDevice(deviceId);
     _fetchStatus();
   }
 
@@ -477,6 +515,9 @@ class _DevicesPageState extends State<DevicesPage>
     _socket?.onConnect((_) {
       _socketConnected = true;
       _refreshCloudReachability();
+      // The socket reconnected, usually because the network path changed:
+      // re-probe same-WiFi (debounced) so routing follows the new network.
+      _monitor.notifyNetworkChanged(_selectedDeviceId);
       // Reconnect: reconcile instead of waiting for the next 15s poll.
       _syncAfterReconnect();
       if (mounted) setState(() {});
@@ -706,15 +747,20 @@ class _DevicesPageState extends State<DevicesPage>
     HapticFeedback.lightImpact();
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Optimistic UI applied');
 
-    // Route the tap by NETWORK, not reachability: same WiFi → direct local
-    // control (no cloud round-trip); otherwise → cloud-only (no LAN attempt).
-    // The detection is fast — a recently-confirmed verified IP needs no probe;
-    // otherwise a bounded ~400ms identity check — and any ambiguity defaults to
-    // cloud, the safe reachable-by-default path. ONE transport per tap, never
-    // both: a slow cloud can never delay a same-network tap and a
-    // different-network tap never burns time on an unreachable LAN.
-    final sameWifi = await _repository.isDeviceOnSameNetwork(_selectedDeviceId!);
-    final route = routingPolicy(sameWifi: sameWifi);
+    // Route the tap by the CONTINUOUSLY-maintained reachability state, not a
+    // fresh probe: the background monitor already re-checked on network changes,
+    // socket events, and the 15s heartbeat, so this read is instant and the
+    // value is the current network reality — no probe wait on the tap path.
+    // same WiFi → direct local control (no cloud round-trip); otherwise →
+    // cloud-only (no LAN attempt). Any ambiguity (unknown state, stale for a
+    // different device) defaults to cloud, the safe reachable-by-default path.
+    final reach = _monitor.state.value;
+    final sameWifi =
+        _monitor.deviceId == _selectedDeviceId && reach.sameWifi;
+    final route = routingPolicy(
+      sameWifi: sameWifi,
+      cloudSocketReady: reach.cloudSocketReady,
+    );
     ControlTimeline.mark(
         opId,
         _selectedDeviceId!,
@@ -1205,7 +1251,15 @@ class _DevicesPageState extends State<DevicesPage>
           _StatusPill(
             online: _deviceState.connectivity == Connectivity.online,
             offline: _deviceState.connectivity == Connectivity.offline,
-            lan: showLanBadge(_deviceState, _config, DateTime.now()),
+            lan: showLanBadge(_deviceState, _config, DateTime.now()) ||
+                // The background reachability monitor continuously re-confirms
+                // the device is on the same network: once the cloud socket goes
+                // down, the LAN badge reflects that live routing mode without
+                // requiring a tap or a fresh status read. (A confirmed-up cloud
+                // keeps the ONLINE verdict — LAN is a cloud-down concept.)
+                (_monitor.deviceId == _selectedDeviceId &&
+                    _monitor.state.value.sameWifi &&
+                    !_monitor.state.value.cloudSocketReady),
           ),
           const SizedBox(width: AppSpacing.xs),
           IconButton(
