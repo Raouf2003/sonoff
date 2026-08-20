@@ -569,17 +569,22 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // Reads the Android SDK int from `stees/ap_connect` once, at wizard start, so
   // the Connect step knows whether the in-app specifier join is usable. Any
   // failure (MissingPlugin on iOS / in widget tests) keeps the manual flow.
+  // The result MUST rebuild the UI: without setState the primary button label
+  // stays on the unsupported default ("Open Wi-Fi Settings") until an unrelated
+  // rebuild happens, which can route a supported device to the settings intent.
   Future<void> _probeApConnectSupport() async {
+    int? sdkInt;
     try {
       final info = await _apConnectChannel
           .invokeMethod<Map<dynamic, dynamic>>('sdkInfo');
-      _apConnectSdkInt = info?['sdkInt'] as int?;
-      debugPrint(
-          '[PROVISION] ap_connect SDK support: ${_apConnectSdkInt ?? -1}');
+      sdkInt = info?['sdkInt'] as int?;
+      debugPrint('[PROVISION] ap_connect SDK support: ${sdkInt ?? -1}');
     } catch (e) {
       debugPrint('[PROVISION] ap_connect support probe failed: $e');
-      _apConnectSdkInt = null;
+      sdkInt = null;
     }
+    if (!mounted) return;
+    setState(() => _apConnectSdkInt = sdkInt);
   }
 
   // Connect-step entry. On Android API 29+ (not disabled, not recovery) the
@@ -588,6 +593,14 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // manual Wi-Fi-settings jump.
   Future<void> _connectToDeviceWifi() async {
     if (_step != _Step.connect) return;
+    // Settle the support probe before routing so this button can never fall
+    // through to the system-settings intent on a device that supports the
+    // in-app join (the label already shows "Select Device Wi-Fi" only after the
+    // probe resolved, so this keeps label and handler consistent).
+    if (_apConnectSdkInt == null) {
+      await _probeApConnectSupport();
+      if (!mounted || _step != _Step.connect) return;
+    }
     if (_apConnectSupported && !_apConnectMode && !_recoveryMode) {
       await _connectToApViaPicker();
       return;
@@ -609,7 +622,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     final selected = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+      // Same opaque surface + rounded top as the Configure step's home Wi-Fi
+      // picker (`_openWifiPicker`). A transparent sheet lets the Connect step's
+      // Continue button and header text show through behind the list.
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+      ),
       builder: (_) => const _DeviceApPickerSheet(),
     );
     if (!mounted || _step != _Step.connect) return;
@@ -3978,13 +3997,20 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                   separatorBuilder: (_, _) => const SizedBox(height: 4),
                   itemBuilder: (ctx, i) {
                     final ssid = _networks[i];
+                    // Tasmota setup APs (tasmota-*) get a device icon so the
+                    // right network stands out from the user's home networks.
+                    final isDeviceAp = ssid.toLowerCase().startsWith('tasmota');
                     return Material(
                       color: colors.submerged,
                       borderRadius: BorderRadius.circular(AppRadius.md),
                       child: ListTile(
                         dense: true,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-                        leading: Icon(Icons.wifi_tethering, size: 20, color: colors.stream),
+                        leading: Icon(
+                          isDeviceAp ? Icons.settings_remote : Icons.wifi_tethering,
+                          size: 20,
+                          color: isDeviceAp ? colors.stream : colors.mist,
+                        ),
                         title: Text(
                           ssid,
                           style: GoogleFonts.inter(fontSize: 14, color: colors.foam),

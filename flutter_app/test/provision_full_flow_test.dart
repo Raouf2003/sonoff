@@ -82,7 +82,7 @@ void _mockWifiChannels(
   );
   tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
     const MethodChannel('stees/ap_connect'),
-    apConnect?.handle ?? null,
+    apConnect?.handle,
   );
 }
 
@@ -594,6 +594,51 @@ void main() {
   });
 
   group('Connect step: in-app device-AP list (programmatic join)', () {
+    testWidgets(
+        'regression Bug 1: tapping Select Device Wi-Fi opens the in-app scan '
+        'sheet and never fires openWifiSettings', (tester) async {
+      _mockSecureStorage(tester);
+      final ap = _ApConnectMock();
+      final api = _FlowApi();
+      final tasmota = _TasmotaFake();
+      await _launcher(tester, api, tasmota,
+          scanNetworks: ['tasmota-ABCD'], apConnect: ap);
+
+      // The support probe resolved AND rebuilt the UI: the button label must
+      // have flipped to the in-app one (no stale "Open Wi-Fi Settings").
+      expect(find.text('Select Device Wi-Fi'), findsOneWidget);
+
+      // Record any (forbidden) settings-intent request after launch.
+      final openedSettings = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('stees/wifi_settings'),
+        (call) async {
+          if (call.method == 'openWifiSettings') {
+            openedSettings.add('openWifiSettings');
+            return null;
+          }
+          if (call.method == 'scanWifi') {
+            return <String, dynamic>{
+              'available': true,
+              'networks': ['tasmota-ABCD'],
+            };
+          }
+          return null;
+        },
+      );
+
+      await tester.tap(find.text('Select Device Wi-Fi'));
+      await tester.pumpAndSettle();
+
+      // The in-app sheet is up with the scanned list; nothing external fired.
+      expect(find.text('tasmota-ABCD'), findsOneWidget);
+      expect(openedSettings, isEmpty,
+          reason: 'the primary in-app scan button must never reach the '
+              'system-settings intent (Bug 1)');
+
+      await _unmount(tester);
+    });
+
     testWidgets(
         'SDK 29+: picking tasmota-ABCD in the in-app list then Continue '
         'requests that exact SSID ONCE and reaches the Configure step',
