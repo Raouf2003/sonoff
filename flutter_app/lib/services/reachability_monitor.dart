@@ -19,6 +19,15 @@ const Duration kNetworkTransitionSettle = Duration(milliseconds: 400);
 /// un-debounced [ReachabilityMonitor.state] at tap time.
 const Duration kBadgeSettleDelay = Duration(milliseconds: 500);
 
+/// Consecutive NEGATIVE same-WiFi observations (a cloud-sourced status read or
+/// a failed fast probe) required before `sameWifi` may flip true→false. A
+/// single transient local-read failure or probe miss must never downgrade the
+/// routing verdict — mirrors the health monitor's
+/// `_cloudHealthConfirmFailures = 2` pattern (devices_page.dart). Upgrades
+/// stay instant: only downgrades need confirmation (fast to trust good news,
+/// slow to trust bad news).
+const int kSameWifiDowngradeConfirmations = 2;
+
 /// Live routing facts for the currently selected device, maintained
 /// CONTINUOUSLY in the background so a relay tap reads a fresh value with ZERO
 /// probe latency instead of racing a fresh probe against the tap.
@@ -58,6 +67,21 @@ class ReachabilityState {
       lastCheckedAt: lastCheckedAt ?? this.lastCheckedAt,
     );
   }
+
+  /// Value equality (not identity): `ValueNotifier` skips notifying listeners
+  /// for no-op `copyWith` writes that leave every field unchanged, so the badge
+  /// listener is not re-armed on writes that carry no new information.
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! ReachabilityState) return false;
+    return other.sameWifi == sameWifi &&
+        other.cloudSocketReady == cloudSocketReady &&
+        other.lastCheckedAt == lastCheckedAt;
+  }
+
+  @override
+  int get hashCode => Object.hash(sameWifi, cloudSocketReady, lastCheckedAt);
 }
 
 /// Background same-WiFi + cloud-socket readiness monitor. Owns the single
@@ -85,6 +109,17 @@ class ReachabilityMonitor {
   bool _pendingRefresh = false;
   bool _disposed = false;
 
+  /// Consecutive negative same-WiFi observations since the last local
+  /// confirmation. Reset to 0 by any positive signal (local-sourced status
+  /// read or successful probe); `sameWifi` only downgrades to false once this
+  /// reaches [kSameWifiDowngradeConfirmations].
+  int _consecutiveCloudReads = 0;
+
+  /// Time source. Injectable for tests so the [kLocalReportHold] sticky window
+  /// and the downgrade counter can be driven deterministically.
+  @visibleForTesting
+  DateTime Function() now = DateTime.now;
+
   /// Observable current routing facts. Listen to it (or just read `.value`) for
   /// badge reactivity without waiting for a tap.
   ValueNotifier<ReachabilityState> get state => _state;
@@ -102,20 +137,26 @@ class ReachabilityMonitor {
   void selectDevice(String deviceId) {
     if (_disposed) return;
     this.deviceId = deviceId;
+    // Forget the previous device's confirmation streak too: the downgrade
+    // counter is per-device evidence, never carried across a selection.
+    _consecutiveCloudReads = 0;
     _state.value = _state.value.copyWith(sameWifi: false, lastCheckedAt: null);
   }
 
   /// Feeds the monitor from an existing status read with ZERO extra probes. A
-  /// LOCAL source proves the device is reachable on the current network; a
-  /// CLOUD source means the LAN could not reach it. Called from the page's
-  /// status apply path (initial load, 15s poll, reconnect, post-tap reconcile).
+  /// LOCAL source proves the device is reachable on the current network (an
+  /// instant upgrade); a CLOUD source is a negative signal subject to the
+  /// consecutive-confirmation hysteresis — a single transient cloud fallback
+  /// never downgrades the verdict. Called from the page's status apply path
+  /// (initial load, 15s poll, reconnect, post-tap reconcile).
   void noteStatusResult(String deviceId, DeviceTransportSource source) {
     if (_disposed) return;
     this.deviceId = deviceId;
-    _state.value = _state.value.copyWith(
-      sameWifi: source == DeviceTransportSource.local,
-      lastCheckedAt: DateTime.now(),
-    );
+    if (source == DeviceTransportSource.local) {
+      _applyPositiveSignal();
+    } else {
+      _applyNegativeSignal();
+    }
   }
 
   /// Debounced re-probe after a network-change event (WiFi SSID / connectivity
@@ -142,22 +183,69 @@ class ReachabilityMonitor {
       final sameWifi = await _repository.isDeviceOnSameNetwork(deviceId);
       if (_disposed) return;
       this.deviceId = deviceId;
-      _state.value = _state.value.copyWith(
-        sameWifi: sameWifi,
-        lastCheckedAt: DateTime.now(),
-      );
+      if (sameWifi) {
+        // Positive probe: trust instantly and reset the downgrade counter.
+        _applyPositiveSignal();
+      } else {
+        // A failed probe is a negative signal subject to the SAME
+        // consecutive-confirmation hysteresis as a cloud-sourced status read —
+        // one fast-probe miss never downgrades the routing verdict.
+        _applyNegativeSignal();
+      }
     } catch (_) {
       // A failed probe is not evidence: keep the previous sameWifi verdict and
       // just stamp the check time so the state is never permanently unknown.
       if (_disposed) return;
       this.deviceId = deviceId;
-      _state.value = _state.value.copyWith(lastCheckedAt: DateTime.now());
+      _state.value = _state.value.copyWith(lastCheckedAt: now());
     } finally {
       _refreshing = false;
       if (_pendingRefresh) {
         _pendingRefresh = false;
         unawaited(_refresh(deviceId));
       }
+    }
+  }
+
+  /// Positive same-WiFi confirmation (a local-sourced status read or a
+  /// successful probe). Trusted instantly, exactly like the codebase's
+  /// asymmetric trust pattern: fast to trust good news. Resets the downgrade
+  /// counter so any cloud reads before the next local confirmation start over.
+  void _applyPositiveSignal() {
+    _consecutiveCloudReads = 0;
+    _state.value = _state.value.copyWith(
+      sameWifi: true,
+      lastCheckedAt: now(),
+    );
+  }
+
+  /// Negative same-WiFi signal (a cloud-sourced status read or a failed fast
+  /// probe). A confirmed `sameWifi=true` verdict is sticky for
+  /// [kLocalReportHold] — a stray negative signal inside that window is
+  /// ignored entirely and does not even count toward the downgrade. Otherwise
+  /// the verdict only downgrades to false after
+  /// [kSameWifiDowngradeConfirmations] consecutive negative signals with no
+  /// local confirmation in between.
+  void _applyNegativeSignal() {
+    final currentNow = now();
+    final current = _state.value;
+    final sticky = current.sameWifi &&
+        current.lastCheckedAt != null &&
+        currentNow.difference(current.lastCheckedAt!) < kLocalReportHold;
+    if (sticky) return;
+    _consecutiveCloudReads++;
+    if (!current.sameWifi) {
+      // Already downgraded. Only a first read that moves an UNKNOWN state to a
+      // confirmed cloud verdict needs to publish (stamps lastCheckedAt so
+      // `isUnknown` reflects that a check has happened); no-op negative reads
+      // do not re-arm the badge listener.
+      if (current.lastCheckedAt == null) {
+        _state.value = current.copyWith(lastCheckedAt: currentNow);
+      }
+      return;
+    }
+    if (_consecutiveCloudReads >= kSameWifiDowngradeConfirmations) {
+      _state.value = current.copyWith(sameWifi: false, lastCheckedAt: currentNow);
     }
   }
 

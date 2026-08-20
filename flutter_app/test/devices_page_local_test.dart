@@ -1009,6 +1009,174 @@ void main() {
     );
   });
 
+  group('ReachabilityMonitor hysteresis (sameWifi downgrade confirmation)', () {
+    test(
+      'a single transient cloud-sourced read never downgrades a confirmed '
+      'same-WiFi verdict — the sticky window absorbs it',
+      () {
+        final repo = _FakeRepo();
+        final monitor = ReachabilityMonitor(repo);
+        var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+        monitor.now = () => fakeNow;
+
+        // Device confirmed on the same network (local status read).
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // One transient cloud fallback (e.g. a single 15s poll that lost the
+        // local HTTP round-trip) inside kLocalReportHold (60s).
+        fakeNow = fakeNow.add(const Duration(seconds: 30));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'a single cloud-sourced read must not downgrade the verdict',
+        );
+
+        monitor.dispose();
+      },
+    );
+
+    test(
+      'a downgrade needs 2 consecutive cloud-sourced reads AFTER the sticky '
+      'window; a local read resets the counter and restores LAN instantly',
+      () {
+        final repo = _FakeRepo();
+        final monitor = ReachabilityMonitor(repo);
+        var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+        monitor.now = () => fakeNow;
+
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // Sticky window expires; the next cloud read only starts counting.
+        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'one cloud read after the sticky window is not enough',
+        );
+
+        // Second consecutive cloud read (no local confirmation in between).
+        fakeNow = fakeNow.add(const Duration(seconds: 15));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(
+          monitor.state.value.sameWifi,
+          isFalse,
+          reason: '2 consecutive cloud reads with no local confirmation '
+              'confirm the downgrade',
+        );
+
+        // A local read immediately restores same-WiFi and resets the counter.
+        fakeNow = fakeNow.add(const Duration(seconds: 15));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // After the reset, one stray cloud read again cannot downgrade.
+        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'a reset counter needs 2 consecutive cloud reads again',
+        );
+
+        monitor.dispose();
+      },
+    );
+
+    testWidgets(
+      'a failed fast probe is subject to the same downgrade hysteresis '
+      '(probe path)',
+      (tester) async {
+        final repo = _FakeRepo();
+        final monitor = ReachabilityMonitor(repo);
+        var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+        monitor.now = () => fakeNow;
+
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // One failed probe (debounced 400ms after the network event) is a
+        // transient miss → no downgrade.
+        repo.sameWifi = false;
+        monitor.notifyNetworkChanged(_deviceId);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'a single failed fast probe must not downgrade the verdict',
+        );
+
+        // After the sticky window, one more failed probe only starts counting.
+        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        monitor.notifyNetworkChanged(_deviceId);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'one failed probe after the sticky window is not enough',
+        );
+
+        // A second consecutive failed probe (still no local confirmation)
+        // confirms the downgrade.
+        fakeNow = fakeNow.add(const Duration(seconds: 15));
+        monitor.notifyNetworkChanged(_deviceId);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(
+          monitor.state.value.sameWifi,
+          isFalse,
+          reason: '2 consecutive failed probes with no local confirmation '
+              'confirm the downgrade',
+        );
+
+        monitor.dispose();
+      },
+    );
+
+    test(
+      'no-op writes do not fire the ValueNotifier listener (value equality)',
+      () {
+        final repo = _FakeRepo();
+        final monitor = ReachabilityMonitor(repo);
+        var fires = 0;
+        monitor.state.addListener(() => fires++);
+
+        monitor.setCloudSocketReady(false); // real change true→false
+        expect(fires, 1);
+        monitor.setCloudSocketReady(false); // no-op → must NOT notify
+        expect(
+          fires,
+          1,
+          reason: 'identical field values must not fire the listener',
+        );
+
+        // The first negative read on an UNKNOWN state stamps it as a known
+        // cloud verdict (isUnknown flips) → notifies once.
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(fires, 2);
+        // A repeat negative read on an already-false verdict changes nothing →
+        // no notify (the badge listener is not re-armed by meaningless writes).
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(
+          fires,
+          2,
+          reason: 'a negative signal that changes no field must not notify',
+        );
+
+        // A real upgrade notifies.
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(fires, 3);
+
+        monitor.state.dispose();
+      },
+    );
+  });
+
   group('cloud-unavailable device list', () {
     testWidgets(
       'cached device renders and LAN status succeeds — no red error (#10)',
