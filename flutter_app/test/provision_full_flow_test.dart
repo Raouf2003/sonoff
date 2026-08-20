@@ -509,6 +509,7 @@ class _ApConnectRecorder {
   int cancel = 0;
   int openWifiSettings = 0;
   int scanWifi = 0;
+  String? lastConnectSsid;
 }
 
 /// Installs the `stees/ap_connect` channel mock (and overrides the wifi_settings
@@ -523,6 +524,7 @@ void _mockWifiOverrides(
   String state = 'available',
   List<String> networks = const <String>[],
   bool permissionDenied = false,
+  bool scanPermissionDenied = false,
 }) {
   tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
     const MethodChannel('stees/ap_connect'),
@@ -533,6 +535,9 @@ void _mockWifiOverrides(
           return <String, dynamic>{'sdkInt': sdk, 'supported': sdk >= 29};
         case 'connectToAp':
           rec.connectToAp++;
+          final args = call.arguments;
+          rec.lastConnectSsid =
+              args is Map ? args['ssid'] as String? : null;
           if (permissionDenied) {
             throw PlatformException(code: 'PERMISSION_DENIED');
           }
@@ -558,6 +563,13 @@ void _mockWifiOverrides(
       switch (call.method) {
         case 'scanWifi':
           rec.scanWifi++;
+          if (scanPermissionDenied) {
+            return <String, dynamic>{
+              'available': false,
+              'networks': <String>[],
+              'reason': 'permission denied',
+            };
+          }
           return <String, dynamic>{'available': true, 'networks': networks};
         case 'openWifiSettings':
           rec.openWifiSettings++;
@@ -1717,9 +1729,10 @@ void main() {
 
     group('programmatic AP connect (stees/ap_connect)', () {
       testWidgets(
-          'API 29+: Continue discovers the tasmota-* AP via scan, requests it '
-          'with WifiNetworkSpecifier, and the standard probe/configure flow '
-          'runs WITHOUT any manual settings jump', (tester) async {
+          'API 29+: Select Device Wi-Fi opens the in-app scan list, the picked '
+          'device AP is joined with WifiNetworkSpecifier, and the standard '
+          'probe/configure flow runs WITHOUT any manual settings jump',
+          (tester) async {
         _mockSecureStorage(tester);
         final api = _FlowApi();
         final tasmota = _TasmotaFake();
@@ -1730,22 +1743,33 @@ void main() {
                 sdk: 34,
                 networks: const ['HomeWifi', 'tasmota-C30304-0772']));
 
-        // On API 29+ the primary action is the programmatic join, never the
+        // On API 29+ the primary action opens the in-app picker, never the
         // manual settings link.
-        expect(find.text('Connect Automatically'), findsOneWidget);
+        expect(find.text('Select Device Wi-Fi'), findsOneWidget);
         expect(find.text('Open Wi-Fi Settings'), findsNothing);
         expect(rec.connectToAp, 0);
 
-        await tester.tap(find.text('Continue'));
-        // Programmatic connect (scan -> specifier -> onAvailable) plus the
-        // standard 1.2s stabilizing delay and the AP probe.
+        await tester.tap(find.text('Select Device Wi-Fi'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // The scan surfaced both networks; the device AP is grouped first.
+        expect(rec.scanWifi, 1,
+            reason: 'the picker scans once on open');
+        expect(find.text('Likely your device'), findsOneWidget);
+        expect(find.text('Other networks'), findsOneWidget);
+        expect(find.text('tasmota-C30304-0772'), findsOneWidget);
+        expect(find.text('HomeWifi'), findsOneWidget);
+
+        await tester.tap(find.text('tasmota-C30304-0772'));
+        // The connect spinner is indeterminate - pump through it.
         await tester.pump(const Duration(milliseconds: 2000));
         await tester.pumpAndSettle();
 
-        expect(rec.scanWifi, greaterThan(0),
-            reason: 'the exact device AP SSID is discovered via the passive scan');
         expect(rec.connectToAp, 1,
-            reason: 'exactly one specifier request to the discovered tasmota-* ssid');
+            reason: 'exactly one specifier request to the user-picked ssid');
+        expect(rec.lastConnectSsid, 'tasmota-C30304-0772',
+            reason: 'the EXACT user-selected ssid is requested');
         expect(rec.openWifiSettings, 0,
             reason: 'programmatic connect must not open the system settings UI');
         expect(find.text('Test Wi-Fi & Continue'), findsOneWidget,
@@ -1756,43 +1780,84 @@ void main() {
       });
 
       testWidgets(
-          'API 24-28 keeps the manual flow provably unchanged: no connectToAp '
-          'is ever called, Open Wi-Fi Settings still opens settings, and '
-          'Continue probes the manually-selected AP', (tester) async {
+          'API 29+: a scan with no device-pattern AP still lists every SSID '
+          'and any network can be picked for the programmatic join',
+          (tester) async {
         _mockSecureStorage(tester);
         final api = _FlowApi();
         final tasmota = _TasmotaFake();
         final rec = _ApConnectRecorder();
         await _launcher(tester, api, tasmota,
-            wifiOverrides: (t) => _mockWifiOverrides(t, rec: rec, sdk: 24));
+            wifiOverrides: (t) => _mockWifiOverrides(t,
+                rec: rec,
+                sdk: 34,
+                networks: const ['HomeWifi', 'OfficeWifi']));
 
-        // Manual label, exactly as before this feature.
-        expect(find.text('Open Wi-Fi Settings'), findsOneWidget);
-        expect(find.text('Connect Automatically'), findsNothing);
+        await tester.tap(find.text('Select Device Wi-Fi'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
-        await tester.tap(find.text('Open Wi-Fi Settings'));
+        expect(find.text('Likely your device'), findsNothing,
+            reason: 'no device-pattern AP in range - no highlighted section');
+        expect(find.text('HomeWifi'), findsOneWidget);
+        expect(find.text('OfficeWifi'), findsOneWidget);
+
+        await tester.tap(find.text('HomeWifi'));
+        await tester.pump(const Duration(milliseconds: 2000));
         await tester.pumpAndSettle();
-        expect(rec.openWifiSettings, 1,
-            reason: 'the manual settings action still works on API 24-28');
-        expect(rec.connectToAp, 0,
-            reason: 'WifiNetworkSpecifier (API 29+) must never be requested');
 
-        await tester.tap(find.text('Continue'));
-        await tester.pump(const Duration(milliseconds: 1400));
-        await tester.pumpAndSettle();
-
-        expect(rec.connectToAp, 0,
-            reason: 'Continue detects the AP via the existing probe loop only');
-        expect(find.text('Test Wi-Fi & Continue'), findsOneWidget,
-            reason: 'the legacy manual path still reaches the Configure form');
-        expect(tasmota.provisioned, isFalse);
+        expect(rec.connectToAp, 1,
+            reason: 'any user-picked network is requested');
+        expect(rec.lastConnectSsid, 'HomeWifi',
+            reason: 'the exact picked ssid is used, not an auto-discovered one');
+        expect(find.text('Test Wi-Fi & Continue'), findsOneWidget);
 
         await _unmount(tester);
       });
 
       testWidgets(
-          'API 29+: repeated onUnavailable exhausts the bounded retries and '
-          'falls into the existing recovery error UI', (tester) async {
+          'API 33+: a scan permission denial shows no list and degrades '
+          'straight to the manual Wi-Fi Settings flow without hard-blocking',
+          (tester) async {
+        _mockSecureStorage(tester);
+        final api = _FlowApi();
+        final tasmota = _TasmotaFake();
+        final rec = _ApConnectRecorder();
+        await _launcher(tester, api, tasmota,
+            wifiOverrides: (t) => _mockWifiOverrides(t,
+                rec: rec, sdk: 34, scanPermissionDenied: true));
+
+        await tester.tap(find.text('Select Device Wi-Fi'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(rec.scanWifi, 1,
+            reason: 'the picker scanned and hit the permission denial');
+        expect(rec.openWifiSettings, 1,
+            reason: 'denied scan degrades to the manual settings flow');
+        expect(rec.connectToAp, 0,
+            reason: 'no specifier request without a scanned network');
+        expect(find.text('HomeWifi'), findsNothing,
+            reason: 'no network list is rendered after the denial');
+        expect(find.text('Test Wi-Fi & Continue'), findsNothing);
+
+        // The session is now permanently manual: the primary action reverts to
+        // the settings link and Continue never opens the picker again.
+        expect(find.text('Open Wi-Fi Settings'), findsOneWidget);
+        expect(find.text('Select Device Wi-Fi'), findsNothing);
+        await tester.tap(find.text('Continue'));
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        expect(rec.scanWifi, 1,
+            reason: 'the manual session does not re-scan via the picker');
+
+        await _unmount(tester);
+      });
+
+      testWidgets(
+          'API 29+: repeated onUnavailable after picking a network exhausts '
+          'the bounded retries and surfaces the error with the manual settings '
+          'fallback button', (tester) async {
         _mockSecureStorage(tester);
         final api = _FlowApi();
         final tasmota = _TasmotaFake();
@@ -1804,17 +1869,24 @@ void main() {
                 state: 'unavailable',
                 networks: const ['tasmota-C30304-0772']));
 
-        await tester.tap(find.text('Continue'));
+        await tester.tap(find.text('Select Device Wi-Fi'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('tasmota-C30304-0772'));
         // 3 specifier attempts: ~500ms poll each + 1.2s/2s/3s backoffs.
         await tester.pump(const Duration(seconds: 9));
         await tester.pumpAndSettle();
 
         expect(rec.connectToAp, 3,
             reason: 'onUnavailable is retried with a bounded set of fresh requests');
+        expect(rec.lastConnectSsid, 'tasmota-C30304-0772',
+            reason: 'every retry re-requests the SAME user-picked ssid');
         expect(find.textContaining(
                 'Could not connect to the device setup network tasmota-C30304-0772'),
             findsOneWidget,
             reason: 'the bounded retries surface the actionable error');
+        expect(find.text('Open Wi-Fi Settings'), findsOneWidget,
+            reason: 'the error state offers the manual fallback, not a dead end');
         expect(find.text('Test Wi-Fi & Continue'), findsNothing,
             reason: 'provisioning never starts without a reachable AP');
 
@@ -1822,8 +1894,49 @@ void main() {
       });
 
       testWidgets(
-          'API 33+: NEARBY_WIFI_DEVICES denial falls back to the manual '
-          'Wi-Fi Settings flow instead of hard-blocking', (tester) async {
+          'API 24-28 keeps the manual flow provably unchanged: no scan UI, no '
+          'connectToAp is ever called, Open Wi-Fi Settings still opens '
+          'settings, and Continue probes the manually-selected AP',
+          (tester) async {
+        _mockSecureStorage(tester);
+        final api = _FlowApi();
+        final tasmota = _TasmotaFake();
+        final rec = _ApConnectRecorder();
+        await _launcher(tester, api, tasmota,
+            wifiOverrides: (t) => _mockWifiOverrides(t, rec: rec, sdk: 24));
+
+        // Manual label, exactly as before this feature.
+        expect(find.text('Open Wi-Fi Settings'), findsOneWidget);
+        expect(find.text('Select Device Wi-Fi'), findsNothing);
+
+        await tester.tap(find.text('Open Wi-Fi Settings'));
+        await tester.pumpAndSettle();
+        expect(rec.openWifiSettings, 1,
+            reason: 'the manual settings action still works on API 24-28');
+        expect(rec.connectToAp, 0,
+            reason: 'WifiNetworkSpecifier (API 29+) must never be requested');
+        expect(rec.scanWifi, 0,
+            reason: 'the in-app scan picker is never shown on API 24-28');
+
+        await tester.tap(find.text('Continue'));
+        await tester.pump(const Duration(milliseconds: 1400));
+        await tester.pumpAndSettle();
+
+        expect(rec.connectToAp, 0,
+            reason: 'Continue detects the AP via the existing probe loop only');
+        expect(rec.scanWifi, 0,
+            reason: 'Continue never opens the scan picker on API 24-28');
+        expect(find.text('Test Wi-Fi & Continue'), findsOneWidget,
+            reason: 'the legacy manual path still reaches the Configure form');
+        expect(tasmota.provisioned, isFalse);
+
+        await _unmount(tester);
+      });
+
+      testWidgets(
+          'API 33+: NEARBY_WIFI_DEVICES denial after picking a network falls '
+          'back to the manual Wi-Fi Settings flow instead of hard-blocking',
+          (tester) async {
         _mockSecureStorage(tester);
         final api = _FlowApi();
         final tasmota = _TasmotaFake();
@@ -1835,12 +1948,16 @@ void main() {
                 networks: const ['tasmota-C30304-0772'],
                 permissionDenied: true));
 
-        await tester.tap(find.text('Continue'));
+        await tester.tap(find.text('Select Device Wi-Fi'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('tasmota-C30304-0772'));
         await tester.pump(const Duration(milliseconds: 400));
         await tester.pumpAndSettle();
 
         expect(rec.connectToAp, 1,
-            reason: 'the specifier request was attempted once');
+            reason: 'the specifier request was attempted once on the picked ssid');
+        expect(rec.lastConnectSsid, 'tasmota-C30304-0772');
         expect(rec.openWifiSettings, 1,
             reason: 'a denied permission degrades to the manual settings flow');
         expect(find.text('Test Wi-Fi & Continue'), findsNothing,
