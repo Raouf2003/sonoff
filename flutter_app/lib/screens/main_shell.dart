@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
@@ -9,7 +8,7 @@ import 'sensors_page.dart';
 import 'schedules_page.dart';
 import 'rules_page.dart';
 import 'login_screen.dart';
-import 'ap_connect_poc_screen.dart';
+
 
 class MainShell extends StatefulWidget {
   final dynamic themeController;
@@ -76,15 +75,6 @@ class _MainShellState extends State<MainShell> {
     if (tc == null) return;
     setState(() {});
     tc.toggle();
-  }
-
-  // Debug-only entry for the WifiNetworkSpecifier POC. Guarded by kDebugMode
-  // so it never ships in a release build, and completely isolated from the
-  // real Add Device wizard.
-  Future<void> _openApConnectPoc() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const ApConnectPocScreen()),
-    );
   }
 
   @override
@@ -200,12 +190,6 @@ class _MainShellState extends State<MainShell> {
             icon: const Icon(Icons.logout_rounded, size: 20),
             tooltip: 'Logout',
           ),
-          if (kDebugMode)
-            IconButton(
-              onPressed: _openApConnectPoc,
-              icon: const Icon(Icons.science_outlined, size: 20),
-              tooltip: 'WifiNetworkSpecifier POC (debug)',
-            ),
         ],
       ),
     );
