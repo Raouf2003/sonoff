@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:smart_home_app/screens/devices_page.dart';
 import 'package:smart_home_app/services/api_service.dart';
+import 'package:smart_home_app/services/channel_state_machine.dart';
 import 'package:smart_home_app/services/cloud_device_transport.dart';
 import 'package:smart_home_app/services/device_repository_service.dart';
 import 'package:smart_home_app/services/device_transport.dart';
@@ -210,7 +211,8 @@ class _FakeRepo extends DeviceRepositoryService {
   final Completer<void> releaseControl = Completer<void>();
   int controlCalls = 0;
   int statusCalls = 0;
-  bool? lastCloudDown;
+  bool sameWifi = false;
+  ControlRoute? lastRoute;
 
   @override
   Future<void> warmUp(List<Map<String, dynamic>> devices) async {
@@ -222,15 +224,18 @@ class _FakeRepo extends DeviceRepositoryService {
   Future<List<Map<String, dynamic>>> getDevices() async => devices;
 
   @override
+  Future<bool> isDeviceOnSameNetwork(String deviceId) async => sameWifi;
+
+  @override
   Future<RelayStatusResult> control(
     String deviceId,
     int channel,
     String state, {
     String? opId,
-    bool cloudDown = false,
+    ControlRoute route = ControlRoute.cloudOnly,
   }) async {
     controlCalls++;
-    lastCloudDown = cloudDown;
+    lastRoute = route;
     if (gateControl) {
       // Hold in flight so the busy state and the double-tap guard can be
       // exercised. The test releases the gate explicitly.
@@ -437,7 +442,7 @@ class _StaleControlRepo extends _FakeRepo {
     int channel,
     String state, {
     String? opId,
-    bool cloudDown = false,
+    ControlRoute route = ControlRoute.cloudOnly,
   }) async {
     controlCalls++;
     if (gateControl) await releaseControl.future;
@@ -674,54 +679,68 @@ void main() {
     },
   );
 
-  testWidgets('cloudDown passed to control tracks the socket cloud monitor', (
-    tester,
-  ) async {
+  testWidgets('route passed to control follows same-WiFi detection', (tester) async {
     final repo = _FakeRepo();
     final socket = _ScriptableSocket();
     await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
 
-    // Unknown (no socket event yet): the safe cloud-first default.
+    // Unknown / no local evidence: the safe cloud default.
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
     expect(
-      repo.lastCloudDown,
-      isFalse,
-      reason: 'unknown connectivity must keep cloud-first',
+      repo.lastRoute,
+      ControlRoute.cloudOnly,
+      reason: 'ambiguous same-WiFi detection must default to cloud-only',
     );
 
-    // Confirmed disconnect → cloud known unreachable → local immediately.
-    socket.fireDisconnect();
-    await tester.pump();
+    // Confirmed same WiFi → the tap is local-only (no cloud round-trip).
+    repo.sameWifi = true;
     await tester.tap(find.text('CHANNEL 2'));
     await tester.pump();
-    expect(
-      repo.lastCloudDown,
-      isTrue,
-      reason: 'a confirmed disconnect must route local immediately',
-    );
+    expect(repo.lastRoute, ControlRoute.localOnly);
 
-    // Reconnect → cloud reachable again → cloud first.
-    socket.fireConnect();
-    await tester.pump();
+    // Back to a different network → cloud-only again.
+    repo.sameWifi = false;
     await tester.tap(find.text('CHANNEL 3'));
     await tester.pump();
-    expect(
-      repo.lastCloudDown,
-      isFalse,
-      reason: 'a connect must restore cloud-first',
-    );
+    expect(repo.lastRoute, ControlRoute.cloudOnly);
 
-    // Connect error → cloud unreachable → local immediately.
-    socket.fireConnectError();
+    await _unmount(tester);
+  });
+
+  testWidgets(
+      'same-WiFi tap is dispatched local-only (no cloud round-trip)',
+      (tester) async {
+    final repo = _FakeRepo(source: DeviceTransportSource.local)..sameWifi = true;
+    final socket = _ScriptableSocket();
+    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+    await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
-    await tester.tap(find.text('CHANNEL 4'));
+
+    expect(repo.lastRoute, ControlRoute.localOnly,
+        reason: 'a same-WiFi tap must be dispatched local-only');
+    expect(repo.controlCalls, 1);
+
+    // The fake's LOCAL-source result confirms: the command was confirmed by the
+    // device over LAN, never over the cloud.
+    expect(find.text('FLOWING'), findsOneWidget);
+
+    await _unmount(tester);
+  });
+
+  testWidgets('different-network tap is dispatched cloud-only (no LAN attempt)',
+      (tester) async {
+    final repo = _FakeRepo(source: DeviceTransportSource.cloud)..sameWifi = false;
+    final socket = _ScriptableSocket();
+    await _pumpDevicesPage(tester, repo: repo, socketFactory: (u, o) => socket);
+
+    await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
-    expect(
-      repo.lastCloudDown,
-      isTrue,
-      reason: 'a connect error must route local immediately',
-    );
+
+    expect(repo.lastRoute, ControlRoute.cloudOnly,
+        reason: 'a different-network tap must be dispatched cloud-only');
+    expect(repo.controlCalls, 1);
 
     await _unmount(tester);
   });

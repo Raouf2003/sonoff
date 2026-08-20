@@ -12,12 +12,21 @@ import 'device_transport.dart';
 /// reconcile poll after an ambiguous REST response and the unified
 /// SocketUpdate-vs-REST confirmation priority rule.
 
-/// Cloud reachability used by the badge and by [routingPolicy].
+/// Cloud reachability used by the badge. The socket is the live real-time
+/// signal: connected → [up]; disconnected / never connected → [down]. The old
+/// `stale` tier (socket connected but no recent `device_status`) was removed
+/// with the cloud-reachability routing — taps now route by same-WiFi detection,
+/// never by reachability.
+enum CloudReachability { up, down }
+
+/// The single transport a tap may use. Decided ONCE per tap by [routingPolicy];
+/// a command is never sent through both transports.
 ///
-/// - [up]: socket connected and a `device_status` was seen recently.
-/// - [stale]: socket connected but no `device_status` within [ChannelReducerConfig.cloudFreshWindow].
-/// - [down]: socket disconnected (confirmed cloud outage).
-enum CloudReachability { up, stale, down }
+/// - [localOnly]: the device is on the same network as the phone — control it
+///   directly over LAN, no cloud round-trip.
+/// - [cloudOnly]: the device is on a different network — control it through
+///   the cloud, no LAN attempt.
+enum ControlRoute { localOnly, cloudOnly }
 
 /// Device-level connectivity. Only [online]/[offline] are shown; everything
 /// else is [syncing].
@@ -724,56 +733,18 @@ bool showLanBadge(
       freshLocal;
 }
 
-/// Evaluates cloud reachability from transport facts. Ported from the old
-/// binary `useLocalFirst` decision with the new `stale` tier:
-///
-/// - socket connected + recent `device_status` → [CloudReachability.up]
-/// - socket connected + stale (no status within [ChannelReducerConfig.cloudFreshWindow]) → [CloudReachability.stale]
-/// - socket disconnected → [CloudReachability.down]
-/// - socket never connected + no local IP anchor → [CloudReachability.down]
-CloudReachability evaluateCloudReachability({
-  required bool socketConnected,
-  required bool socketEverConnected,
-  required bool hasVerifiedLocalIp,
-  required DateTime? lastCloudStatusAt,
-  required DateTime now,
-  required ChannelReducerConfig config,
-}) {
-  if (socketConnected) {
-    if (lastCloudStatusAt != null &&
-        now.difference(lastCloudStatusAt) < config.cloudFreshWindow) {
-      return CloudReachability.up;
-    }
-    return CloudReachability.stale;
-  }
-  if (!socketEverConnected && hasVerifiedLocalIp) {
-    return CloudReachability.down;
-  }
-  return CloudReachability.down;
-}
+/// Evaluates cloud reachability from the socket's live signal. The socket
+/// connects when the backend is reachable and disconnects on a confirmed
+/// outage, so the badge and the local-evidence holder can derive from it
+/// directly. The old `stale` tier is gone: taps route by same-WiFi detection,
+/// and a connected-but-quiet socket is still reachable.
+CloudReachability evaluateCloudReachability({required bool socketConnected}) =>
+    socketConnected ? CloudReachability.up : CloudReachability.down;
 
-/// Routing order for a tap, derived purely from reachability. The CLOUD→LAN /
-/// LAN→CLOUD dispatch ORDER inside `repository.control()` is NOT changed by
-/// this refactor — [RoutingOrder] only selects which transport runs first, and
-/// the `stale` tier adds a local liveness probe (a read, never a reroute).
-enum RoutingOrder { cloudFirst, localFirst }
-
-class RoutingDecision {
-  final RoutingOrder order;
-  final bool probeLocal;
-  const RoutingDecision(this.order, {this.probeLocal = false});
-}
-
-RoutingDecision routingPolicy(CloudReachability cloud) {
-  switch (cloud) {
-    case CloudReachability.down:
-      // Confirmed outage: the LAN runs first (safety fallback cloud after).
-      return const RoutingDecision(RoutingOrder.localFirst);
-    case CloudReachability.stale:
-      // Socket connected but no recent device_status: still cloud-first (the
-      // safe default) but probe the LAN so routing is decided on live evidence.
-      return const RoutingDecision(RoutingOrder.cloudFirst, probeLocal: true);
-    case CloudReachability.up:
-      return const RoutingDecision(RoutingOrder.cloudFirst);
-  }
-}
+/// Routes a tap by NETWORK, not by cloud reachability. Same WiFi → direct
+/// local control (the device is reachable on the phone's subnet); anything
+/// else → cloud-only (a LAN attempt could not succeed and would only add
+/// latency). Ambiguous detection (no cached IP, probe timeout, identity
+/// mismatch) returns false → the safe cloud default.
+ControlRoute routingPolicy({required bool sameWifi}) =>
+    sameWifi ? ControlRoute.localOnly : ControlRoute.cloudOnly;

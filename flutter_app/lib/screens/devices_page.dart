@@ -92,15 +92,6 @@ class _DevicesPageState extends State<DevicesPage>
   // is only flipped `false` on a confirmed disconnect / connect error.
   bool _socketConnected = true;
 
-  // Whether the socket has EVER successfully connected. Used to allow instant
-  // local control when the phone is on the same WiFi but has no internet —
-  // the socket will never connect, but a verified local IP may be cached.
-  bool _socketEverConnected = false;
-
-  // When the socket last delivered a live `device_status`/`device_update`
-  // event (the cloud's live signal). Drives the new `stale` reachability tier.
-  DateTime? _lastCloudStatusAt;
-
   // The pure-machine device verdict (badge + routing input). All writes flow
   // through `_dispatchDevice`.
   DeviceConnectivityState _deviceState = const DeviceConnectivityState();
@@ -263,15 +254,7 @@ class _DevicesPageState extends State<DevicesPage>
   void _refreshCloudReachability() {
     if (!mounted) return;
     final now = DateTime.now();
-    final reach = evaluateCloudReachability(
-      socketConnected: _socketConnected,
-      socketEverConnected: _socketEverConnected,
-      hasVerifiedLocalIp: _selectedDeviceId != null &&
-          _repository.hasVerifiedLocalIp(_selectedDeviceId!),
-      lastCloudStatusAt: _lastCloudStatusAt,
-      now: now,
-      config: _config,
-    );
+    final reach = evaluateCloudReachability(socketConnected: _socketConnected);
     if (reach != _deviceState.cloud) {
       _dispatchDevice(CloudHealth(reach), now);
     }
@@ -493,8 +476,6 @@ class _DevicesPageState extends State<DevicesPage>
 
     _socket?.onConnect((_) {
       _socketConnected = true;
-      _socketEverConnected = true;
-      _lastCloudStatusAt = DateTime.now();
       _refreshCloudReachability();
       // Reconnect: reconcile instead of waiting for the next 15s poll.
       _syncAfterReconnect();
@@ -538,7 +519,6 @@ class _DevicesPageState extends State<DevicesPage>
         // A cloud status event must never overwrite a fresher local session.
         if (freshLocal) return;
         // The socket is delivering live events: the cloud is genuinely up.
-        _lastCloudStatusAt = now;
         if (online) {
           // Positive device report: restore ONLINE.
           _dispatchDevice(
@@ -573,7 +553,6 @@ class _DevicesPageState extends State<DevicesPage>
         final report =
             ChannelReport(state == 'UNKNOWN' ? null : state, updatedAt: updatedAt);
         final now = DateTime.now();
-        _lastCloudStatusAt = now;
         final r = _dispatchChannel(
           channel - 1,
           SocketUpdate(report, opId: opId),
@@ -711,20 +690,6 @@ class _DevicesPageState extends State<DevicesPage>
     final opId = ControlTimeline.begin(_selectedDeviceId!, channel);
     final now = DateTime.now();
 
-    // Route the tap from cloud reachability: a confirmed outage (or a socket
-    // that never connected with a verified local IP) sends the command to the
-    // LAN first; a stale-but-connected cloud probes the LAN too (a read, never
-    // a reroute). The transport dispatch ORDER inside repository.control() is
-    // not changed here.
-    final routing = routingPolicy(evaluateCloudReachability(
-      socketConnected: _socketConnected,
-      socketEverConnected: _socketEverConnected,
-      hasVerifiedLocalIp: _repository.hasVerifiedLocalIp(_selectedDeviceId!),
-      lastCloudStatusAt: _lastCloudStatusAt,
-      now: now,
-      config: _config,
-    ));
-
     _inFlightOps['$_selectedDeviceId:$channel'] = opId;
     _pendingRelays.add(key);
     // Optimistic visual flip: the card reflects the requested state at tap
@@ -740,18 +705,23 @@ class _DevicesPageState extends State<DevicesPage>
     // Light haptic feedback for instant perceived responsiveness.
     HapticFeedback.lightImpact();
     ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Optimistic UI applied');
+
+    // Route the tap by NETWORK, not reachability: same WiFi → direct local
+    // control (no cloud round-trip); otherwise → cloud-only (no LAN attempt).
+    // The detection is fast — a recently-confirmed verified IP needs no probe;
+    // otherwise a bounded ~400ms identity check — and any ambiguity defaults to
+    // cloud, the safe reachable-by-default path. ONE transport per tap, never
+    // both: a slow cloud can never delay a same-network tap and a
+    // different-network tap never burns time on an unreachable LAN.
+    final sameWifi = await _repository.isDeviceOnSameNetwork(_selectedDeviceId!);
+    final route = routingPolicy(sameWifi: sameWifi);
     ControlTimeline.mark(
         opId,
         _selectedDeviceId!,
         channel,
-        routing.probeLocal
-            ? 'Routing: cloud-first + LAN probe'
-            : 'Routing: ${routing.order.name}');
-    if (routing.probeLocal) {
-      // Stale-but-connected cloud: keep cloud-first dispatch, but probe the LAN
-      // (a read, never a reroute) so routing is decided on live local evidence.
-      _probeLocalAfterCloudDown();
-    }
+        route == ControlRoute.localOnly
+            ? 'Routing: local-only (same WiFi)'
+            : 'Routing: cloud-only');
 
     try {
       final result = await _repository.control(
@@ -759,7 +729,7 @@ class _DevicesPageState extends State<DevicesPage>
         channel,
         targetState ? 'ON' : 'OFF',
         opId: opId,
-        cloudDown: routing.order == RoutingOrder.localFirst,
+        route: route,
       );
       if (!mounted) {
         ControlTimeline.end(opId);

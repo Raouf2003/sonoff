@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'api_service.dart';
+import 'channel_state_machine.dart';
 import 'cloud_device_transport.dart';
 import 'control_timeline.dart';
 import 'device_transport.dart';
@@ -604,21 +605,18 @@ class DeviceRepositoryService {
     }
   }
 
-  /// Relay command, CLOUD-FIRST: a tap reaches the backend/MQTT immediately —
-  /// local discovery is never started (nor awaited) before the command. The LAN
-  /// is the fallback, used ONLY when the cloud/backend is genuinely unavailable
-  /// (see [isAvailabilityFailure]). Every logical rejection — auth/ownership,
-  /// validation, command conflicts, coded 409, MAC identity mismatches — is
-  /// surfaced to the user and NEVER rerouted to the LAN.
+  /// Relay command, dispatched to EXACTLY ONE transport per tap — chosen once
+  /// by the view's [routingPolicy] from the same-WiFi detection:
   ///
-  /// When [cloudDown] is true the order is inverted: the caller already knows
-  /// the cloud is unreachable (e.g. the Socket.IO cloud monitor has confirmed a
-  /// disconnect), so the LAN runs FIRST with the cloud as a safety fallback.
-  /// [cloudDown] is only ever set from confirmed cloud-unreachability evidence,
-  /// so normal cloud control is never delayed.
+  /// - [ControlRoute.localOnly] → the command runs over the LAN (cached/warm
+  ///   verified IP only, no mDNS, no cloud round-trip). If the LAN fails, the
+  ///   command FAILS — it is never rerouted to the cloud.
+  /// - [ControlRoute.cloudOnly] → the command runs through the backend/MQTT and
+  ///   the LAN is never touched, even when a local endpoint exists.
   ///
-  /// The command is never sent through both transports for one tap: the first
-  /// transport that succeeds wins.
+  /// Every logical rejection — auth/ownership, validation, command conflicts,
+  /// coded 409, MAC identity mismatches — is surfaced to the user and NEVER
+  /// rerouted to the other transport.
   ///
   /// [opId] threads the per-tap correlation id into the [ControlTimeline].
   Future<RelayStatusResult> control(
@@ -626,84 +624,15 @@ class DeviceRepositoryService {
     int channel,
     String state, {
     String? opId,
-    bool cloudDown = false,
+    ControlRoute route = ControlRoute.cloudOnly,
   }) async {
     _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
-    DeviceTransportException? localFailure;
 
-    // LOCAL immediately when the cloud is already known unreachable. The
-    // caller does not wait for a cloud timeout before the LAN gets its chance.
-    // Use fast local control (cached IPs only, no mDNS) so cloud fallback
-    // is immediate if local fails.
-    if (cloudDown) {
+    if (route == ControlRoute.localOnly) {
       try {
         _tl(opId, deviceId, channel, 'Local attempt start');
         final local = await _localControlFast(deviceId, channel, state, opId: opId)
-            .timeout(kLocalControlFastTimeout);
-        _tl(opId, deviceId, channel, 'Local attempt done');
-        _lastSource = DeviceTransportSource.local;
-        _log('local control success for $deviceId channel $channel');
-        return parseRelayStatus(
-          local,
-          source: DeviceTransportSource.local,
-          seq: ++_seq,
-        );
-      } on Object catch (e) {
-        if (e is DeviceTransportException &&
-            e.kind == TransportFailureKind.logical) {
-          _tl(opId, deviceId, channel, 'Local attempt rejected');
-          _log('local control REJECTED for $deviceId (${_describe(e)})');
-          rethrow;
-        }
-        localFailure = e is DeviceTransportException
-            ? e
-            : DeviceTransportException('Local control failed: $e');
-        _tl(opId, deviceId, channel, 'Local attempt failed');
-        _log('local control failed for $deviceId (${_describe(localFailure)})');
-        // Trigger background mDNS refresh for future commands
-        _triggerBackgroundMdnRefresh(deviceId);
-      }
-    }
-
-    // CLOUD first (normal), or the safety fallback after a cloudDown LAN miss.
-    try {
-      _tl(opId, deviceId, channel, 'Cloud request start');
-      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
-      _tl(opId, deviceId, channel, 'Cloud response received');
-      _lastSource = DeviceTransportSource.cloud;
-      await _seedOneCandidate(deviceId, cloud['lastIp']);
-      final result = parseRelayStatus(
-        cloud,
-        source: DeviceTransportSource.cloud,
-        seq: seq,
-      );
-      _log('cloud control success for $deviceId channel $channel');
-      return result;
-    } on Object catch (e) {
-      // A logical rejection (ownership/validation/conflict, coded 409, MAC
-      // identity) must surface to the user — never fall back to the LAN.
-      if (e is ApiException && !isAvailabilityFailure(e)) {
-        _tl(opId, deviceId, channel, 'Cloud request rejected');
-        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
-        rethrow;
-      }
-      if (e is DeviceTransportException &&
-          e.kind == TransportFailureKind.logical) {
-        _tl(opId, deviceId, channel, 'Cloud request rejected');
-        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
-        rethrow;
-      }
-      _tl(opId, deviceId, channel, 'Cloud request failed (availability)');
-      _log('cloud control unavailable for $deviceId (${_describe(e)})');
-    }
-
-    // LOCAL fallback (cloud/backend genuinely unavailable). Skipped when the
-    // LAN already had its chance above (cloudDown) so the cloud is not chased
-    // by a second redundant local attempt.
-    if (!cloudDown) {
-      try {
-        final local = await _localControl(deviceId, channel, state, opId: opId)
             .timeout(kLocalBudget);
         _tl(opId, deviceId, channel, 'Local attempt done');
         _lastSource = DeviceTransportSource.local;
@@ -720,34 +649,89 @@ class DeviceRepositoryService {
           _log('local control REJECTED for $deviceId (${_describe(e)})');
           rethrow;
         }
-        localFailure = e is DeviceTransportException
-            ? e
-            : DeviceTransportException('Local control failed: $e');
         _tl(opId, deviceId, channel, 'Local attempt failed');
-        _log('local control failed for $deviceId (${_describe(localFailure)})');
+        _log('local control failed for $deviceId (${_describe(e)})');
+        throw DeviceTransportException(
+          'The device could not be reached on your network.',
+          cause: e is DeviceTransportException
+              ? e
+              : DeviceTransportException('Local control failed: $e'),
+        );
       }
     }
 
-    // Cloud and LAN both down: one human-readable availability error, keeping
-    // the last transport's underlying failure as the cause for diagnostics.
-    throw DeviceTransportException(
-      'The device could not be reached locally or via the cloud.',
-      cause: localFailure,
-    );
+    // Cloud-only: the LAN is never attempted, even if a local endpoint exists.
+    try {
+      _tl(opId, deviceId, channel, 'Cloud request start');
+      final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
+      _tl(opId, deviceId, channel, 'Cloud response received');
+      _lastSource = DeviceTransportSource.cloud;
+      await _seedOneCandidate(deviceId, cloud['lastIp']);
+      _log('cloud control success for $deviceId channel $channel');
+      return parseRelayStatus(
+        cloud,
+        source: DeviceTransportSource.cloud,
+        seq: seq,
+      );
+    } on Object catch (e) {
+      if (e is ApiException && !isAvailabilityFailure(e)) {
+        _tl(opId, deviceId, channel, 'Cloud request rejected');
+        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
+        rethrow;
+      }
+      if (e is DeviceTransportException &&
+          e.kind == TransportFailureKind.logical) {
+        _tl(opId, deviceId, channel, 'Cloud request rejected');
+        _log('cloud control REJECTED for $deviceId (${_describe(e)})');
+        rethrow;
+      }
+      _tl(opId, deviceId, channel, 'Cloud request failed (availability)');
+      _log('cloud control unavailable for $deviceId (${_describe(e)})');
+      throw DeviceTransportException(
+        'The device could not be reached via the cloud.',
+        cause: e,
+      );
+    }
   }
 
-  /// Trigger background mDNS discovery to refresh the local IP cache.
-  /// This runs independently and does not block the control path.
-  void _triggerBackgroundMdnRefresh(String deviceId) {
-    unawaited(_discoverLocal(deviceId, urgent: false).then((transport) {
-      if (transport != null) {
-        _log('background mDNS refresh succeeded for $deviceId');
-      } else {
-        _log('background mDNS refresh found no device for $deviceId');
+  /// Fast same-WiFi detection for tap routing. Returns true when the device is
+  /// reachable on the phone's network: a recently-confirmed warm endpoint needs
+  /// no probe (instant); otherwise the persisted verified IP is probed with a
+  /// bounded fast identity check (`Status 5`, [kLocalControlFastTimeout]). The
+  /// successful probe also warms the cache, so the immediately-following
+  /// [ControlRoute.localOnly] control hits the warm endpoint with no second
+  /// probe. Anything ambiguous — no cached IP, probe timeout, unreachable,
+  /// identity mismatch — returns false, the caller's safe cloud default.
+  Future<bool> isDeviceOnSameNetwork(String deviceId) async {
+    final now = DateTime.now();
+    final warm = _warmCache[deviceId];
+    final warmAt = _warmVerifiedAt[deviceId];
+    if (warm != null &&
+        warmAt != null &&
+        now.difference(warmAt) < kLocalReportHold) {
+      return true;
+    }
+    try {
+      final cached = await _locator.cachedAddress(deviceId);
+      if (cached == null || cached.isEmpty || !isUsableHttpHost(cached)) {
+        return false;
       }
-    }).catchError((e) {
-      _log('background mDNS refresh error for $deviceId: $e');
-    }));
+      final transport = _buildLocal(cached, deviceId);
+      final check = await transport.checkIdentity().timeout(kLocalControlFastTimeout);
+      if (check == LocalIdentityCheck.verified) {
+        _warmCache[deviceId] = transport;
+        _warmVerifiedAt[deviceId] = now;
+        _identityTrustedAt[deviceId] = now;
+        await _locator.storeVerifiedAddress(deviceId, cached);
+        return true;
+      }
+      if (check == LocalIdentityCheck.mismatch) {
+        await _locator.discardAddress(deviceId);
+      }
+    } catch (_) {
+      // Probe failed or timed out: not confirmably on the same network.
+    }
+    return false;
   }
 
   /// True when discovery PROBED and verified this device's identity recently,
@@ -794,31 +778,10 @@ class DeviceRepositoryService {
     }
   }
 
-  Future<Map<String, dynamic>> _localControl(
-    String deviceId,
-    int channel,
-    String state, {
-    String? opId,
-  }) async {
-    final local = await _findLocal(deviceId, urgent: true, opId: opId, channel: channel);
-    if (local == null) {
-      throw const DeviceTransportException('No local device available.');
-    }
-    final result = await local.control(
-      deviceId,
-      channel,
-      state,
-      opId: opId,
-      identityVerified: _canSkipIdentityVerify(deviceId),
-    );
-    _maybeLearnIp(deviceId, local.address, result);
-    return result;
-  }
-
   /// Fast local control attempt using ONLY cached/warm IPs.
-  /// Never runs mDNS discovery. Used for cloudDown=true path to avoid
-  /// blocking relay control on mDNS discovery.
-  /// Times out quickly so cloud fallback can proceed immediately.
+  /// Never runs mDNS discovery. Used for the [ControlRoute.localOnly] tap path
+  /// so the command reaches an already-known, identity-verified endpoint with
+  /// no discovery window.
   Future<Map<String, dynamic>> _localControlFast(
     String deviceId,
     int channel,

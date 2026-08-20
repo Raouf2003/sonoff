@@ -480,62 +480,26 @@ void main() {
   });
 
   group('routingPolicy', () {
-    test('up → cloudFirst', () {
-      expect(routingPolicy(CloudReachability.up).order, RoutingOrder.cloudFirst);
-      expect(routingPolicy(CloudReachability.up).probeLocal, isFalse);
+    test('same WiFi → local-only control', () {
+      expect(routingPolicy(sameWifi: true), ControlRoute.localOnly);
     });
 
-    test('down → localFirst', () {
-      expect(routingPolicy(CloudReachability.down).order, RoutingOrder.localFirst);
-      expect(routingPolicy(CloudReachability.down).probeLocal, isFalse);
-    });
-
-    test('stale → cloudFirst + probeLocal', () {
-      final d = routingPolicy(CloudReachability.stale);
-      expect(d.order, RoutingOrder.cloudFirst);
-      expect(d.probeLocal, isTrue);
+    test('different network → cloud-only control', () {
+      expect(routingPolicy(sameWifi: false), ControlRoute.cloudOnly);
     });
   });
 
   group('evaluateCloudReachability', () {
-    test('socket connected + recent status → up', () {
+    test('socket connected → up', () {
       expect(
-        evaluateCloudReachability(
-          socketConnected: true,
-          socketEverConnected: true,
-          hasVerifiedLocalIp: true,
-          lastCloudStatusAt: t0,
-          now: t0.add(const Duration(seconds: 5)),
-          config: config,
-        ),
+        evaluateCloudReachability(socketConnected: true),
         CloudReachability.up,
       );
     });
 
-    test('socket connected + stale status → stale', () {
+    test('socket disconnected → down (even with a fresh device status)', () {
       expect(
-        evaluateCloudReachability(
-          socketConnected: true,
-          socketEverConnected: true,
-          hasVerifiedLocalIp: true,
-          lastCloudStatusAt: t0,
-          now: t0.add(const Duration(minutes: 6)),
-          config: config,
-        ),
-        CloudReachability.stale,
-      );
-    });
-
-    test('socket disconnected → down (even with fresh status)', () {
-      expect(
-        evaluateCloudReachability(
-          socketConnected: false,
-          socketEverConnected: true,
-          hasVerifiedLocalIp: true,
-          lastCloudStatusAt: t0,
-          now: t0.add(const Duration(seconds: 1)),
-          config: config,
-        ),
+        evaluateCloudReachability(socketConnected: false),
         CloudReachability.down,
       );
     });
