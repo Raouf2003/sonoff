@@ -10,6 +10,15 @@ import 'device_transport.dart';
 /// probe after the burst settles is enough.
 const Duration kNetworkTransitionSettle = Duration(milliseconds: 400);
 
+/// UI-only settle delay for the LAN/ONLINE badge. Longer than
+/// [kNetworkTransitionSettle] so the debounced same-WiFi probe (which lands at
+/// +400ms after a network event) is folded into the same visible window:
+/// rapid successive ReachabilityState writes during a transition collapse into
+/// ONE badge render instead of a flicker per write. This delays ONLY the
+/// badge's visual representation — routingPolicy/_toggle keep reading the live,
+/// un-debounced [ReachabilityMonitor.state] at tap time.
+const Duration kBadgeSettleDelay = Duration(milliseconds: 500);
+
 /// Live routing facts for the currently selected device, maintained
 /// CONTINUOUSLY in the background so a relay tap reads a fresh value with ZERO
 /// probe latency instead of racing a fresh probe against the tap.

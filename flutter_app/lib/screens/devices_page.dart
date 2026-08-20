@@ -143,6 +143,12 @@ class _DevicesPageState extends State<DevicesPage>
 
   Timer? _statusTimer;
 
+  /// Debounces the BADGE's visual representation of ReachabilityState. Rapid
+  /// writes during a network transition (socket drop → local-status result →
+  /// socket reconnect → debounced probe) collapse into one render. Routing
+  /// (_toggle:757) never touches this: it reads the live state directly.
+  Timer? _badgeSettleTimer;
+
   final List<ChannelState> _channelStates =
       List.generate(4, (_) => const ChannelState());
   final List<bool> _channelLoading = [false, false, false, false];
@@ -328,6 +334,7 @@ class _DevicesPageState extends State<DevicesPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _statusTimer?.cancel();
+    _badgeSettleTimer?.cancel();
     _cloudHealthTimer?.cancel();
     _cloudHealthTimer = null;
     _monitor.state.removeListener(_onReachabilityChanged);
@@ -349,7 +356,17 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   void _onReachabilityChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // UI-only settle: the badge re-renders only after ReachabilityState has
+    // been stable for [kBadgeSettleDelay], so a burst of writes during a
+    // transition shows ONE badge change instead of a flicker per write. This
+    // does NOT delay routing — _toggle reads `_monitor.state.value` live.
+    _badgeSettleTimer?.cancel();
+    _badgeSettleTimer = Timer(kBadgeSettleDelay, () {
+      _badgeSettleTimer = null;
+      if (!mounted) return;
+      setState(() {});
+    });
   }
 
   @override
@@ -1252,14 +1269,13 @@ class _DevicesPageState extends State<DevicesPage>
             online: _deviceState.connectivity == Connectivity.online,
             offline: _deviceState.connectivity == Connectivity.offline,
             lan: showLanBadge(_deviceState, _config, DateTime.now()) ||
-                // The background reachability monitor continuously re-confirms
-                // the device is on the same network: once the cloud socket goes
-                // down, the LAN badge reflects that live routing mode without
-                // requiring a tap or a fresh status read. (A confirmed-up cloud
-                // keeps the ONLINE verdict — LAN is a cloud-down concept.)
+                // The badge reflects the ACTUAL transport routingPolicy will
+                // use for a tap (see _toggle:757-763): same-WiFi → local
+                // control → LAN, regardless of the cloud socket. Routing and
+                // badge always agree — a stable same-WiFi session with the
+                // cloud up is controlled locally and shows LAN, never ONLINE.
                 (_monitor.deviceId == _selectedDeviceId &&
-                    _monitor.state.value.sameWifi &&
-                    !_monitor.state.value.cloudSocketReady),
+                    _monitor.state.value.sameWifi),
           ),
           const SizedBox(width: AppSpacing.xs),
           IconButton(
@@ -1420,9 +1436,9 @@ class _StatusPill extends StatelessWidget {
   /// Authoritative device-offline verdict (LWT or repeated poll failures).
   final bool offline;
 
-  /// Local Mode badge: Online styling + cloud confirmed down + fresh local
-  /// evidence. Computed by `showLanBadge`, never from "the last request ran on
-  /// the LAN".
+  /// Local Mode badge: Online styling + the transport routingPolicy will use
+  /// for a tap (same-WiFi → local control) or, for the cloud-down case, fresh
+  /// local evidence. Never derived from "the last request ran on the LAN".
   final bool lan;
 
   const _StatusPill({

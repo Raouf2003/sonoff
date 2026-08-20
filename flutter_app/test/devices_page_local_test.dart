@@ -557,7 +557,7 @@ void main() {
   });
 
   testWidgets(
-    'LAN requires the cloud confirmed down; a local read alone keeps ONLINE',
+    'a local read alone confirms same-WiFi → badge LAN, no cloud outage needed',
     (tester) async {
       final repo = _FakeRepo(source: DeviceTransportSource.local);
       final socket = _ScriptableSocket();
@@ -567,27 +567,21 @@ void main() {
         socketFactory: (u, o) => socket,
       );
 
-      // Cloud reachability unknown → the safe cloud-first default keeps ONLINE,
-      // even though the freshest result came over the LAN.
-      expect(
-        find.text('Online'),
-        findsOneWidget,
-        reason:
-            'a successful local read must not flip the badge to LAN by itself',
-      );
-      expect(find.text('LAN'), findsNothing);
-
-      // Only a CONFIRMED cloud outage + verified local device = LAN.
-      socket.fireDisconnect();
-      await tester.pump();
-      await tester.tap(find.text('CHANNEL 1'));
-      await tester.pumpAndSettle();
-
+      // The initial status read resolved over the LAN: the monitor confirms the
+      // device is on the same network, so routing is local and the badge shows
+      // LAN immediately — regardless of the cloud socket. Badge and reality
+      // agree (this is the fix for the old ONLINE-while-local lie).
       expect(
         find.text('LAN'),
         findsOneWidget,
-        reason: 'cloud confirmed down + verified LAN device = LAN',
+        reason: 'same-WiFi routing must render LAN even with the cloud up',
       );
+      expect(find.text('Online'), findsNothing);
+
+      // A confirmed cloud outage keeps the same-WiFi verdict → LAN stays.
+      socket.fireDisconnect();
+      await tester.pump();
+      expect(find.text('LAN'), findsOneWidget);
       expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
@@ -824,8 +818,94 @@ void main() {
     );
 
     testWidgets(
-      'badge flips to LAN automatically when the background monitor confirms '
-      'same-WiFi after the cloud socket drops — no tap required',
+      'same-WiFi + cloud up → LAN badge: the badge follows the routing mode, '
+      'not the cloud socket (Issue 1)',
+      (tester) async {
+        // First status read is cloud-sourced (device not yet confirmed on the
+        // LAN) → starts ONLINE; later reads resolve local (same-WiFi).
+        final repo = _CloudThenLocalRepo();
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+        expect(find.text('Online'), findsOneWidget);
+
+        // The background monitor confirms same-WiFi while the cloud socket stays
+        // UP: routing flips to local (routingPolicy sameWifi-first) and the
+        // badge must show LAN — no cloud outage is required. Badge and reality
+        // agree; the old ONLINE-while-local lie is gone.
+        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
+
+        // A socket drop keeps the same-WiFi verdict → LAN stays (the probe
+        // read resolves local again).
+        socket.fireDisconnect();
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'rapid ReachabilityState writes inside the settle window produce ONE '
+      'badge update, not a flicker per write (Issue 2)',
+      (tester) async {
+        final repo = _FakeRepo(); // cloud source: starts ONLINE
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+        expect(find.text('Online'), findsOneWidget);
+
+        // Simulate the Online→LAN transition burst from the trace: socket drop
+        // (S2) → local-status result (S4) → socket reconnect (S1) → debounced
+        // probe (S5), all landing within kBadgeSettleDelay.
+        monitor.state.value =
+            monitor.state.value.copyWith(cloudSocketReady: false); // S2
+        await tester.pump(const Duration(milliseconds: 100));
+        monitor.state.value = monitor.state.value
+            .copyWith(sameWifi: true, cloudSocketReady: false); // S4
+        await tester.pump(const Duration(milliseconds: 100));
+        monitor.state.value =
+            monitor.state.value.copyWith(cloudSocketReady: true); // S1
+        await tester.pump(const Duration(milliseconds: 100));
+        monitor.state.value =
+            monitor.state.value.copyWith(sameWifi: true); // S5
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // No intermediate write rendered: the badge is debounced.
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason: 'mid-transition writes must not flicker the badge',
+        );
+        expect(find.text('LAN'), findsNothing);
+
+        // After the settle window the final same-WiFi verdict renders ONCE.
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets(
+      'a same-WiFi badge stays LAN when the cloud socket drops — no tap '
+      'required',
       (tester) async {
         final repo = _FakeRepo(source: DeviceTransportSource.local);
         final socket = _ScriptableSocket();
@@ -837,17 +917,16 @@ void main() {
           monitor: monitor,
         );
 
-        // Cloud socket up + same WiFi confirmed: the badge stays ONLINE.
-        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
-        await tester.pump();
-        expect(find.text('Online'), findsOneWidget);
-        expect(find.text('LAN'), findsNothing);
+        // The local status read confirmed same-WiFi: LAN immediately.
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
 
-        // The socket drops (cloud outage): the SAME background state now flips
-        // the badge to LAN immediately — no toggle tap, no status poll needed.
+        // The socket drops (cloud outage): the same background state keeps the
+        // badge on LAN — no toggle tap, no status poll needed.
         socket.fireDisconnect();
         await tester.pump();
         expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
 
         await _unmount(tester);
       },
@@ -1293,7 +1372,8 @@ void main() {
     });
 
     testWidgets(
-      'LAN + cloud reconnect + fresh device cloud evidence → ONLINE',
+      'LAN + cloud reconnect + fresh device cloud evidence → badge stays LAN '
+      '(the device is on the same network, so routing never bounced to cloud)',
       (tester) async {
         final socket = _ScriptableSocket();
         final repo = _FakeRepo(source: DeviceTransportSource.local);
@@ -1307,25 +1387,27 @@ void main() {
         await tester.pump();
         expect(find.text('LAN'), findsOneWidget);
 
-        // Cloud comes back and delivers fresh positive device evidence.
+        // Cloud comes back and delivers fresh positive device evidence. The
+        // device is still on the same network (local source) so routing stays
+        // local: the badge must NOT bounce to ONLINE (Issue 1 fix).
         socket.fireConnect();
         await tester.pump();
         socket.push('device_status', {'deviceId': _deviceId, 'online': true});
         await tester.pump();
 
         expect(
-          find.text('Online'),
+          find.text('LAN'),
           findsOneWidget,
-          reason: 'cloud reconnect + fresh device evidence → ONLINE',
+          reason: 'a same-WiFi device stays LAN when the cloud reconnects',
         );
-        expect(find.text('LAN'), findsNothing);
+        expect(find.text('Online'), findsNothing);
 
         await _unmount(tester);
       },
     );
 
-    testWidgets('a late local poll cannot downgrade ONLINE after newer cloud '
-        'evidence', (tester) async {
+    testWidgets('a late local poll cannot downgrade the same-WiFi LAN verdict '
+        'after newer cloud evidence', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
       await _pumpDevicesPage(
@@ -1334,21 +1416,23 @@ void main() {
         socketFactory: (u, o) => socket,
       );
 
-      // Cloud evidence confirms ONLINE.
+      // Cloud evidence confirms the device online; the same-WiFi verdict from
+      // the initial local read still routes locally → LAN.
       socket.push('device_status', {'deviceId': _deviceId, 'online': true});
       await tester.pump();
-      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsOneWidget);
 
-      // An older local poll resolves later; cloud is still reachable.
+      // An older local poll resolves later; cloud is still reachable. The
+      // same-WiFi routing (and its LAN badge) must not be downgraded.
       await tester.pump(const Duration(seconds: 16));
       await tester.pump();
 
       expect(
-        find.text('Online'),
+        find.text('LAN'),
         findsOneWidget,
-        reason: 'a late local result must not overwrite ONLINE evidence',
+        reason: 'a late local result must not flip the same-WiFi LAN verdict',
       );
-      expect(find.text('LAN'), findsNothing);
+      expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
@@ -1628,7 +1712,8 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('reconnect restores ONLINE; a LAN badge never sticks', (
+    testWidgets('reconnect keeps the LAN badge while the device stays on the same '
+      'network — the badge follows routing and never bounces (Issue 1)', (
       tester,
     ) async {
       final socket = _ScriptableSocket();
@@ -1639,32 +1724,67 @@ void main() {
         socketFactory: (u, o) => socket,
       );
 
+      // First read was cloud-sourced (device not yet on same WiFi) → ONLINE.
+      expect(find.text('Online'), findsOneWidget);
+
       socket.fireDisconnect();
       await tester.pump();
       expect(find.text('LAN'), findsOneWidget);
 
       socket.fireConnect();
       await tester.pump();
+      // The device is STILL on the same network (subsequent reads are local),
+      // so routing stays local and the badge must stay LAN — no bounce to
+      // ONLINE just because the cloud socket recovered.
       expect(
-        find.text('Online'),
+        find.text('LAN'),
         findsOneWidget,
-        reason: 'cloud reachability restores ONLINE priority immediately',
+        reason: 'a same-WiFi device keeps the LAN badge after a socket reconnect',
       );
-      expect(find.text('LAN'), findsNothing);
+      expect(find.text('Online'), findsNothing);
 
       socket.push('device_status', {'deviceId': _deviceId, 'online': true});
       await tester.pump();
       expect(
-        find.text('Online'),
+        find.text('LAN'),
         findsOneWidget,
-        reason: 'fresh cloud device evidence keeps ONLINE',
+        reason: 'fresh cloud device evidence does not flip a same-WiFi device',
       );
 
       await _unmount(tester);
     });
 
+    testWidgets('a different-network device (cloud source) shows ONLINE after a '
+        'socket reconnect — cloud routing restored', (tester) async {
+      final socket = _ScriptableSocket();
+      final repo = _FakeRepo(); // cloud source: device NOT on the same network
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+      );
+      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsNothing);
+
+      socket.fireDisconnect();
+      await tester.pump();
+      socket.fireConnect();
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text('Online'),
+        findsOneWidget,
+        reason: 'cloud reachability restores ONLINE for a cloud-routed device',
+      );
+      expect(find.text('LAN'), findsNothing);
+
+      await _unmount(tester);
+    });
+
     testWidgets(
-      'healthy-cloud local polls stay ONLINE (probe never downgrades)',
+      'healthy-cloud local polls keep the LAN badge — a same-WiFi probe never '
+      'downgrades the verdict',
       (tester) async {
         final socket = _ScriptableSocket();
         final repo = _FakeRepo(source: DeviceTransportSource.local);
@@ -1674,13 +1794,14 @@ void main() {
           socketFactory: (u, o) => socket,
         );
 
-        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsOneWidget);
 
-        // A background local poll while the cloud is still up must keep ONLINE.
+        // A background local poll while the cloud is still up keeps the
+        // same-WiFi verdict (and its LAN badge).
         await tester.pump(const Duration(seconds: 16));
         await tester.pump();
-        expect(find.text('Online'), findsOneWidget);
-        expect(find.text('LAN'), findsNothing);
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
 
         await _unmount(tester);
       },
@@ -1928,7 +2049,7 @@ void main() {
 
   group('cold-start LAN loading (progressive render)', () {
     testWidgets('cold start: cloud + LAN both up → device renders from cache '
-        'quickly and reconciles to ONLINE', (tester) async {
+        'quickly and reconciles to LAN (same-WiFi routing)', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
       await cache.upsert({
@@ -1963,15 +2084,17 @@ void main() {
       expect(find.text('Controller'), findsOneWidget);
       expect(find.text('DRY'), findsNWidgets(4));
 
-      // Cloud reachability is still UNKNOWN at cold start → the safe cloud-first
-      // default keeps ONLINE (never LAN) until the socket confirms otherwise.
-      expect(find.text('Online'), findsOneWidget);
-      expect(find.text('LAN'), findsNothing);
+      // The local status read confirmed same-WiFi: routing is local, so the
+      // badge shows LAN even though the cloud socket is up (Issue 1).
+      expect(find.text('LAN'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
 
-      // Socket connects: cloud confirmed reachable → stays ONLINE.
+      // Socket connects: cloud confirmed reachable → the same-WiFi device
+      // stays LAN (routing never bounced to cloud).
       socket.fireConnect();
       await tester.pump();
-      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
@@ -2069,8 +2192,8 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('cold start: LAN displayed, then cloud reconnects → reconciles '
-        'to ONLINE via existing rules', (tester) async {
+    testWidgets('cold start: LAN displayed, then cloud reconnects → the same-WiFi '
+        'badge stays LAN (routing never bounced)', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final cache = LocalDeviceCache();
       await cache.upsert({
@@ -2098,11 +2221,12 @@ void main() {
       await tester.pump();
       expect(find.text('LAN'), findsOneWidget);
 
-      // Cloud comes back: existing reconciliation restores ONLINE priority.
+      // Cloud comes back: the same-WiFi device keeps the LAN badge — the
+      // reconnect must not bounce routing (or the badge) to ONLINE.
       socket.fireConnect();
       await tester.pump();
-      expect(find.text('Online'), findsOneWidget);
-      expect(find.text('LAN'), findsNothing);
+      expect(find.text('LAN'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
@@ -2112,7 +2236,7 @@ void main() {
     testWidgets('Online → Internet lost → fast confirmed failure → immediate '
         'LAN probe → LAN (no socket timeout wait)', (tester) async {
       final socket = _ScriptableSocket();
-      final repo = _FakeRepo(source: DeviceTransportSource.local);
+      final repo = _CloudThenLocalRepo(); // first read cloud (Online) → probe local (LAN)
       var healthy = true;
       await _pumpDevicesPage(
         tester,
@@ -2125,7 +2249,8 @@ void main() {
 
       // Internet dies. The first health probe fails (weak evidence alone) and
       // schedules an immediate confirm; the second consecutive failure confirms
-      // the outage and fires the existing LAN probe at once.
+      // the outage and fires the existing LAN probe at once. The probe read is
+      // local → the badge flips to LAN (same-WiFi routing).
       healthy = false;
       await tester.pump(const Duration(seconds: 5));
       await tester.pump(const Duration(milliseconds: 400));
@@ -2182,8 +2307,8 @@ void main() {
       },
     );
 
-    testWidgets('cloud recovers → socket reconnect restores Online immediately '
-        '(health-down never wedges LAN)', (tester) async {
+    testWidgets('cloud recovers → socket reconnect keeps the same-WiFi LAN badge '
+        '(health-down never wedges, reconnect never bounces)', (tester) async {
       final socket = _ScriptableSocket();
       final repo = _FakeRepo(source: DeviceTransportSource.local);
       var healthy = true;
@@ -2193,29 +2318,28 @@ void main() {
         socketFactory: (u, o) => socket,
         healthCheck: () async => healthy,
       );
-      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsOneWidget);
 
-      // Internet lost → fast-confirmed → LAN.
+      // Internet lost → fast-confirmed → the same-WiFi badge stays LAN.
       healthy = false;
       await tester.pump(const Duration(seconds: 5));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
       expect(find.text('LAN'), findsOneWidget);
 
-      // Internet returns: the socket reconnect restores Online right away —
-      // no 15s poll or kLocalReportHold wait, and the health-down state never
-      // wedges the badge in LAN.
+      // Internet returns: the socket reconnect must NOT bounce the same-WiFi
+      // device's badge to ONLINE — routing is still local (Issue 1).
       healthy = true;
       socket.fireConnect();
       await tester.pump();
       await tester.pump();
 
       expect(
-        find.text('Online'),
+        find.text('LAN'),
         findsOneWidget,
-        reason: 'fresh cloud confirmation restores ONLINE immediately',
+        reason: 'a same-WiFi device keeps LAN after recovery — no wedge, no bounce',
       );
-      expect(find.text('LAN'), findsNothing);
+      expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
@@ -2236,7 +2360,7 @@ void main() {
         },
       );
 
-      expect(find.text('Online'), findsOneWidget);
+      expect(find.text('LAN'), findsOneWidget);
       await tester.pump(const Duration(seconds: 16)); // ticks at 5/10/15s
       await tester.pump();
 
@@ -2245,8 +2369,8 @@ void main() {
         3,
         reason: 'a healthy cloud gets exactly one bounded probe per interval',
       );
-      expect(find.text('Online'), findsOneWidget);
-      expect(find.text('LAN'), findsNothing);
+      expect(find.text('LAN'), findsOneWidget);
+      expect(find.text('Online'), findsNothing);
 
       await _unmount(tester);
     });
@@ -2330,7 +2454,7 @@ void main() {
           1,
           reason: 'one identity verification on first contact',
         );
-        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsOneWidget);
 
         socket.fireDisconnect();
         await tester.pump();
@@ -2448,7 +2572,7 @@ void main() {
         // identity check, never a raw status read.
         expect(cm.log.first, '192.168.1.5 Status%205');
         expect(cm.status5Count, 1);
-        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsOneWidget);
 
         socket.fireDisconnect();
         await tester.pump();
