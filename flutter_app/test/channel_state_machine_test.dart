@@ -388,6 +388,141 @@ void main() {
     });
   });
 
+  group('stale socket telemetry (LAN tap value-flicker fix)', () {
+    test('a stale trailing socket OFF is held; the confirmed ON survives', () {
+      final armed = channelReduce(const ChannelState(), const UserTap(true, opId: 'o1'),
+          config, now: t0).state;
+      // The verified local REST read-back confirms ON and resolves pending.
+      final rest = channelReduce(
+          armed,
+          RestResponse(1, report: rep('ON', updatedAt: t0.add(const Duration(milliseconds: 50))),
+              online: true, source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 50)));
+      expect(rest.state.reported, 'ON');
+      expect(rest.state.pending, isFalse);
+
+      // A stale tele/STATE OFF (pre-switch snapshot, delivered late) arrives
+      // within the settle window carrying the OLD value. It must NOT flip the
+      // confirmed ON back to OFF.
+      final staleOff = channelReduce(
+          rest.state,
+          SocketUpdate(rep('OFF', updatedAt: t0.add(const Duration(seconds: 1)))),
+          config,
+          now: t0.add(const Duration(seconds: 1)));
+      expect(staleOff.state.reported, 'ON',
+          reason: 'a stale contradictory socket echo is held in the settle window');
+      expect(staleOff.state.epoch, rest.state.epoch,
+          reason: 'a held contradiction must not bump the epoch');
+      expect(staleOff.effects, isNot(contains(FollowUp.rippleOff)));
+
+      // The settled ON echo is a same-value no-op; the verdict stays ON.
+      final settledOn = channelReduce(
+          staleOff.state,
+          SocketUpdate(rep('ON', updatedAt: t0.add(const Duration(seconds: 2)))),
+          config,
+          now: t0.add(const Duration(seconds: 2)));
+      expect(settledOn.state.reported, 'ON');
+    });
+
+    test('a contradiction that persists past the settle window is accepted '
+        '(genuine external change)', () {
+      final armed = channelReduce(const ChannelState(), const UserTap(true, opId: 'o1'),
+          config, now: t0).state;
+      final rest = channelReduce(
+          armed,
+          RestResponse(1, report: rep('ON', updatedAt: t0.add(const Duration(milliseconds: 50))),
+              online: true, source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 50))).state;
+      // After the settle window lapses the contradiction is real truth.
+      final externalOff = channelReduce(
+          rest,
+          SocketUpdate(rep('OFF', updatedAt: t0.add(const Duration(seconds: 3)))),
+          config,
+          now: t0.add(const Duration(seconds: 3)));
+      expect(externalOff.state.reported, 'OFF');
+    });
+
+    test('a socket echo without a correlated opId resolves a pending tap by '
+        'value, not by opId', () {
+      final base = channelReduce(const ChannelState(), LocalReport(rep('OFF', updatedAt: t0)),
+          config, now: t0).state;
+      final armed = channelReduce(base, const UserTap(true, opId: 'o1'),
+          config, now: t0.add(const Duration(seconds: 1))).state;
+      // The value CHANGE is the confirmation (LAN echo carries opId:null).
+      final r = channelReduce(
+          armed,
+          SocketUpdate(rep('ON', updatedAt: t0.add(const Duration(seconds: 1)))),
+          config,
+          now: t0.add(const Duration(seconds: 1)));
+      expect(r.state.pending, isFalse);
+      expect(r.state.reported, 'ON');
+    });
+
+    test('two rapid legitimate taps both register; the settle guard only holds '
+        'the stale echo', () {
+      // Tap 1: OFF -> ON via verified local REST.
+      var s = channelReduce(const ChannelState(), const UserTap(true, opId: 'o1'),
+          config, now: t0).state;
+      s = channelReduce(
+          s,
+          RestResponse(1, report: rep('ON', updatedAt: t0.add(const Duration(milliseconds: 50))),
+              online: true, source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 50))).state;
+      expect(s.reported, 'ON');
+      // Tap 2 immediately after: ON -> OFF via verified local REST.
+      final armed2 = channelReduce(s, const UserTap(false, opId: 'o2'),
+          config, now: t0.add(const Duration(milliseconds: 500))).state;
+      final r2 = channelReduce(
+          armed2,
+          RestResponse(1, report: rep('OFF', updatedAt: t0.add(const Duration(milliseconds: 550))),
+              online: true, source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 550)));
+      expect(r2.state.reported, 'OFF');
+      expect(r2.state.pending, isFalse);
+      // A late stale ON echo from tap 1 contradicts the just-confirmed OFF
+      // inside the settle window and is held — the OFF verdict survives.
+      final staleEcho = channelReduce(
+          r2.state,
+          SocketUpdate(rep('ON', updatedAt: t0.add(const Duration(milliseconds: 600)))),
+          config,
+          now: t0.add(const Duration(milliseconds: 600)));
+      expect(staleEcho.state.reported, 'OFF');
+      expect(staleEcho.state.epoch, r2.state.epoch);
+    });
+
+    test('a stale OLD-value echo while pending is held; the REST verdict wins', () {
+      final base = channelReduce(const ChannelState(), LocalReport(rep('OFF', updatedAt: t0)),
+          config, now: t0).state;
+      final armed = channelReduce(base, const UserTap(true, opId: 'o1'),
+          config, now: t0.add(const Duration(seconds: 1))).state;
+      // The stale pre-switch tele/STATE OFF lands while the tap is STILL
+      // pending (before the fast LAN REST). It carries the OLD value, so it is
+      // NOT the tap's confirmation — it must be held, not resolved.
+      final stale = channelReduce(
+          armed,
+          SocketUpdate(rep('OFF', updatedAt: t0.add(const Duration(seconds: 1)))),
+          config,
+          now: t0.add(const Duration(seconds: 1)));
+      expect(stale.state.pending, isTrue,
+          reason: 'a stale old-value echo must not resolve the pending tap');
+      expect(stale.state.reported, 'OFF');
+      expect(stale.effects, isNot(contains(FollowUp.rippleOff)));
+      // The verified local REST read-back confirms ON and resolves the tap.
+      final rest = channelReduce(
+          stale.state,
+          RestResponse(1, report: rep('ON', updatedAt: t0.add(const Duration(milliseconds: 50))),
+              online: true, source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 50)));
+      expect(rest.state.reported, 'ON');
+      expect(rest.state.pending, isFalse);
+    });
+  });
+
   group('Timeout', () {
     test('degrades a pending channel to UNKNOWN (never fabricates OFF)', () {
       final armed = channelReduce(const ChannelState(), const UserTap(false, opId: 'o1'),

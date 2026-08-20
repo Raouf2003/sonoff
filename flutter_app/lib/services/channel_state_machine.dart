@@ -338,6 +338,36 @@ ReduceResult<ChannelState> _applyTap(ChannelState state, UserTap event) {
   );
 }
 
+/// How long after a fresh LOCAL verdict a contradicting socket telemetry echo
+/// is treated as suspect (relay settle / MQTT cross-topic reordering window)
+/// instead of authoritative truth. Mirrors the ReachabilityState sticky-window
+/// pattern: a single contradictory message near a just-settled local read is
+/// noise (stale pre-switch tele/STATE), not a state change.
+const Duration kRelaySettleWindow = Duration(seconds: 2);
+
+/// Step-1 trace: set false once the on-device capture confirms the flicker
+/// sequence. Prints one line per channel report as it is accepted or rejected.
+const bool _channelReportTrace = true;
+
+void _traceChannelReport(ChannelEvent event, String outcome) {
+  if (!_channelReportTrace) return;
+  final report = switch (event) {
+    CloudReport(:final report) => report,
+    LocalReport(:final report) => report,
+    SocketUpdate(:final report) => report,
+    _ => null,
+  };
+  final source = switch (event) {
+    CloudReport() => 'cloud',
+    LocalReport() => 'local',
+    SocketUpdate() => 'socket',
+    _ => '?',
+  };
+  // ignore: avoid_print — Step-1 on-device flicker trace (see _channelReportTrace)
+  print('[CHANNEL REDUCE] source=$source state=${report?.state} '
+      'updatedAt=${report?.updatedAt?.toIso8601String()} -> $outcome');
+}
+
 ReduceResult<ChannelState> _applyReport(
   ChannelState state,
   ChannelEvent event,
@@ -379,6 +409,7 @@ ReduceResult<ChannelState> _applyReport(
       state.pending &&
       opId == state.opId;
   if (opIdMatch) {
+    _traceChannelReport(event, 'ACCEPT (opIdMatch, resolves pending)');
     final effects = <FollowUp>[
       report.state == 'ON' ? FollowUp.rippleOn : FollowUp.rippleOff,
       FollowUp.cancelPendingTimer,
@@ -408,6 +439,7 @@ ReduceResult<ChannelState> _applyReport(
   // confirmed and nothing pending.
   if (report.state == null) {
     if (state.reported == null && !state.pending) {
+      _traceChannelReport(event, 'ACCEPT (UNKNOWN, source-only)');
       final next = state.copyWith(
         source: source,
         confirmedAt: report.updatedAt ?? now,
@@ -415,6 +447,7 @@ ReduceResult<ChannelState> _applyReport(
       );
       return ReduceResult(next, const [FollowUp.none]);
     }
+    _traceChannelReport(event, 'REJECT (UNKNOWN while confirmed/pending)');
     return ReduceResult(state, const [FollowUp.none]);
   }
 
@@ -423,6 +456,7 @@ ReduceResult<ChannelState> _applyReport(
     if (state.serverTs != null &&
         report.updatedAt != null &&
         !report.updatedAt!.isAfter(state.serverTs!)) {
+      _traceChannelReport(event, 'REJECT (older than serverTs)');
       return ReduceResult(state, const [FollowUp.none]);
     }
     // A fresh LAN read is the closest truth. A cloud report may only replace
@@ -433,6 +467,7 @@ ReduceResult<ChannelState> _applyReport(
     final cloudFresh = report.updatedAt == null ||
         now.difference(report.updatedAt!) < config.cloudFreshWindow;
     if (hasFreshLocal && !cloudFresh) {
+      _traceChannelReport(event, 'REJECT (stale cloud vs fresh local)');
       return ReduceResult(state, const [FollowUp.none]);
     }
   } else {
@@ -442,6 +477,7 @@ ReduceResult<ChannelState> _applyReport(
     if (state.source == DeviceTransportSource.local &&
         state.confirmedAt != null &&
         incomingTs.isBefore(state.confirmedAt!)) {
+      _traceChannelReport(event, 'REJECT (older local read)');
       return ReduceResult(state, const [FollowUp.none]);
     }
   }
@@ -452,11 +488,36 @@ ReduceResult<ChannelState> _applyReport(
   // telemetry, and the 15s poll. Skip the epoch bump and all effects so the
   // ripple pulse is never visibly re-triggered for a value that did not
   // change. A report that RESOLVES a still-pending tap is a meaningful
-  // transition regardless of the value, so it is never suppressed here. The
-  // freshness / rollback acceptance rules above are untouched — this only
+  // transition, so it is never suppressed here — BUT only the tap's DESIRED
+  // value counts as resolution (FIX B: a pending-phase socket echo carrying
+  // the OLD pre-tap value is the stale pre-switch tele/STATE, not the tap's
+  // confirmation; holding it lets the verified REST read-back settle truth).
+  // The freshness / rollback acceptance rules above are untouched — this only
   // stops redundant re-application on top of them.
-  final resolvesPendingTap = isSocket && state.pending;
+  final resolvesPendingTap =
+      isSocket && state.pending && report.state == state.desired;
   if (report.state == state.reported && !resolvesPendingTap) {
+    _traceChannelReport(event, 'REJECT (same-value echo)');
+    return ReduceResult(state, const [FollowUp.none]);
+  }
+
+  // Settle-window contradiction guard (FIX B): a socket telemetry echo that
+  // CONTRADICTS a fresh LOCAL verdict shortly after it landed is a stale
+  // pre-switch tele/STATE delivered late (MQTT has no cross-topic ordering
+  // guarantee), not device truth. Hold it — the verified local read, or a
+  // second echo once the settle window lapses, re-establishes the real value.
+  // Only applies while NOT pending: a pending tap expects value-change socket
+  // reports as its confirmation, and the verified local REST read-back settles
+  // the verdict. Scoped to sockets; a local contradiction is always real.
+  final freshLocalContradiction = isSocket &&
+      state.reported != null &&
+      report.state != state.reported &&
+      !state.pending &&
+      state.source == DeviceTransportSource.local &&
+      state.confirmedAt != null &&
+      now.difference(state.confirmedAt!) < kRelaySettleWindow;
+  if (freshLocalContradiction) {
+    _traceChannelReport(event, 'REJECT (contradictory socket in settle window)');
     return ReduceResult(state, const [FollowUp.none]);
   }
 
@@ -475,6 +536,7 @@ ReduceResult<ChannelState> _applyReport(
   ];
 
   if (isSocket && state.pending) {
+    _traceChannelReport(event, 'ACCEPT (socket resolves pending)');
     // Phase 3: accepted real socket state is authoritative and resolves the
     // pending tap (its newer epoch beats the REST response).
     final resolved = next.copyWith(
@@ -494,6 +556,7 @@ ReduceResult<ChannelState> _applyReport(
     );
   }
 
+  _traceChannelReport(event, 'ACCEPT (value change)');
   return ReduceResult(next, effects, committed: report.state != null);
 }
 

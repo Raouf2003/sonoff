@@ -625,9 +625,16 @@ class _DevicesPageState extends State<DevicesPage>
         DateTime? updatedAt;
         final ua = map['updatedAt'];
         if (ua is String) updatedAt = DateTime.tryParse(ua);
-        final opId = _inFlightOps['$_selectedDeviceId:$channel'];
-        if (opId != null) {
-          ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+        // FIX A: only the BACKEND's correlated opId counts as a tap ACK. The
+        // backend echoes the app's opId (via /api/control → MQTT RESULT) for
+        // cloud-routed commands, and null for LAN-routed ones (no backend
+        // pending exists). Stamping the app's own _inFlightOps opId onto EVERY
+        // channel echo made stale telemetry look like the command's own
+        // confirmation — never do that. A LAN tap is instead confirmed by its
+        // verified local REST read-back (LocalDeviceTransport UNCONFIRMED).
+        final backendOpId = map['opId'] as String?;
+        if (backendOpId != null) {
+          ControlTimeline.mark(backendOpId, _selectedDeviceId!, channel,
               'Socket.IO received (device_update)');
         }
         final report =
@@ -635,7 +642,7 @@ class _DevicesPageState extends State<DevicesPage>
         final now = DateTime.now();
         final r = _dispatchChannel(
           channel - 1,
-          SocketUpdate(report, opId: opId),
+          SocketUpdate(report, opId: backendOpId),
           now,
         );
         // A committed device report is strong liveness evidence (the device
