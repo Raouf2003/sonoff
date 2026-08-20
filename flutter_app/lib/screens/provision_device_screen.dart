@@ -216,52 +216,47 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   static const MethodChannel _wifiBindChannel =
       MethodChannel('stees/wifi_binding');
 
-  // Programmatic soft-AP connect (Android, API 29+): WifiNetworkSpecifier +
-  // bindProcessToNetwork exposed as `stees/ap_connect`. Kept separate from the
-  // manual `stees/wifi_settings` / `stees/wifi_binding` channels: the
-  // specifier's `onAvailable` bind is the ONLY bind in programmatic mode, and
-  // reachability is still decided by the wizard's own 192.168.4.1 probe.
+  // Simple programmatic soft-AP join (Android only, API 29+): the user picks
+  // the exact device AP in the in-app list and Continue requests that SSID via
+  // WifiNetworkSpecifier. No auto-discovery, no retry loop — a single request,
+  // then the existing 192.168.4.1 probe decides success.
   static const MethodChannel _apConnectChannel =
       MethodChannel('stees/ap_connect');
 
-  /// Android SDK int reported by the native side (null until known). Programmatic
-  /// connect is only attempted when this is >= 29 AND the API-33+ NEARBY_WIFI_DEVICES
-  /// runtime permission was not denied this session.
-  int? _apConnectSdkInt;
+  bool _wifiBound = false;
 
   /// True after NEARBY_WIFI_DEVICES was denied (or the channel rejected the
   /// request): the wizard falls back to the manual Wi-Fi-settings flow for the
   /// rest of this session instead of re-requesting the permission.
   bool _apConnectDisabled = false;
 
-  /// True while a programmatic specifier connect is live and bound. While set,
+  /// True while a programmatic specifier join is live and bound. While set,
   /// [_ensureBoundToWifi] is a no-op (the specifier already bound the process)
   /// and [_releaseWifiBinding] cancels through the specifier channel instead.
   bool _apConnectMode = false;
 
-  int _apConnectAttempts = 0;
+  /// The SSID the user picked from the in-app device-AP list on the Connect
+  /// step. Only used on API 29+; on API 24-28 / iOS it stays null and the
+  /// manual Wi-Fi-settings flow runs unchanged.
+  String? _selectedDeviceApSsid;
 
-  /// Optional staged label shown during the automatic connect (SSID discovery,
-  /// awaiting the system specifier dialog) so the spinner is self-explanatory.
+  /// True when a programmatic join attempt failed after bounded waiting.
+  /// Drives the "Open Wi-Fi Settings" fallback in the Connect error state.
+  bool _programmaticFailed = false;
+
+  /// Optional staged label shown while the specifier join is in flight.
   String? _apConnectPending;
-
-  /// True after the user-selected programmatic connect exhausted its bounded
-  /// retries without binding. Drives the "Open Wi-Fi Settings" fallback button
-  /// in the Connect step's error state so the user can still proceed manually.
-  bool _programmaticConnectFailed = false;
 
   bool get _apConnectSupported =>
       defaultTargetPlatform == TargetPlatform.android &&
       (_apConnectSdkInt ?? -1) >= 29 &&
       !_apConnectDisabled;
 
-  // Max specifier requests per [.. _runProgrammaticConnect]: the system can
-  // answer onUnavailable (no matching AP found / request rejected) even when
-  // the AP is in range, so a handful of bounded retries come first.
-  static const int _apConnectMaxAttempts = 3;
-  static const Duration _apConnectStateDeadline = Duration(seconds: 20);
+  int? _apConnectSdkInt;
 
-  bool _wifiBound = false;
+  // Bounded wait for the specifier to reach onAvailable: single request, no
+  // retry loop. Mirrors the probe grace so the user is not left hanging.
+  static const Duration _apConnectDeadline = Duration(seconds: 20);
 
   late final ApiService _api;
 
@@ -455,8 +450,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       // _loadBrokerInfo): proceeding without a real broker would silently
       // reconfigure the device onto Tasmota's factory broker.
       _brokerInfoLoad = _loadBrokerInfo();
-      unawaited(_probeApConnectSupport());
     }
+    // Best-effort probe of `stees/ap_connect` support (Android SDK int). Any
+    // failure (MissingPlugin on iOS / in widget tests) disables the in-app
+    // join and keeps the manual Wi-Fi-settings flow.
+    _probeApConnectSupport();
     // The Connect phase is fully offline from the start - no backend session is
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
     // the Tasmota AP (192.168.4.1); the backend is only contacted AFTER the
@@ -568,50 +566,44 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
   }
 
-  // Reads the Android SDK int from `stees/ap_connect` once, at wizard start,
-  // so the Connect step knows whether programmatic soft-AP connect is usable.
-  // Any failure (MissingPlugin on iOS / in widget tests, etc.) disables it.
+  // Reads the Android SDK int from `stees/ap_connect` once, at wizard start, so
+  // the Connect step knows whether the in-app specifier join is usable. Any
+  // failure (MissingPlugin on iOS / in widget tests) keeps the manual flow.
   Future<void> _probeApConnectSupport() async {
     try {
       final info = await _apConnectChannel
           .invokeMethod<Map<dynamic, dynamic>>('sdkInfo');
       _apConnectSdkInt = info?['sdkInt'] as int?;
-      debugPrint('[PROVISION] ap_connect SDK support: ${_apConnectSdkInt ?? -1}');
+      debugPrint(
+          '[PROVISION] ap_connect SDK support: ${_apConnectSdkInt ?? -1}');
     } catch (e) {
       debugPrint('[PROVISION] ap_connect support probe failed: $e');
       _apConnectSdkInt = null;
     }
   }
 
-  // Smart connect entry: on Android API 29+ (when not disabled) it opens the
-  // in-app Wi-Fi scan list so the user picks the device's setup AP explicitly,
-  // then joins it programmatically via WifiNetworkSpecifier — no Wi-Fi Settings
-  // jump, no captive-portal prompt. On API 24-28 / iOS / after a permission
-  // denial it falls back to the original manual [.. _openWifiSettings] unchanged.
+  // Connect-step entry. On Android API 29+ (not disabled, not recovery) the
+  // primary action opens the in-app device-AP list so the user picks the exact
+  // SSID; on API 24-28 / iOS / after a permission denial it is the unchanged
+  // manual Wi-Fi-settings jump.
   Future<void> _connectToDeviceWifi() async {
     if (_step != _Step.connect) return;
-    if (_apConnectSupported && !_apConnectMode) {
-      final ok = await _connectToApViaPicker();
-      if (!mounted || _step != _Step.connect) return;
-      if (!ok) return; // error surfaced, or manual fallback in progress
-      _startApDetection();
+    if (_apConnectSupported && !_apConnectMode && !_recoveryMode) {
+      await _connectToApViaPicker();
       return;
     }
     await _openWifiSettings();
   }
 
-  // Opens the device-AP picker sheet, which scans for Wi-Fi networks in-app and
-  // returns either the user's chosen SSID (→ programmatic join) or a fallback
-  // sentinel. Returns true once the programmatic join bound (the caller should
-  // run AP detection); false for a dismissed sheet, a manual fallback (the
-  // session was flipped to manual and Wi-Fi Settings opened), or a failed
-  // connect (the error UI was surfaced).
-  Future<bool> _connectToApViaPicker() async {
-    if (_step != _Step.connect) return false;
+  // Opens the plain in-app scan list (same UI as the Configure step's home
+  // Wi-Fi picker) and stores the chosen SSID. Does NOT connect — the user taps
+  // Continue afterwards, exactly one explicit step per the spec.
+  Future<void> _connectToApViaPicker() async {
+    if (_step != _Step.connect) return;
     if (mounted) {
       setState(() {
         _error = null;
-        _programmaticConnectFailed = false;
+        _programmaticFailed = false;
       });
     }
     final selected = await showModalBottomSheet<String>(
@@ -620,12 +612,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       backgroundColor: Colors.transparent,
       builder: (_) => const _DeviceApPickerSheet(),
     );
-    if (!mounted || _step != _Step.connect) return false;
-    if (selected == null) return false; // dismissed
+    if (!mounted || _step != _Step.connect) return;
+    if (selected == null) return; // dismissed
     if (selected == '_manual') {
-      // A permission denial or the user choosing the manual path: flip the
-      // session to manual mode (no further specifier requests) and send them to
-      // Wi-Fi Settings. Never an error.
+      // A scan permission denial or the user choosing the manual path: flip the
+      // session to manual mode and open Wi-Fi Settings. Never an error.
       _apConnectDisabled = true;
       _apConnectMode = false;
       if (mounted) {
@@ -635,89 +626,56 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         });
       }
       await _openWifiSettings();
-      return false;
+      return;
     }
-    return _connectToApSsid(selected);
+    setState(() => _selectedDeviceApSsid = selected);
   }
 
-  // Programmatic connect to an EXPLICIT user-selected SSID: request it via
-  // WifiNetworkSpecifier, retry on onUnavailable. Returns true once the system
-  // reports the network as available (the 192.168.4.1 probe runs afterwards,
-  // unmodified, in _startApDetection).
+  // Single programmatic join to the user-selected SSID: request it via
+  // WifiNetworkSpecifier and wait for onAvailable (bounded). Returns true once
+  // bound (the 192.168.4.1 probe runs afterwards via _startApDetection).
   Future<bool> _connectToApSsid(String ssid) async {
     if (_step != _Step.connect) return false;
     if (mounted) {
       setState(() {
         _searching = true;
         _error = null;
+        _programmaticFailed = false;
         _apConnectPending = 'Connecting to $ssid…';
       });
     }
-    _apConnectAttempts = 0;
-    while (_apConnectAttempts < _apConnectMaxAttempts) {
-      _apConnectAttempts++;
-      if (mounted) {
-        setState(() => _apConnectPending = 'Connecting to $ssid automatically…');
-      }
-      final stage = await _requestApConnect(ssid);
-      if (stage == null) return false; // permission denied / channel fatal → manual fallback
-      if (stage == 'available') {
-        _apConnectMode = true;
-        _wifiBound = true;
-        _apConnectPending = null;
-        debugPrint('[PROVISION] programmatic AP connect bound; probing next');
-        return true;
-      }
-      // unavailable / lost / failed → short backoff, then a fresh request.
-      if (mounted) {
-        setState(() => _apConnectPending = 'Retrying connection to $ssid…');
-      }
-      await Future<void>.delayed(_apConnectBackoff(_apConnectAttempts));
+    final stage = await _requestApConnect(ssid);
+    if (!mounted || _step != _Step.connect) return false;
+    if (stage == null) return false; // manual fallback already happened
+    if (stage == 'available') {
+      _apConnectMode = true;
+      _wifiBound = true;
+      _apConnectPending = null;
+      debugPrint('[PROVISION] programmatic AP join bound; probing next');
+      return true;
     }
     _failProgrammatic(
       'Could not connect to the device setup network $ssid. Make sure the '
-      'device is powered on and in setup mode, then try again or use Open '
-      'Wi-Fi Settings.',
+      'device is powered on and in setup mode. If the join prompt was declined '
+      'or the AP is password-protected, use Open Wi-Fi Settings instead.',
     );
     return false;
   }
 
-  Duration _apConnectBackoff(int attempt) {
-    switch (attempt) {
-      case 1:
-        return const Duration(milliseconds: 1200);
-      case 2:
-        return const Duration(milliseconds: 2000);
-      default:
-        return const Duration(milliseconds: 3000);
-    }
-  }
-
   // Issues one specifier request and waits for it to settle. Returns:
-  //   'available'  → bound, proceed to the probe
-  //   other stage  → terminal specifier outcome (unavailable/lost/failed) → retry
-  //   null         → a hard fallback already happened (permission denied etc.)
+  //   'available' → bound, proceed to the probe
+  //   other stage → terminal specifier outcome (unavailable/lost/failed)
+  //   null        → a hard fallback already happened (permission denied etc.)
   Future<String?> _requestApConnect(String ssid) async {
     try {
       await _apConnectChannel.invokeMethod<void>('connectToAp', {'ssid': ssid});
     } on PlatformException catch (e) {
       debugPrint('[PROVISION] connectToAp PlatformException: ${e.code} ${e.message}');
-      if (e.code == 'PERMISSION_DENIED') {
-        // NEARBY_WIFI_DEVICES denied on API 33+: never hard-block. The user is
-        // sent to the (fully manual) Wi-Fi Settings flow for this session.
+      if (e.code == 'PERMISSION_DENIED' || e.code == 'UNSUPPORTED' || e.code == 'BAD_SSID') {
+        // Never hard-block: the user is sent to the (fully manual) Wi-Fi
+        // Settings flow for this session.
         _apConnectDisabled = true;
         _apConnectMode = false;
-        if (mounted) {
-          setState(() {
-            _searching = false;
-            _apConnectPending = null;
-          });
-        }
-        await _openWifiSettings();
-        return null;
-      }
-      if (e.code == 'UNSUPPORTED' || e.code == 'BAD_SSID') {
-        _apConnectDisabled = true;
         if (mounted) {
           setState(() {
             _searching = false;
@@ -732,7 +690,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] connectToAp threw: $e');
       return 'failed';
     }
-    final deadline = DateTime.now().add(_apConnectStateDeadline);
+    final deadline = DateTime.now().add(_apConnectDeadline);
     while (DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       if (!mounted || _step != _Step.connect) return null;
@@ -747,7 +705,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       final stage = st?['stage'] as String?;
       if (stage == 'available') return 'available';
       if (stage == 'unavailable' || stage == 'lost' || stage == 'failed') {
-        debugPrint('[PROVISION] specifier stage=$stage; retrying');
+        debugPrint('[PROVISION] specifier stage=$stage');
         return stage!;
       }
       // requesting / awaiting_system / idle → keep waiting inside the poll.
@@ -763,7 +721,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       _searching = false;
       _apConnectPending = null;
       _apConnectMode = false;
-      _programmaticConnectFailed = true;
+      _programmaticFailed = true;
       _error = message;
     });
   }
@@ -792,17 +750,23 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       return;
     }
     // PHASE 1 (OFFLINE-AP): the phone is already on the Tasmota AP now (the
-    // user picked it in Wi-Fi Settings and returned here, or the programmatic
-    // connect below bound it). No backend call is allowed from this point - the
-    // MAC, Wi-Fi config and WifiTest3 are all local device operations.
+    // user picked it in Wi-Fi Settings and returned here). No backend call is
+    // allowed from this point - the MAC, Wi-Fi config and WifiTest3 are all
+    // local device operations.
     debugPrint('[PROVISION] OFFLINE_AP_PHASE_START');
     debugPrint('[PROVISION] AP_CONNECT_START');
-    // API 29+ (Android): open the in-app device-AP picker and join the chosen
-    // network via WifiNetworkSpecifier — no settings jump, no captive-portal
-    // prompt. On API 24-28 / iOS / after a permission denial this is skipped and
-    // detection runs exactly as before against the manually selected network.
-    if (_apConnectSupported && !_apConnectMode) {
-      final ok = await _connectToApViaPicker();
+    // API 29+ (Android): join the exact SSID the user picked in the in-app
+    // list via WifiNetworkSpecifier, then probe. If nothing is picked yet,
+    // open the list first. On API 24-28 / iOS / after a permission denial /
+    // in recovery this is skipped and detection runs exactly as before against
+    // the manually selected network.
+    if (_apConnectSupported && !_apConnectMode && !_recoveryMode) {
+      if (_selectedDeviceApSsid == null) {
+        await _connectToApViaPicker();
+        if (!mounted) return;
+        if (_selectedDeviceApSsid == null) return; // dismissed / manual fallback
+      }
+      final ok = await _connectToApSsid(_selectedDeviceApSsid!);
       if (!mounted) return;
       if (!ok) return; // error surfaced, or manual fallback in progress
     }
@@ -858,7 +822,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       // unregisters the callback and unbinds the process network).
       try {
         await _apConnectChannel.invokeMethod<void>('cancel');
-        debugPrint('[PROVISION] programmatic AP connect cancelled / binding released');
+        debugPrint('[PROVISION] programmatic AP join cancelled / binding released');
       } catch (_) {}
       _apConnectMode = false;
       _wifiBound = false;
@@ -995,8 +959,6 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     _apProbeStart = DateTime.now();
     _apAttempt = 0;
     _wifiBound = false;
-    _apConnectPending = null;
-    _programmaticConnectFailed = false;
     debugPrint('[PROVISION] phase=$_phaseLabel app resumed/restarting detection, waiting for network stabilization');
     if (mounted) {
       setState(() {
@@ -2677,10 +2639,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
 
   Widget _buildConnect(SteesColors colors) {
     final recovering = _recoveryMode;
-    // On Android API 29+ the primary action joins the device AP programmatically
-    // (no settings jump, no captive-portal prompt); everywhere else it is the
+    // On Android API 29+ the primary action opens the in-app scan list (same UI
+    // as the Configure step's home Wi-Fi picker); everywhere else it is the
     // plain manual Wi-Fi-Settings open.
-    final smartConnect = _apConnectSupported;
+    final smartConnect = _apConnectSupported && !_recoveryMode;
+    final selectedAp = _selectedDeviceApSsid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2708,14 +2671,18 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                         'new registration.\n\n'
                         'Power-cycle the device, pick its access point '
                         '(tasmota-XXXX) in Wi-Fi Settings, then return here.'
-                    : 'Connect your phone to the device Wi-Fi.\n\n'
-                        'Tap below, scan for the device\'s access point '
-                        '(tasmota-XXXX) and pick it from the list.',
+                    : smartConnect
+                        ? 'Connect your phone to the device Wi-Fi.\n\n'
+                            "Tap below and pick the device's setup network "
+                            '(tasmota-XXXX) from the list, then tap Continue.'
+                        : 'Connect your phone to the device Wi-Fi.\n\n'
+                            "Tap below, pick the device's access point (tasmota-XXXX), "
+                            'then return here.',
                 style: GoogleFonts.inter(fontSize: 13, color: colors.mist, height: 1.5),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: AppSpacing.xl),
-              // The Connect phase is fully offline: the Wi-Fi-Settings action
+              // The Connect phase is fully offline: the network-selection action
               // and Continue are available immediately. No backend session is
               // ever created before leaving for the offline SoftAP.
               SizedBox(
@@ -2733,6 +2700,47 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                   style: _filledStyle(colors),
                 ),
               ),
+              if (smartConnect && selectedAp != null) ...[
+                const SizedBox(height: AppSpacing.md),
+                InkWell(
+                  onTap: _connectToApViaPicker,
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+                    decoration: BoxDecoration(
+                      color: colors.well,
+                      borderRadius: BorderRadius.circular(AppRadius.lg),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.wifi_tethering, size: 18, color: colors.stream),
+                        const SizedBox(width: AppSpacing.md),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Device network',
+                                style: GoogleFonts.inter(
+                                    fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                selectedAp,
+                                style: GoogleFonts.inter(
+                                    fontSize: 14, color: colors.foam),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.edit_outlined, size: 18, color: colors.mist),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: AppSpacing.md),
               SizedBox(
                 width: double.infinity,
@@ -2760,9 +2768,12 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                       child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
                     ),
                     const SizedBox(width: AppSpacing.sm),
-                    Text(
-                      _apConnectPending ?? 'Checking device connection…',
-                      style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+                    Flexible(
+                      child: Text(
+                        _apConnectPending ?? 'Checking device connection…',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+                      ),
                     ),
                   ],
                 ),
@@ -2829,8 +2840,22 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     ),
                   ),
                 ],
-                if (!recovering && _programmaticConnectFailed) ...[
+                if (!recovering && _programmaticFailed) ...[
                   const SizedBox(height: AppSpacing.xl),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: OutlinedButton.icon(
+                      onPressed: _connectToApViaPicker,
+                      icon: const Icon(Icons.wifi_tethering, size: 18),
+                      style: _outlinedStyle(colors),
+                      label: Text(
+                        'Try a different network',
+                        style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
                   SizedBox(
                     width: double.infinity,
                     height: 46,
@@ -3453,6 +3478,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _stageRebootTimer?.cancel();
     _closeProvisionSocket();
     _recoveryMode = true;
+    // Recovery is fully manual: forget any programmatic selection and drop any
+    // live specifier join before re-entering the Connect step.
+    if (_apConnectMode) {
+      unawaited(_releaseWifiBinding());
+    }
+    _selectedDeviceApSsid = null;
+    _programmaticFailed = false;
+    _apConnectPending = null;
     traceLog('RECOVERY',
         'REQUIRED total=${_trace.elapsedMs}ms deviceId=$_issuedDeviceId');
     debugPrint('[PROVISION] phase=RECOVERY_AP deviceId preserved=$_issuedDeviceId');
@@ -3475,6 +3508,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     _waitStageTimer?.cancel();
     _stageRebootTimer?.cancel();
     _closeProvisionSocket();
+    if (_apConnectMode) {
+      unawaited(_releaseWifiBinding());
+    }
     traceLog('EXIT', 'CANCELLED total=${_trace.elapsedMs}ms');
     if (mounted) Navigator.of(context).pop(false);
   }
@@ -3799,21 +3835,11 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
   }
 }
 
-/// Matches the SSID patterns the firmware uses for its setup access point, so
-/// the picker can surface likely device networks first. Covers Tasmota's
-/// `tasmota-XXXX` default plus the common ESP32 factory names.
-bool _isDeviceApSsid(String ssid) {
-  final s = ssid.trim().toLowerCase();
-  return s.startsWith('tasmota-') ||
-      s.startsWith('esp_') ||
-      s.startsWith('esp32-');
-}
-
-/// In-app Wi-Fi scan list for the Connect step. Unlike the Configure step's
-/// [_WifiPickerSheet], this one is about the DEVICE's setup AP: device-pattern
-/// SSIDs (tasmota-XXXX …) are grouped and highlighted at the top, and a scan
-/// permission denial degrades gracefully to the manual Wi-Fi Settings flow
-/// (popping `'_manual'`) instead of hard-blocking.
+// Plain in-app device-AP list for the Connect step (Android API 29+). Reuses
+// the same scan + list UI as the Configure step's home Wi-Fi picker, minus the
+// manual-entry field: the fallback for a bad/absent scan is the manual
+// Wi-Fi-Settings open, so the only actions here are tap-to-select (returns the
+// SSID) or the manual route ('_manual').
 class _DeviceApPickerSheet extends StatefulWidget {
   const _DeviceApPickerSheet();
 
@@ -3846,41 +3872,36 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
           .timeout(const Duration(seconds: 10));
       if (!mounted) return;
       final available = result?['available'] == true;
-      final reason = result?['reason']?.toString();
       final raw = result?['networks'] as List<dynamic>? ?? const [];
       final ssids = raw
           .whereType<String>()
           .where((s) => s.trim().isNotEmpty)
           .toSet()
-          .toList();
-      if (!available && reason == 'permission denied') {
-        // The scan permission is a hard prerequisite for programmatic connect,
-        // so this session degrades to the fully manual Wi-Fi Settings flow.
-        Navigator.of(context).pop('_manual');
-        return;
-      }
+          .toList()
+        ..sort();
       setState(() {
         _scanning = false;
         _networks = ssids;
-        _scanMessage = ssids.isEmpty
-            ? 'No Wi-Fi networks found. Make sure the device is powered on and '
-                'in setup mode, then rescan or open Wi-Fi Settings.'
-            : null;
+        _scanMessage = !available
+            ? 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.'
+            : (ssids.isEmpty
+                ? 'No Wi-Fi networks found. If the device setup network '
+                    '(tasmota-XXXX) is not listed, use Open Wi-Fi Settings.'
+                : null);
       });
     } on TimeoutException {
-      debugPrint('[PROVISION] device AP scan timed out after 10s');
+      debugPrint('[PROVISION] device-AP scan timed out after 10s');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan timed out. Tap refresh to try again or open '
-            'Wi-Fi Settings.';
+        _scanMessage = 'Wi-Fi scan timed out. Tap refresh to try again.';
       });
     } catch (e) {
-      debugPrint('[PROVISION] device AP scan failed: $e');
+      debugPrint('[PROVISION] device-AP scan failed: $e');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan unavailable. Open Wi-Fi Settings instead.';
+        _scanMessage = 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.';
       });
     }
   }
@@ -3889,17 +3910,13 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
     Navigator.of(context).pop(ssid);
   }
 
-  void _manualFallback() {
+  void _selectManual() {
     Navigator.of(context).pop('_manual');
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
-    final deviceNetworks =
-        _networks.where(_isDeviceApSsid).toList()..sort();
-    final otherNetworks =
-        _networks.where((s) => !_isDeviceApSsid(s)).toList()..sort();
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -3911,8 +3928,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
               children: [
                 Text(
                   'Select Device Wi-Fi',
-                  style: GoogleFonts.sora(
-                      fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
                 ),
                 const Spacer(),
                 IconButton(
@@ -3922,8 +3938,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                       ? SizedBox(
                           width: 18,
                           height: 18,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: colors.stream),
+                          child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
                         )
                       : const Icon(Icons.refresh, size: 20, color: Colors.white),
                 ),
@@ -3931,9 +3946,8 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
             ),
             const SizedBox(height: AppSpacing.xs),
             Text(
-              'Pick the device\'s setup access point (tasmota-XXXX).',
-              style: GoogleFonts.inter(
-                  fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
+              'Tap the device setup network, then Continue.',
+              style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
             ),
             const SizedBox(height: AppSpacing.sm),
             if (_scanMessage != null)
@@ -3941,10 +3955,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                 padding: const EdgeInsets.only(bottom: AppSpacing.sm),
                 child: Text(
                   _scanMessage!,
-                  style: GoogleFonts.inter(
-                      fontSize: 12,
-                      color: colors.mist.withValues(alpha: 0.8),
-                      height: 1.4),
+                  style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
                 ),
               ),
             if (_scanning)
@@ -3954,95 +3965,54 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                   child: SizedBox(
                     width: 20,
                     height: 20,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2.5, color: colors.stream),
+                    child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream),
                   ),
                 ),
               )
             else if (_networks.isNotEmpty)
               ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 300),
-                child: ListView(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: ListView.separated(
                   shrinkWrap: true,
-                  children: [
-                    if (deviceNetworks.isNotEmpty) ...[
-                      Text(
-                        'Likely your device',
-                        style: GoogleFonts.inter(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: colors.stream.withValues(alpha: 0.9)),
-                      ),
-                      const SizedBox(height: AppSpacing.xs),
-                      for (final ssid in deviceNetworks)
-                        _networkTile(colors, ssid, highlighted: true),
-                      if (otherNetworks.isNotEmpty) ...[
-                        const SizedBox(height: AppSpacing.lg),
-                        Text(
-                          'Other networks',
-                          style: GoogleFonts.inter(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: colors.mist.withValues(alpha: 0.8)),
+                  itemCount: _networks.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 4),
+                  itemBuilder: (ctx, i) {
+                    final ssid = _networks[i];
+                    return Material(
+                      color: colors.submerged,
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      child: ListTile(
+                        dense: true,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+                        leading: Icon(Icons.wifi_tethering, size: 20, color: colors.stream),
+                        title: Text(
+                          ssid,
+                          style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(height: AppSpacing.xs),
-                      ],
-                    ],
-                    for (final ssid in otherNetworks) _networkTile(colors, ssid),
-                  ],
+                        onTap: () => _selectNetwork(ssid),
+                      ),
+                    );
+                  },
                 ),
               ),
             const SizedBox(height: AppSpacing.xl),
-            SizedBox(
-              width: double.infinity,
-              height: 46,
-              child: OutlinedButton.icon(
-                onPressed: _scanning ? null : _manualFallback,
-                icon: const Icon(Icons.settings_outlined, size: 18),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: colors.stream.withValues(alpha: 0.5)),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(AppRadius.lg)),
-                ),
-                label: Text(
-                  'Open Wi-Fi Settings',
-                  style: GoogleFonts.sora(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: colors.foam),
-                ),
+            ListTile(
+              dense: true,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+              leading: Icon(Icons.settings_outlined, size: 20, color: colors.mist),
+              title: Text(
+                'Open Wi-Fi Settings',
+                style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
               ),
+              subtitle: Text(
+                'Manual: pick tasmota-XXXX yourself',
+                style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
+              ),
+              onTap: _selectManual,
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _networkTile(SteesColors colors, String ssid,
-      {bool highlighted = false}) {
-    return Material(
-      color: highlighted
-          ? colors.stream.withValues(alpha: 0.12)
-          : colors.submerged,
-      borderRadius: BorderRadius.circular(AppRadius.md),
-      child: ListTile(
-        dense: true,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.md)),
-        leading: Icon(
-          highlighted ? Icons.wifi_tethering : Icons.wifi,
-          size: 20,
-          color: highlighted ? colors.stream : colors.mist,
-        ),
-        title: Text(
-          ssid,
-          style: GoogleFonts.inter(
-              fontSize: 14,
-              color: highlighted ? colors.stream : colors.foam),
-          overflow: TextOverflow.ellipsis,
-        ),
-        onTap: () => _selectNetwork(ssid),
       ),
     );
   }

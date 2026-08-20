@@ -1,0 +1,145 @@
+[33m8f17bed[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m wifi improvement
+[33m1871bd9[m wifi
+[33m0f6c1b7[m wifi
+[33m154550d[m module
+[33m7e32e08[m improve latency 1
+[33m39f3a55[m improve latency 1
+[33m787cc66[m re_claim fix  6
+[33mdc4df53[m re_claim fix  5
+[33mc699e79[m re_claim fix
+[33m6541d65[m re_claim fix
+[33m60a6e46[m re_claim fix
+[33mb5e33f1[m gate provisioning on verified local HTTP control and drop the old-device repair layer
+[33m98693b0[m run the pre-SO128 repair for every registered device, not just referer-gated ones
+[33m69f7d73[m repair pre-SO128 registered devices via warm-up and dedupe the preflight gate
+[33m1f3c668[m cleanly release the device-AP binding on duplicate stop and cover MAC identity consistency
+[33mc6b6390[m pre-claim duplicate hard gate before WiFi provisioning
+[33m483b4ef[m Merge remote-tracking branch 'origin/main'
+[33m806d1a1[m re_claim fix
+[33m312d29a[m loc fix 2
+[33m630f0ae[m loc fix
+[33m306d26b[m loc fix
+[33m81b3681[m loc fix
+[33me7e593f[m loc fix
+[33m883c496[m loc fix
+[33md4cbeb8[m local fix
+[33m2c4d954[m local fix
+[33m20b5340[m local fix
+[33mc422bc2[m local fix
+[33m4fbd967[m fix: simplify MQTT ACK flow and prevent duplicate state updates
+[33m9d4a4a2[m fix: simplify MQTT ACK flow and prevent duplicate state updates
+[33m707c5c8[m improve delay off/on v2
+[33m1ed54b0[m improve delay off/on v2
+[33m87e9711[m improve delay off/on v2
+[33m45b73fe[m improve delay off/on
+[33mb46cdf7[m improve delay off/on
+[33m12a592e[m after tasmota timer
+[33m1615f2c[m after tasmota timer
+[33m226d2f6[m after tasmota timer
+[33m313a462[m after tasmota timer
+[33m3d746eb[m Auto-sync Tasmota schedules on CRUD via per-device coalescing trigger
+[33me58df5f[m Wait for lazy config MQTT connection instead of failing early
+[33m5814a6f[m Allow dev sync route in production only when ENABLE_SCHEDULE_SYNC_ROUTE=true
+[33m7853141[m Allow schedule sync route to be enabled in production via ENABLE_SCHEDULE_SYNC_ROUTE flag
+[33m92a2f63[m after tasmota timer
+[33m8f8e26c[m after tasmota timer
+[33ma65540a[m after Wifi
+[33m8fdff98[m after Wifi
+[33m6e50411[m after Wifi
+[33mb8cd833[m after Wifi
+[33m1d7bff3[m test  other way
+[33m5827da4[m test  other way
+[33ma5f2297[m test  other way
+[33m2ddad72[m test  other way
+[33m9d5e567[m test  other way
+[33m16365fe[m[33m ([m[1;32magents/greeting-response[m[33m)[m after local
+[33m68cf8a8[m after local
+[33mbae2c90[m after local
+[33mee57a1c[m after local
+[33mfc63d2f[m after local
+[33ma6d3d76[m after local
+[33md45a069[m after local
+[33me93e9b4[m after local
+[33m19f232b[m after local
+[33mc80b53f[m after Wifi
+[33m8f04aaa[m after Wifi
+[33md10b0b5[m after Wifi
+[33md4b19f2[m after Wifi
+[33maac11b8[m after Wifi
+[33mc87fc09[m after Wifi
+[33mfc8ad4e[m after Wifi
+[33me627ddb[m after Wifi
+[33m30ff767[m after Wifi
+[33meca7845[m after Wifi
+[33mee16eeb[m after Wifi
+[33ma828b42[m after Wifi
+[33m60e34ec[m after Wifi
+[33m85f2670[m after Wifi
+[33md74f305[m after Wifi
+[33m27a18c5[m after Wifi
+[33m7e4d47a[m after Wifi
+[33mb8c4b79[m after Wifi
+[33m832aa7b[m after Wifi
+[33m457a9ca[m after Wifi
+[33m0e95123[m after Wifi
+[33m7fe3c05[m after Wifi
+[33m60eac66[m after Wifi
+[33me75c09a[m after Wifi
+[33m50c2606[m after Wifi
+[33mfc48030[m after Wifi
+[33md5ec161[m after Wifi
+[33m747a04f[m before Wifi
+[33mbcf256b[m step2
+[33m22d5edc[m step2
+[33m1912663[m step1
+[33mae2803c[m manual buckup
+[33m2c715db[m manual buckup
+[33m78d0caa[m fix the sensore rule
+[33mc959c48[m fix the sensore rule
+[33m01f0069[m fix the sensore rule
+[33ma4f7f83[m fix the sensore rule
+[33mb4254c8[m fix the sensore rule
+[33m4e22fdf[m Group schedules by device with per-device sections
+[33maf6fef5[m Fix schedule day-of-week mapping and stale cache after edit/enable
+[33m6ca7b01[m Revert "Make schedules time-driven, independent of device online status"
+[33m114eb7e[m Make schedules time-driven, independent of device online status
+[33mc16bcb8[m Remove diagnostic instrumentation from schedule engine
+[33mca8337f[m Move schedule card actions to bottom-right, add active tag
+[33m68941ff[m Fix range-row horizontal overflow with multiple windows
+[33m196c936[m Improve schedule form/list UI with window timeline
+[33mfe64fb7[m Redesign header: always-visible action rail, no horizontal scroll
+[33m8988b28[m Add edit support for schedules
+[33m6f57138[m DIAG: instrument schedule engine + mqtt publish timing
+[33mb615e99[m Release schedule channels on delete/disable
+[33mae2ed0a[m Add channel scheduling feature
+[33m7bdb4e5[m add real time sonsere
+[33md7a2fca[m fixCloade
+[33m2173b26[m Add 1 channel option
+[33m5fa3f5f[m Add 1 channel option
+[33mb2f5aa9[m Add 1 channel option
+[33m507dbbd[m Add 1 channel option
+[33mce53a83[m Add sonsores
+[33m6f1a65a[m Add sonsores
+[33m9742544[m Add sonsores
+[33m32b883c[m Add sonsores
+[33m11fa8ee[m Add sonsores
+[33m5154e6f[m Add sonsores...
+[33m6d48a21[m Add sonsores...
+[33m9be0596[m Add sonsores...
+[33mdcd3285[m Add sonsores...
+[33m1dc431a[m Add sonsores...
+[33m7f4c166[m Add MQTT debug logging
+[33m4cf1533[m Fix /api/health returning 401 — mount before auth middleware
+[33ma779714[m Add multi-tenancy: JWT auth, device ownership, MongoDB, Flutter auth flow
+[33mc0392c1[m Auto-create device on claim instead of seed
+[33m24f250b[m Add multi-tenancy: JWT auth, device ownership, MongoDB, Flutter auth flow
+[33m9a7ee61[m Fix HTML result topic to match server subscription
+[33m110c6ff[m Update MQTT subscriptions for real Tasmota topics
+[33md6849e1[m Restore .env.example
+[33m4b1496f[m Fix socket.io HTTPS connection, remove forced websocket transport
+[33m0bd6f19[m Update Flutter to HTTPS, virtual device to cloud MQTT, add .env.example
+[33m454ad85[m Add MQTT username/password support
+[33m3dbb82d[m Handle missing MQTT broker gracefully
+[33mb6a61fc[m Finalize backend folder structure
+[33m2c5d37d[m Restructure: backend in separate folder, add .gitignore
+[33m3d76774[m Initial commit - STEES irrigation backend

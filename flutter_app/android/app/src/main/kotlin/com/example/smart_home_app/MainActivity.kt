@@ -18,41 +18,33 @@ import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.net.HttpURLConnection
-import java.net.URL
 
 class MainActivity : FlutterActivity() {
 
     private val wifiSettingsChannelName = "stees/wifi_settings"
     private val wifiBindChannelName = "stees/wifi_binding"
-
-    // ─────────────────────────────────────────────────────────────
-    // PRODUCTION programmatic soft-AP connect (Android only, API 29+):
-    // WifiNetworkSpecifier + bindProcessToNetwork, promoted from the
-    // validated proof-of-concept. Isolated from the manual Wi-Fi paths
-    // (`stees/wifi_settings`, `stees/wifi_binding`) by design — the
-    // specifier's `onAvailable` bind is the ONLY bind in this mode, and
-    // reachability is decided by the wizard's own 192.168.4.1 probe.
-    // The debug-only `probeGateway` diagnostic is used by the POC screen,
-    // never by the wizard.
-    // ─────────────────────────────────────────────────────────────
     private val apConnectChannelName = "stees/ap_connect"
 
+    private var boundNetwork: Network? = null
+    private var pendingScanResult: MethodChannel.Result? = null
+
+    // ─────────────────────────────────────────────────────────────
+    // Simple programmatic soft-AP join (Android only, API 29+): the user picks
+    // the device AP from the in-app list, taps Continue, and we request exactly
+    // that SSID via WifiNetworkSpecifier. No auto-discovery, no retry loop - a
+    // single request, then the wizard's own 192.168.4.1 probe decides success.
+    // The Tasmota factory AP (tasmota-XXXX) is open/unsecured, so no password
+    // is set on the specifier. On API 24-28 the Dart side never calls this.
+    // ─────────────────────────────────────────────────────────────
     private var apConnectCallback: ConnectivityManager.NetworkCallback? = null
     private var apConnectBoundNetwork: Network? = null
     private var apConnectRequestedAt: Long = 0
     private var apConnectAvailableAt: Long = 0
-    private var apConnectHttpGetAt: Long = 0
-    private var apConnectHttpGetStatus: Int = -1
-    private var apConnectHttpGetOk: Boolean = false
+    private var apConnectStage: String = "idle" // idle|requesting|awaiting_system|available|unavailable|lost|failed|cancelled
     private var apConnectError: String? = null
-    private var apConnectStage: String = "idle" // idle|requesting|awaiting_system|available|probing|http_ok|http_failed|unavailable|lost|failed|cancelled
     private var pendingApConnectResult: MethodChannel.Result? = null
     private var pendingApConnectSsid: String? = null
     private val apConnectPermissionRequestCode = 4712
-
-    private var boundNetwork: Network? = null
-    private var pendingScanResult: MethodChannel.Result? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanRequestCode = 4711
@@ -91,23 +83,12 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // ─────────────────────────────────────────────────────────────
-        // PRODUCTION programmatic soft-AP connect — WifiNetworkSpecifier.
-        // Android only, API 29+. The wizard owns reachability via its own
-        // 192.168.4.1 probe; this channel only requests, binds and reports
-        // state. `probeGateway` is a debug diagnostic for the POC screen
-        // and is never called by the wizard.
-        // ─────────────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, apConnectChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "connectToAp" -> {
                         val ssid = call.argument<String>("ssid").orEmpty()
                         apConnectToAp(ssid, result)
-                    }
-                    "probeGateway" -> {
-                        val url = call.argument<String>("gatewayUrl")
-                        apConnectProbeGateway(url, result)
                     }
                     "getState" -> apConnectGetState(result)
                     "cancel" -> {
@@ -150,7 +131,11 @@ class MainActivity : FlutterActivity() {
             if (granted && ssid != null && result != null) {
                 apConnectStart(ssid, result)
             } else {
-                result?.error("PERMISSION_DENIED", "NEARBY_WIFI_DEVICES was not granted; cannot request the AP.", null)
+                result?.error(
+                    "PERMISSION_DENIED",
+                    "NEARBY_WIFI_DEVICES was not granted; cannot request the AP.",
+                    null,
+                )
             }
             return
         }
@@ -425,20 +410,14 @@ class MainActivity : FlutterActivity() {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // PRODUCTION programmatic soft-AP connect: WifiNetworkSpecifier.
+    // Simple programmatic soft-AP join via WifiNetworkSpecifier.
     //
-    // Joins the Tasmota (or offline-device) soft-AP WITHOUT the OS
-    // captive-portal / "sign in" flow: we request ONLY `TRANSPORT_WIFI`
-    // + `TRUSTED` and never `NET_CAPABILITY_INTERNET`/`VALIDATED`, so
-    // Android has no cause to verify internet on this network (validated
-    // on a real device — no portal prompt, probe 200 in ~4.5-5s).
-    //
-    // The wizard decides reachability via its own 192.168.4.1 probe;
-    // this channel never probes. `probeGateway` exists only as a debug
-    // diagnostic for the POC screen.
-    //
-    // API gate: API 29+. minSdk stays 24. On API 24-28 the Dart side
-    // keeps the manual Wi-Fi-settings flow entirely unchanged.
+    // Joins the exact SSID the user picked in the in-app list. The Tasmota
+    // factory AP is open (no password), so no WifiNetworkSpecifier password is
+    // set. We request ONLY `TRANSPORT_WIFI` + `TRUSTED` and never
+    // `NET_CAPABILITY_INTERNET`/`VALIDATED`, so Android has no cause to show a
+    // captive-portal / "sign in" prompt. The wizard decides reachability with
+    // its own 192.168.4.1 probe; this channel only requests, binds and reports.
     // ─────────────────────────────────────────────────────────────
     private fun apConnectToAp(ssid: String, result: MethodChannel.Result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -453,10 +432,9 @@ class MainActivity : FlutterActivity() {
             result.error("BAD_SSID", "SSID must not be empty.", null)
             return
         }
-        // Android 13+ (API 33+) requires NEARBY_WIFI_DEVICES to be granted
-        // at runtime before a specifier request can be issued. Denial is
-        // reported as PERMISSION_DENIED so Dart can fall back to the manual
-        // Wi-Fi settings flow instead of hard-blocking.
+        // Android 13+ (API 33+) requires NEARBY_WIFI_DEVICES at runtime before
+        // a specifier request can be issued. Denial is reported as
+        // PERMISSION_DENIED so Dart falls back to the manual settings flow.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.NEARBY_WIFI_DEVICES)
                 != PackageManager.PERMISSION_GRANTED
@@ -477,9 +455,6 @@ class MainActivity : FlutterActivity() {
         apConnectDisconnect()
         apConnectRequestedAt = SystemClock.elapsedRealtime()
         apConnectAvailableAt = 0
-        apConnectHttpGetAt = 0
-        apConnectHttpGetStatus = -1
-        apConnectHttpGetOk = false
         apConnectError = null
         apConnectStage = "requesting"
 
@@ -495,10 +470,12 @@ class MainActivity : FlutterActivity() {
                 apConnectAvailableAt = SystemClock.elapsedRealtime()
                 apConnectBoundNetwork = network
                 apConnectStage = "available"
-                Log.d("SteesProvision", "[ap_connect] onAvailable network=$network elapsed=${apConnectAvailableAt - apConnectRequestedAt}ms")
-                // The specifier bind is the ONLY bind in this mode; the wizard
-                // runs its own 192.168.4.1 probe over this bound network.
-                val bound = runCatching { connectivityManager.bindProcessToNetwork(network) }.getOrDefault(false)
+                Log.d(
+                    "SteesProvision",
+                    "[ap_connect] onAvailable network=$network elapsed=${apConnectAvailableAt - apConnectRequestedAt}ms",
+                )
+                val bound =
+                    runCatching { connectivityManager.bindProcessToNetwork(network) }.getOrDefault(false)
                 Log.d("SteesProvision", "[ap_connect] bindProcessToNetwork=$bound")
                 if (!bound) {
                     apConnectStage = "failed"
@@ -509,7 +486,7 @@ class MainActivity : FlutterActivity() {
             override fun onUnavailable() {
                 apConnectStage = "unavailable"
                 apConnectError = "onUnavailable: no matching AP found or request rejected by the system."
-                Log.d("SteesProvision", "[ap_connect] onUnavailable — Dart should retry the specifier request.")
+                Log.d("SteesProvision", "[ap_connect] onUnavailable")
             }
 
             override fun onLost(network: Network) {
@@ -522,57 +499,6 @@ class MainActivity : FlutterActivity() {
         connectivityManager.requestNetwork(request, cb)
         apConnectStage = "awaiting_system"
         result.success(null)
-    }
-
-    /**
-     * Debug-only diagnostic: GET the Tasmota gateway over the network this
-     * channel bound to. Never used by the wizard — its own 192.168.4.1 probe
-     * is the single reachability gate in both connect modes.
-     */
-    private fun apConnectProbeGateway(url: String?, result: MethodChannel.Result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            result.error(
-                "UNSUPPORTED",
-                "WifiNetworkSpecifier requires Android 10+ (API 29); this device is API ${Build.VERSION.SDK_INT}.",
-                null,
-            )
-            return
-        }
-        val network = apConnectBoundNetwork
-        if (network == null) {
-            result.error("NOT_CONNECTED", "No bound AP network; call connectToAp first.", null)
-            return
-        }
-        val gateway = url.takeIf { !it.isNullOrBlank() } ?: "http://192.168.4.1/"
-        apConnectHttpGetAt = 0
-        apConnectHttpGetStatus = -1
-        apConnectHttpGetOk = false
-        apConnectStage = "probing"
-        result.success(null)
-        Thread {
-            var status = -1
-            var ok = false
-            var err: String? = null
-            try {
-                val conn = network.openConnection(URL(gateway)) as HttpURLConnection
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
-                conn.instanceFollowRedirects = false
-                conn.requestMethod = "GET"
-                status = conn.responseCode
-                // Tasmota serves its web UI with 200; any 2xx/3xx counts as reachable.
-                ok = status in 200..399
-                conn.disconnect()
-            } catch (e: Exception) {
-                err = e.toString()
-            }
-            apConnectHttpGetStatus = status
-            apConnectHttpGetOk = ok
-            apConnectHttpGetAt = SystemClock.elapsedRealtime()
-            apConnectStage = if (ok) "http_ok" else "http_failed"
-            apConnectError = err
-            Log.d("SteesProvision", "[ap_connect] GET $gateway => status=$status ok=$ok elapsed=${apConnectHttpGetAt - apConnectRequestedAt}ms err=$err")
-        }.start()
     }
 
     private fun apConnectDisconnect() {
@@ -592,14 +518,8 @@ class MainActivity : FlutterActivity() {
                 "sdkInt" to Build.VERSION.SDK_INT,
                 "supported" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q),
                 "stage" to apConnectStage,
-                "requestedAt" to apConnectRequestedAt,
-                "availableAt" to apConnectAvailableAt,
-                "httpGetAt" to apConnectHttpGetAt,
-                "httpStatus" to apConnectHttpGetStatus,
-                "httpOk" to apConnectHttpGetOk,
-                "elapsedToAvailableMs" to if (apConnectAvailableAt != 0L) (apConnectAvailableAt - apConnectRequestedAt) else -1L,
-                "elapsedToHttpGetMs" to if (apConnectHttpGetAt != 0L) (apConnectHttpGetAt - apConnectRequestedAt) else -1L,
                 "bound" to (apConnectBoundNetwork != null),
+                "elapsedToAvailableMs" to if (apConnectAvailableAt != 0L) (apConnectAvailableAt - apConnectRequestedAt) else -1L,
                 "error" to apConnectError,
             )
         )
