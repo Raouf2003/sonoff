@@ -446,6 +446,20 @@ ReduceResult<ChannelState> _applyReport(
     }
   }
 
+  // Same-value guard (mirrors the ReachabilityState equality fix): an accepted
+  // report that repeats the CURRENT verdict is a redundant re-signal — a LAN
+  // tap's outcome is echoed by the REST response, the socket's device_update
+  // telemetry, and the 15s poll. Skip the epoch bump and all effects so the
+  // ripple pulse is never visibly re-triggered for a value that did not
+  // change. A report that RESOLVES a still-pending tap is a meaningful
+  // transition regardless of the value, so it is never suppressed here. The
+  // freshness / rollback acceptance rules above are untouched — this only
+  // stops redundant re-application on top of them.
+  final resolvesPendingTap = isSocket && state.pending;
+  if (report.state == state.reported && !resolvesPendingTap) {
+    return ReduceResult(state, const [FollowUp.none]);
+  }
+
   final next = state.copyWith(
     reported: report.state,
     confirmedAt: incomingTs,
@@ -515,8 +529,17 @@ ReduceResult<ChannelState> _applyRest(
   final report = event.report;
   var committed = false;
   if (report != null) {
-    final applied = _applyReport(next, CloudReport(report, deviceOnline: event.online),
-        config, now);
+    // Honor the transport that actually answered: a local control response is
+    // a LOCAL report (never mislabeled cloud), a cloud one stays CloudReport.
+    // Correct `source` metadata keeps the hasFreshLocal guard meaningful.
+    final applied = _applyReport(
+      next,
+      event.source == DeviceTransportSource.local
+          ? LocalReport(report) as ChannelEvent
+          : CloudReport(report, deviceOnline: event.online) as ChannelEvent,
+      config,
+      now,
+    );
     next = applied.state;
     committed = applied.committed;
     // The inner report may flip the ripple (an accepted REST report is the

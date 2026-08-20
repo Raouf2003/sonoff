@@ -286,6 +286,108 @@ void main() {
     });
   });
 
+  group('same-value report suppression (LAN tap ripple fix)', () {
+    test('a LAN tap followed by REST + socket + poll echoes emits ONE ripple '
+        'and ONE epoch bump', () {
+      var s = channelReduce(const ChannelState(), const UserTap(true, opId: 'o1'),
+          config, now: t0).state;
+      // REST confirms ON over the LOCAL transport (source is honored).
+      final rest = channelReduce(
+          s,
+          RestResponse(1, report: rep('ON', updatedAt: t0), online: true,
+              source: DeviceTransportSource.local),
+          config,
+          now: t0.add(const Duration(milliseconds: 100)));
+      s = rest.state;
+      expect(rest.effects.where((f) => f == FollowUp.rippleOn), hasLength(1),
+          reason: 'the genuine OFF→ON confirmation ripples once');
+      final epochAfterRest = s.epoch;
+
+      // Socket device_update echoes the same ON (pending already resolved by
+      // the REST response).
+      final socket = channelReduce(
+          s,
+          SocketUpdate(rep('ON', updatedAt: t0.add(const Duration(milliseconds: 200))),
+              opId: 'o1'),
+          config,
+          now: t0.add(const Duration(milliseconds: 200)));
+      expect(socket.state.epoch, epochAfterRest,
+          reason: 'a same-value echo must not bump the epoch');
+      expect(socket.effects, isNot(contains(FollowUp.rippleOn)),
+          reason: 'a same-value echo must not re-trigger the ripple');
+
+      // 15s poll LocalReport echoes the same ON.
+      final poll = channelReduce(
+          socket.state,
+          LocalReport(rep('ON', updatedAt: t0.add(const Duration(seconds: 15)))),
+          config,
+          now: t0.add(const Duration(seconds: 15)));
+      expect(poll.state.epoch, epochAfterRest);
+      expect(poll.effects, isNot(contains(FollowUp.rippleOn)));
+      expect(poll.state.reported, 'ON');
+    });
+
+    test('a genuine value change still ripples exactly once', () {
+      final s = channelReduce(const ChannelState(), LocalReport(rep('ON', updatedAt: t0)),
+          config, now: t0).state;
+      final off = channelReduce(
+          s, LocalReport(rep('OFF', updatedAt: t0.add(const Duration(seconds: 5)))),
+          config,
+          now: t0.add(const Duration(seconds: 5)));
+      expect(off.effects, contains(FollowUp.rippleOff));
+      expect(off.state.epoch, s.epoch + 1);
+      expect(off.state.reported, 'OFF');
+
+      // The same-value echo of OFF must not ripple (or bump the epoch) again.
+      final echo = channelReduce(
+          off.state, LocalReport(rep('OFF', updatedAt: t0.add(const Duration(seconds: 10)))),
+          config,
+          now: t0.add(const Duration(seconds: 10)));
+      expect(echo.effects, isNot(contains(FollowUp.rippleOff)));
+      expect(echo.state.epoch, off.state.epoch);
+    });
+
+    test('opIdMatch still resolves the pending tap unconditionally even when '
+        'the value matches what is already shown', () {
+      // Reported is already ON from a prior read; the user taps ON again.
+      final base = channelReduce(const ChannelState(), LocalReport(rep('ON', updatedAt: t0)),
+          config, now: t0).state;
+      final armed = channelReduce(base, const UserTap(true, opId: 'o1'),
+          config, now: t0.add(const Duration(seconds: 1))).state;
+      expect(armed.pending, isTrue);
+
+      // The socket ACK for the in-flight op reports ON (equals reported) but
+      // is the op's confirmation, not a duplicate — it must resolve pending,
+      // bump the epoch and ripple.
+      final r = channelReduce(
+          armed,
+          SocketUpdate(rep('ON', updatedAt: t0.add(const Duration(seconds: 1))), opId: 'o1'),
+          config,
+          now: t0.add(const Duration(seconds: 1)));
+      expect(r.state.pending, isFalse);
+      expect(r.state.epoch, armed.epoch + 1);
+      expect(r.effects, contains(FollowUp.rippleOn));
+    });
+
+    test('_applyRest honors the transport: a local control response is tagged '
+        'LOCAL, not cloud', () {
+      final armed = channelReduce(const ChannelState(), const UserTap(true, opId: 'o1'),
+          config, now: t0).state;
+      final r = channelReduce(
+          armed,
+          RestResponse(1, report: rep('ON', updatedAt: t0), online: true,
+              source: DeviceTransportSource.local),
+          config,
+          now: t0);
+      expect(r.state.source, DeviceTransportSource.local,
+          reason: 'a LAN control response must not be mislabeled cloud');
+      expect(r.state.serverTs, isNull,
+          reason: 'a local read clears the cloud server timestamp');
+      expect(r.state.reported, 'ON');
+      expect(r.state.pending, isFalse);
+    });
+  });
+
   group('Timeout', () {
     test('degrades a pending channel to UNKNOWN (never fabricates OFF)', () {
       final armed = channelReduce(const ChannelState(), const UserTap(false, opId: 'o1'),

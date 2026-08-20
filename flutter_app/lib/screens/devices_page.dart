@@ -182,8 +182,15 @@ class _DevicesPageState extends State<DevicesPage>
       return ReduceResult(const ChannelState(), const [FollowUp.none]);
     }
     final r = channelReduce(_channelStates[index], event, _config, now: now);
+    final previousReported = _channelStates[index].reported;
     _channelStates[index] = r.state;
-    _applyChannelEffects(index, event, r.effects);
+    _applyChannelEffects(
+      index,
+      event,
+      r.effects,
+      previousReported: previousReported,
+      newReported: r.state.reported,
+    );
     setState(() {});
     return r;
   }
@@ -197,8 +204,15 @@ class _DevicesPageState extends State<DevicesPage>
 
   /// Applies the reducer's follow-up hints for a channel event. Timers, ripples
   /// and reconcile polls are view concerns — the reducer never starts them.
+  /// [previousReported]/[newReported] let the ripple guard tell a genuine value
+  /// change from a redundant same-value re-signal.
   void _applyChannelEffects(
-      int index, ChannelEvent event, List<FollowUp> effects) {
+    int index,
+    ChannelEvent event,
+    List<FollowUp> effects, {
+    String? previousReported,
+    String? newReported,
+  }) {
     final channel = index + 1;
     final key = '$_selectedDeviceId:$channel';
     final opId = switch (event) {
@@ -233,7 +247,15 @@ class _DevicesPageState extends State<DevicesPage>
             });
           }
         case FollowUp.rippleOn:
-          _rippleControllers[index].repeat(reverse: true);
+          // Belt-and-suspenders on top of the reducer's same-value guard:
+          // never restart an already-pulsing ripple for a report that did not
+          // change the channel's reported value (a restart would visibly
+          // re-trigger the pulse, the original LAN-tap flicker).
+          final redundantRestart = _rippleControllers[index].isAnimating &&
+              previousReported == newReported;
+          if (!redundantRestart) {
+            _rippleControllers[index].repeat(reverse: true);
+          }
         case FollowUp.rippleOff:
           _rippleControllers[index].stop();
           _rippleControllers[index].reset();
