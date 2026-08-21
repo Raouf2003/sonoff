@@ -50,6 +50,12 @@ function installFakeConfigChannel(state) {
       }
       return Promise.resolve({ [key]: state.rules[idx - 1] });
     }
+    // Clock gate: a healthy NTP-synced device answers `Time` with a current
+    // Epoch, so ensureDeviceClock takes the read-only healthy path and never
+    // issues NtpServer writes in these fixtures.
+    if (key === 'Time') {
+      return Promise.resolve({ Time: '2026-01-01T00:00:00', Epoch: Math.floor(Date.now() / 1000) });
+    }
     return Promise.reject(new Error(`unhandled command ${key}`));
   });
   return calls;
@@ -436,8 +442,9 @@ test('verification re-reads ONLY the written slots (Timer1, Timer2, Rule2), not 
   }
   assert.strictEqual(count('Rule1'), 1, 'unchanged Rule1 must only appear in the initial snapshot');
   assert.strictEqual(count('Rule3'), 1, 'unchanged Rule3 must only appear in the initial snapshot');
-  // 19 initial + exactly 3 verification reads; nothing beyond the changed slots was re-read.
-  assert.strictEqual(reads.length, 22, '19 initial reads + 3 changed-slot verification reads');
+  // 19 initial + exactly 3 verification reads + the clock-gate `Time` read;
+  // nothing beyond the changed slots was re-read.
+  assert.strictEqual(reads.length, 23, '19 initial reads + 3 verification reads + 1 Time clock read');
 });
 
 test('verification for a direct-only plan re-reads ONLY the written timers (no rule reads)', async () => {
@@ -459,7 +466,7 @@ test('verification for a direct-only plan re-reads ONLY the written timers (no r
   for (let i = 3; i <= 16; i++) {
     assert.strictEqual(count(`Timer${i}`), 1, `unchanged Timer${i} read only in the initial snapshot`);
   }
-  assert.strictEqual(reads.length, 21, '19 initial reads + 2 changed-timer verification reads');
+  assert.strictEqual(reads.length, 22, '19 initial reads + 2 changed-timer verification reads + 1 Time clock read');
 });
 
 test('readDeviceScheduleState can fetch a named subset without the full-state snapshot', async () => {

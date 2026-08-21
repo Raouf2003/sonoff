@@ -1,11 +1,14 @@
 const express = require('express');
 const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
+const scheduleSyncService = require('../services/scheduleSyncService');
 
 const router = express.Router();
 
 const scheduleEngine = require('../services/scheduleEngine');
 const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
+
+const SYNC_FLAG_OFF_NOTE = 'TASMOTA_SCHEDULE_SYNC_ENABLED is disabled';
 
 // Phase 7A: automatic schedule->Tasmota sync on every successful schedule CRUD.
 // Fire-and-forget: the DB operation has already succeeded by the time this runs,
@@ -123,7 +126,9 @@ function toMinutesFromHhmm(hhmm) {
 
 router.get('/', async (req, res) => {
   try {
-    const schedules = await Schedule.find({ ownerId: req.userId }).sort({ createdAt: -1 });
+    // pendingDelete rows are invisible to the API: they exist only until the
+    // device-side Timer/Rule removal is confirmed (or the sync flag is off).
+    const schedules = await Schedule.find({ ownerId: req.userId, pendingDelete: { $ne: true } }).sort({ createdAt: -1 });
 
     const deviceIds = [...new Set(schedules.map((s) => s.deviceId))];
     const devices = await Device.find({ ownerId: req.userId, deviceId: { $in: deviceIds } });
@@ -236,16 +241,53 @@ router.delete('/:id', async (req, res) => {
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
-    // Capture the affected device BEFORE deleting: after deleteOne() the
-    // schedule document no longer exists, but sync still needs the deviceId.
+    // Capture the affected device BEFORE any state change: the sync still
+    // needs the deviceId even after the row is gone.
     const deviceId = schedule.deviceId;
-    // Release channels the schedule was holding ON before removing it.
-    scheduleEngine.release(schedule).catch((err) => {
+
+    // Ghost-schedule guard: the device's onboard Timer/Rule copy must not
+    // outlive the DB row. Soft-delete first (hidden from API + compiler),
+    // revert channels the schedule is physically holding ON right now, then
+    // remove the device-side timers with a DEFINITIVE awaited sync. The row is
+    // only physically deleted once the device confirms ('synced').
+    schedule.pendingDelete = true;
+    await schedule.save();
+
+    try {
+      await scheduleEngine.release(schedule);
+    } catch (err) {
       console.error('[schedules] release on delete error:', err.message);
-    });
+    }
+
+    let sync;
+    try {
+      sync = await scheduleSyncService.syncDevice(deviceId, { source: 'schedule-delete' });
+    } catch (err) {
+      sync = { status: 'failed', deviceId, error: err.message };
+    }
+
+    if (sync.status !== 'synced') {
+      if (!scheduleSyncService.syncEnabled()) {
+        // Graceful degradation: native sync is off, so there is no device copy
+        // to coordinate with. Fall back to legacy immediate removal and say so.
+        await schedule.deleteOne();
+        console.warn(
+          `[schedules] ${SYNC_FLAG_OFF_NOTE} — delete of "${schedule.name}" completed without device confirmation`,
+        );
+        return res.json({ ok: true, deferred: false, degraded: true, sync });
+      }
+      // Device offline or sync failed: keep the soft-deleted row. The retry
+      // sweep finalizes (physically deletes) it once the device is reachable.
+      console.warn(
+        `[schedules] delete of "${schedule.name}" deferred for ${deviceId}: ` +
+          `status=${sync.status}${sync.error ? ` (${sync.error})` : ''}`,
+      );
+      return res.json({ ok: true, deferred: true, sync });
+    }
+
     await schedule.deleteOne();
-    const sync = triggerDeviceSync(deviceId, 'schedule-delete');
-    res.json({ ok: true, sync });
+    const postSync = triggerDeviceSync(deviceId, 'schedule-delete');
+    res.json({ ok: true, deferred: false, sync, syncPostDelete: postSync });
   } catch (err) {
     console.error('Delete schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });

@@ -22,6 +22,7 @@ const runtimeState = require('./services/runtimeState');
 const mqttGateway = require('./services/mqttGateway');
 const ruleEngine = require('./services/ruleEngine');
 const scheduleEngine = require('./services/scheduleEngine');
+const scheduleSyncRetry = require('./services/scheduleSyncRetry');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -66,6 +67,12 @@ async function loadFromDb() {
   // The registry now knows every claimed device — request their current STATE
   // so runtimeState recovers fast even if MQTT connected before the DB loaded.
   mqttGateway.requestStateSync();
+  // Tasmota-native ownership: start the failed-sync/pendingDelete retry sweep
+  // and backfill devices whose schedules predate the cutover (no onboard
+  // timers yet). No-ops when TASMOTA_SCHEDULE_SYNC_ENABLED is false.
+  scheduleSyncRetry.startup().catch((err) =>
+    console.error(`[server] schedule sync startup error: ${err.message}`),
+  );
 }
 
 initRuntime();

@@ -6,6 +6,7 @@ const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
 const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
 const scheduleEngine = require('../services/scheduleEngine');
+const scheduleSyncService = require('../services/scheduleSyncService');
 
 const DEVICE = { deviceId: '34987AC30304', ownerId: 'owner1', channels: 4 };
 
@@ -172,14 +173,82 @@ test('PATCH /schedules/:id/enable toggles and triggers EXACTLY ONE sync', async 
   }
 });
 
-test('DELETE /schedules/:id removes and triggers EXACTLY ONE sync for the captured device', async () => {
+test('DELETE /schedules/:id (device online, sync confirms) removes the row', async () => {
   triggers = [];
-  const { base, close } = await start();
+  const runtimeState = require('../services/runtimeState');
+  const origSync = scheduleSyncService.syncDevice;
+  const origEnabled = scheduleSyncService.syncEnabled;
+  const origOnline = runtimeState.isOnline;
+  const origRelease = scheduleEngine.release;
+  let deleted = false;
+  const doc = scheduleDoc();
+  doc.pendingDelete = false;
+  doc.deleteOne = async () => { deleted = true; };
+  const origFindOne = Schedule.findOne;
+  Schedule.findOne = async (query) =>
+    query._id === 'sch1' && query.ownerId === 'owner1' ? doc : null;
+  scheduleSyncService.syncDevice = async () => ({ status: 'synced', deviceId: DEVICE.deviceId });
+  scheduleSyncService.syncEnabled = () => true;
+  runtimeState.isOnline = () => true;
+  scheduleEngine.release = async () => {};
   try {
-    const res = await fetch(`${base}/sch1`, { method: 'DELETE' });
-    assert.strictEqual(res.status, 200);
-    assert.deepStrictEqual(triggers, [DEVICE.deviceId]);
+    const { base, close } = await start();
+    try {
+      const res = await fetch(`${base}/sch1`, { method: 'DELETE' });
+      const body = await res.json();
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(body.ok, true);
+      assert.strictEqual(body.deferred, false);
+      assert.strictEqual(deleted, true, 'row physically removed after confirmed sync');
+    } finally {
+      await close();
+    }
   } finally {
-    await close();
+    Schedule.findOne = origFindOne;
+    scheduleSyncService.syncDevice = origSync;
+    scheduleSyncService.syncEnabled = origEnabled;
+    runtimeState.isOnline = origOnline;
+    scheduleEngine.release = origRelease;
+  }
+});
+
+test('DELETE /schedules/:id (device offline) soft-deletes — row kept as pendingDelete', async () => {
+  const runtimeState = require('../services/runtimeState');
+  const origSync = scheduleSyncService.syncDevice;
+  const origEnabled = scheduleSyncService.syncEnabled;
+  const origOnline = runtimeState.isOnline;
+  let savedPendingDelete = null;
+  let deleted = false;
+  const doc = scheduleDoc();
+  doc.save = async function () { savedPendingDelete = this.pendingDelete; };
+  doc.deleteOne = async () => { deleted = true; };
+  const origFindOne = Schedule.findOne;
+  Schedule.findOne = async (query) =>
+    query._id === 'sch1' && query.ownerId === 'owner1' ? doc : null;
+  scheduleSyncService.syncDevice = async () => ({
+    status: 'failed',
+    deviceId: DEVICE.deviceId,
+    error: 'CFG_TIMEOUT',
+  });
+  scheduleSyncService.syncEnabled = () => true;
+  runtimeState.isOnline = () => false;
+  try {
+    const { base, close } = await start();
+    try {
+      const res = await fetch(`${base}/sch1`, { method: 'DELETE' });
+      const body = await res.json();
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(body.ok, true);
+      assert.strictEqual(body.deferred, true, 'delete deferred while device unreachable');
+      assert.strictEqual(savedPendingDelete, true, 'row marked pendingDelete');
+      assert.strictEqual(deleted, false, 'row NOT physically removed on failed sync');
+    } finally {
+      await close();
+    }
+  } finally {
+    Schedule.findOne = origFindOne;
+    scheduleSyncService.syncDevice = origSync;
+    scheduleSyncService.syncEnabled = origEnabled;
+    runtimeState.isOnline = origOnline;
   }
 });

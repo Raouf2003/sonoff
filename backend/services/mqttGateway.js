@@ -501,6 +501,15 @@ class MqttGateway {
           online: newOnline,
         });
       }
+      // Device came back: nudge the schedule-sync retry layer so any deferred
+      // Timer/Rule work (pendingDelete removals, failed syncs) converges now.
+      if (newOnline && !prevOnline) {
+        try {
+          require('./scheduleSyncRetry').nudge(deviceId);
+        } catch (_) {
+          /* retry layer is best-effort; never break the MQTT handler */
+        }
+      }
       return;
     }
 
@@ -552,6 +561,14 @@ class MqttGateway {
           deviceId,
           online: newOnline,
         });
+        // Telemetry restored liveness: same convergence nudge as LWT Online.
+        if (newOnline) {
+          try {
+            require('./scheduleSyncRetry').nudge(deviceId);
+          } catch (_) {
+            /* best-effort */
+          }
+        }
       }
       return;
     }

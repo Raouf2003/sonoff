@@ -95,6 +95,15 @@ const scheduleSchema = new mongoose.Schema(
       of: String,
       default: {},
     },
+    // Soft-delete marker for the Tasmota-native ownership model: the row is
+    // hidden from every API/compiler surface but kept until the device-side
+    // Timer/Rule removal is CONFIRMED synced, so an offline device can never
+    // keep executing a deleted schedule (ghost-schedule guard).
+    pendingDelete: {
+      type: Boolean,
+      default: false,
+      select: false,
+    },
     // ADDITIVE PHASE 6 SYNC METADATA (hidden from JSON via the toJSON
     // transform below). Owned by scheduleSyncService only. Backward-
     // compatible: existing schedule reads/writes never touch these fields.
@@ -132,6 +141,7 @@ scheduleSchema.set('toJSON', {
     delete ret.__v;
     // Strip internal state from all API responses.
     delete ret.lastAppliedState;
+    delete ret.pendingDelete;
     delete ret.syncStatus;
     delete ret.lastSyncedAt;
     delete ret.syncError;

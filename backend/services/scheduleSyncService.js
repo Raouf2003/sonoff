@@ -395,7 +395,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
         return summary;
       }
     }
-    const schedules = await scheduleModel.find({ deviceId });
+    const schedules = await scheduleModel.find({ deviceId, pendingDelete: { $ne: true } });
     const plan = compile({ deviceId, schedules, device });
     summary.conflicts = plan.conflicts.slice();
     summary.unsupportedReasons = plan.unsupportedReasons.slice();
@@ -436,6 +436,17 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
       summary.status = 'pending';
       summary.error = `${SYNC_FLAG} is disabled - no writes published (dry run complete)`;
       return summary;
+    }
+
+    // Clock accuracy gate: device-native timers fire on the DEVICE's clock, so
+    // a drifted/unconfigured NTP setup silently shifts every scheduled window.
+    // Best-effort and non-fatal: a failed check/correction is logged, never
+    // aborts the sync.
+    try {
+      const clock = await ensureDeviceClock(deviceId, { traceId, logger });
+      summary.clock = clock;
+    } catch (err) {
+      logger.warn(`[SYNC CLOCK] traceId=${traceId} device=${deviceId} clock step error: ${err.message}`);
     }
 
     // Apply phase with bounded retries: write changed resources, read back,
@@ -561,6 +572,74 @@ function sameTimer(a, b) {
   );
 }
 
+// Clock-drift threshold before correction fires (device Epoch vs server).
+const CLOCK_DRIFT_TOLERANCE_SEC = 120;
+const NTP_SERVERS = ['pool.ntp.org', 'time.google.com', 'time.cloudflare.com'];
+
+// Verify the device clock is sane and, when it is not, (re)point NTP at
+// standard pools so the firmware self-corrects. Tasmota-native timers execute
+// on this clock, so this is what keeps window boundaries accurate.
+//
+// Steps:
+//   1. Read `Time` → expect an `Epoch` unix timestamp.
+//   2. |drift| <= tolerance AND Epoch present → OK, no writes.
+//   3. Otherwise publish each NtpServer<n> individually (own echo key) so the
+//      device resyncs from NTP. Timezone is deliberately NOT overwritten —
+//      that is user configuration; drift is logged loudly instead.
+// Every failure is non-fatal: the sync proceeds, the problem is visible in
+// logs and in summary.clock.
+async function ensureDeviceClock(deviceId, { traceId = '?', logger = console } = {}) {
+  const result = { checked: true, corrected: false, driftSec: null, error: null };
+  let timeRes = null;
+  try {
+    timeRes = await tasmotaConfigClient.requestTasmotaConfig(
+      deviceId,
+      'Time',
+      '',
+      { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: 'Time', traceId },
+    );
+  } catch (err) {
+    result.error = `Time read failed: ${err.message}`;
+    logger.warn(`[SYNC CLOCK] traceId=${traceId} device=${deviceId} ${result.error}`);
+    return result;
+  }
+
+  const epoch = toNum(timeRes && timeRes.Epoch);
+  if (epoch !== null && epoch > 0) {
+    result.driftSec = Math.round(Math.abs(Date.now() / 1000 - epoch));
+    if (result.driftSec <= CLOCK_DRIFT_TOLERANCE_SEC) {
+      return result; // healthy
+    }
+  }
+
+  // Missing Epoch (NTP never configured / clock unset) or excessive drift:
+  // repoint the NTP pools so the firmware corrects itself within minutes.
+  for (let i = 0; i < NTP_SERVERS.length; i++) {
+    try {
+      await tasmotaConfigClient.requestTasmotaConfig(
+        deviceId,
+        `NtpServer${i + 1}`,
+        NTP_SERVERS[i],
+        { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: `NtpServer${i + 1}`, traceId },
+      );
+    } catch (err) {
+      // Firmware variants differ in whether setting echoes the key; a miss is
+      // tolerated — the correction intent is logged either way.
+      logger.log(
+        `[SYNC CLOCK] traceId=${traceId} device=${deviceId} NtpServer${i + 1} write unconfirmed: ${err.message}`,
+      );
+    }
+  }
+  result.corrected = true;
+  logger.warn(
+    `[SYNC CLOCK] traceId=${traceId} device=${deviceId} CORRECTED — ` +
+      `previousEpoch=${epoch === null ? 'none' : epoch} ` +
+      `driftSec=${result.driftSec === null ? 'n/a' : result.driftSec} ` +
+      `(tolerance ${CLOCK_DRIFT_TOLERANCE_SEC}s). NTP pools rewritten; verify timezone on device.`,
+  );
+  return result;
+}
+
 const TIMER_FIELDS = ['Enable', 'Mode', 'Time', 'Window', 'Days', 'Repeat', 'Output', 'Action'];
 
 // Field-level diff between desired and actual (diagnostic only). Only fields
@@ -605,6 +684,7 @@ module.exports = {
   planView,
   allocationView,
   syncEnabled,
+  ensureDeviceClock,
   SYNC_FLAG,
   MAX_SYNC_ATTEMPTS,
   USER_TRIGGER_TIMER,

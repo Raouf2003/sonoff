@@ -2,12 +2,29 @@ const { DateTime } = require('luxon');
 const Schedule = require('../models/Schedule');
 const runtimeState = require('./runtimeState');
 
-// Schedules control physical relays, so the cadence only needs to be tight
-// enough to react to a range boundary without hammering MQTT or MongoDB.
-// Rule-engine precision isn't required here (rules react to live sensor
-// values); 30s keeps boundary transitions within half a minute while using a
-// fraction of the writes a 10s tick would.
+// AUDIT-ONLY MODE (Tasmota-native cutover):
+//
+// Device-side Timer1-16/Rule2 execution (scheduleSyncService) is now the SOLE
+// owner-of-record for schedule firing. This module no longer publishes relay
+// commands on a timer. Its remaining roles:
+//
+//   1. AUDIT SAFETY NET — the periodic tick still runs, but instead of
+//      publishing it only LOGS divergence between what the enabled schedules
+//      want right now and what the device last reported, so an operator can
+//      spot a device whose onboard timers are stale/missing. Never writes.
+//   2. LIFECYCLE CLEANUP — release(schedule) is still invoked by schedule CRUD
+//      (delete/disable) to revert channels the schedule is physically holding
+//      ON at removal time. Under native ownership the "held ON" set is derived
+//      from (desired==='ON' right now) AND (device reports ON), NOT from
+//      lastAppliedState bookkeeping — the tick loop no longer maintains that.
+//
+// _desiredState stays exported/pure: scheduleDryRunService depends on it.
+
+// Audit cadence: same 30s reaction window as before; divergence logs are
+// throttled per device+channel so a legitimate manual override inside a window
+// cannot flood the log.
 const SCHEDULE_CHECK_INTERVAL_MS = 30000;
+const AUDIT_LOG_THROTTLE_MS = 60 * 1000;
 
 // "Now" in the app's timezone (Render runs in UTC by default). Fallback is
 // the author's timezone; override via APP_TIMEZONE env var.
@@ -17,9 +34,8 @@ class ScheduleEngine {
   constructor() {
     this.mqttGateway = null;
     this.timer = null;
-    // scheduleId -> Map<channel -> lastAppliedState> read-through cache,
-    // primed from the DB on startup and updated on every successful change.
-    this.stateCache = new Map();
+    // `${deviceId}:${channel}` -> last divergence log ts (throttle).
+    this._auditLog = new Map();
   }
 
   init({ mqttGateway }) {
@@ -27,51 +43,19 @@ class ScheduleEngine {
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => this.evaluate(), SCHEDULE_CHECK_INTERVAL_MS);
     console.log(
-      `[scheduleEngine] Started, checking every ${SCHEDULE_CHECK_INTERVAL_MS}ms in zone ${APP_TIMEZONE}`,
+      `[scheduleEngine] AUDIT-ONLY mode started, checking every ${SCHEDULE_CHECK_INTERVAL_MS}ms in zone ${APP_TIMEZONE} ` +
+        '(device-native timers are the sole executor; this loop never publishes)',
     );
   }
 
-  _primeCache(schedules) {
-    for (const schedule of schedules) {
-      const id = String(schedule._id);
-      if (!this.stateCache.has(id)) {
-        const map = new Map();
-        if (schedule.lastAppliedState) {
-          for (const [ch, state] of schedule.lastAppliedState.entries()) {
-            map.set(ch, state);
-          }
-        }
-        this.stateCache.set(id, map);
-      }
-    }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
   }
 
-  // Drop a schedule's in-memory applied-state cache so the next tick treats
-  // every channel as unknown (lastState = 'OFF') and re-syncs from the DB.
-  // Used after edits or a disable->enable cycle, where the DB lastAppliedState
-  // has been reset but the stale in-memory cache would otherwise suppress the
-  // next intended state change.
-  invalidate(scheduleId) {
-    this.stateCache.delete(String(scheduleId));
-  }
-
-  // Push the new state for one channel to memory + MongoDB together.
-  async _setChannelState(scheduleId, channel, state) {    const id = String(scheduleId);
-    const map = this.stateCache.get(id);
-    if (!map) return;
-    map.set(String(channel), state);
-    try {
-      await Schedule.updateOne(
-        { _id: scheduleId },
-        { $set: { [`lastAppliedState.${channel}`]: state } },
-      );
-      console.log(
-        `[scheduleEngine] Persisted channel ${channel} state=${state} for schedule ${id}`,
-      );
-    } catch (err) {
-      console.error(`[scheduleEngine] DB update error for schedule ${id}:`, err.message);
-    }
-  }
+  // Compatibility no-op: routes previously cleared the executor's applied-state
+  // cache after edits. There is no executor cache anymore.
+  invalidate(_scheduleId) {}
 
   // Desired state for the whole schedule at the current time. Returns 'ON' if
   // today matches the recurrence AND now falls inside any time range, else
@@ -85,7 +69,6 @@ class ScheduleEngine {
       const today = (now.weekday + 6) % 7;
       if (!days.includes(today)) return 'OFF';
     }
-    const hhmm = now.toFormat('HH:mm');
     const nowMin = now.hour * 60 + now.minute;
     for (const range of schedule.timeRanges || []) {
       const startMin = minutesFromHhmm(range.start);
@@ -97,30 +80,32 @@ class ScheduleEngine {
     return 'OFF';
   }
 
-  // Revert any channels a schedule left ON so they don't stay stuck after the
-// schedule is deleted. Only channels recorded as ON in lastAppliedState are
-// reset, so channels the schedule never touched are left alone.
-async release(schedule) {
+  // Revert any channels this schedule is physically holding ON right now so
+  // they don't stay stuck after delete/disable. Under native ownership the
+  // held-ON set is: desired==='ON' at this instant AND the device itself
+  // reports the channel ON. Best-effort and skipped entirely when the device
+  // is offline (the caller's pendingDelete/retry path owns that case).
+  async release(schedule) {
     const deviceId = schedule.deviceId;
-    const applied = schedule.lastAppliedState;
-    const onChannels = [];
-    if (applied instanceof Map) {
-      for (const [ch, state] of applied.entries()) {
-        if (String(state).toUpperCase() === 'ON') onChannels.push(ch);
-      }
-    } else if (applied) {
-      for (const [ch, state] of Object.entries(applied)) {
-        if (String(state).toUpperCase() === 'ON') onChannels.push(ch);
-      }
-    }
-    if (!onChannels.length) return;
+    if (!this.mqttGateway) return;
     if (!runtimeState.isOnline(deviceId)) {
       console.warn(
         `[scheduleEngine] Skip release "${schedule.name}" — device ${deviceId} is offline`,
       );
       return;
     }
-    for (const channel of onChannels) {
+    const now = DateTime.now().setZone(APP_TIMEZONE);
+    if (this._desiredState(schedule, now) !== 'ON') return; // window closed: timer removal suffices
+
+    const entry = runtimeState.getDeviceState(deviceId);
+    const channels = entry ? entry.channels : {};
+    for (const channel of schedule.channels || []) {
+      const reported =
+        channels[channel] !== undefined
+          ? channels[channel]
+          : channels[String(channel)];
+      const state = reported && (reported.state || reported);
+      if (String(state).toUpperCase() !== 'ON') continue;
       try {
         await this.mqttGateway.publishCommandNoWait(deviceId, channel, 'OFF');
         console.log(
@@ -134,61 +119,44 @@ async release(schedule) {
     }
   }
 
+  // AUDIT pass: never publishes. Logs desired-vs-reported divergence so a
+  // device with stale/missing onboard timers becomes visible in the logs.
   async evaluate() {
     let schedules;
     try {
-      schedules = await Schedule.find({ enabled: true });
+      schedules = await Schedule.find({ enabled: true, pendingDelete: { $ne: true } });
     } catch (err) {
       console.error('[scheduleEngine] Query error:', err);
       return;
     }
 
-    this._primeCache(schedules);
-
     const now = DateTime.now().setZone(APP_TIMEZONE);
+    const nowMs = Date.now();
 
     for (const schedule of schedules) {
       const desired = this._desiredState(schedule, now);
-      const name = schedule.name;
       const deviceId = schedule.deviceId;
-      const id = String(schedule._id);
+      if (!runtimeState.isOnline(deviceId)) continue; // offline: nothing to audit against
 
+      const entry = runtimeState.getDeviceState(deviceId);
+      const channels = entry ? entry.channels : {};
       for (const channel of schedule.channels || []) {
-        const cache = this.stateCache.get(id);
-        const lastState = cache.get(String(channel)) || 'OFF';
+        const reported =
+          channels[channel] !== undefined
+            ? channels[channel]
+            : channels[String(channel)];
+        const actual = reported ? String(reported.state ?? reported).toUpperCase() : null;
+        if (actual === null || actual === desired) continue;
 
-        if (desired === lastState) continue;
-
-        const online = runtimeState.isOnline(deviceId);
-
-        if (!online) {
-          // Throttle offline schedule skip logs: only log once per minute per device
-          const now = Date.now();
-          const key = `skip:${deviceId}`;
-          const last = this._offlineSkipLog?.get(key);
-          if (!this._offlineSkipLog) this._offlineSkipLog = new Map();
-          if (!last || now - last > 60 * 1000) {
-            this._offlineSkipLog.set(key, now);
-            console.warn(
-              `[scheduleEngine] Skipped schedule "${name}" channel ${channel} — device ${deviceId} is offline`,
-            );
-          }
-          continue;
-        }
-
-        try {
-          await this.mqttGateway.publishCommandNoWait(deviceId, channel, desired);
-        } catch (err) {
-          console.error(
-            `[scheduleEngine] Schedule "${name}" apply error on ${deviceId} channel ${channel}: ${err.message}`,
-          );
-        }
-
-        try {
-          await this._setChannelState(schedule._id, channel, desired);
-        } catch (err) {
-          console.error(`[scheduleEngine] Persist error on ${deviceId} channel ${channel}: ${err.message}`);
-        }
+        const key = `${deviceId}:${channel}`;
+        const last = this._auditLog.get(key);
+        if (last && nowMs - last < AUDIT_LOG_THROTTLE_MS) continue;
+        this._auditLog.set(key, nowMs);
+        console.warn(
+          `[scheduleEngine][AUDIT] divergence device=${deviceId} ch=${channel} ` +
+            `desired=${desired} actual=${actual} (schedule "${schedule.name}") — ` +
+            'device-native timers may be stale or missing',
+        );
       }
     }
   }
