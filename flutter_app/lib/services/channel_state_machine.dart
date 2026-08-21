@@ -488,14 +488,18 @@ ReduceResult<ChannelState> _applyReport(
   // telemetry, and the 15s poll. Skip the epoch bump and all effects so the
   // ripple pulse is never visibly re-triggered for a value that did not
   // change. A report that RESOLVES a still-pending tap is a meaningful
-  // transition, so it is never suppressed here — BUT only the tap's DESIRED
-  // value counts as resolution (FIX B: a pending-phase socket echo carrying
-  // the OLD pre-tap value is the stale pre-switch tele/STATE, not the tap's
-  // confirmation; holding it lets the verified REST read-back settle truth).
-  // The freshness / rollback acceptance rules above are untouched — this only
-  // stops redundant re-application on top of them.
-  final resolvesPendingTap =
-      isSocket && state.pending && report.state == state.desired;
+  // transition, so it is never suppressed here — but only a tap's confirmation
+  // counts as resolution: the DESIRED value (the device flipped) or, for a
+  // CLOUD-confirmed tap, any fresh socket report (the device may legitimately
+  // refuse, so the socket is authority). A socket echo carrying the OLD
+  // pre-tap value while a LAN-confirmed tap is pending is the stale pre-switch
+  // tele/STATE — holding it lets the verified local REST read-back settle
+  // truth. The freshness / rollback acceptance rules above are untouched —
+  // this only stops redundant re-application on top of them.
+  final resolvesPendingTap = isSocket &&
+      state.pending &&
+      (report.state == state.desired ||
+          state.source != DeviceTransportSource.local);
   if (report.state == state.reported && !resolvesPendingTap) {
     _traceChannelReport(event, 'REJECT (same-value echo)');
     return ReduceResult(state, const [FollowUp.none]);

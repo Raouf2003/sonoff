@@ -1024,8 +1024,8 @@ void main() {
         expect(monitor.state.value.sameWifi, isTrue);
 
         // One transient cloud fallback (e.g. a single 15s poll that lost the
-        // local HTTP round-trip) inside kLocalReportHold (60s).
-        fakeNow = fakeNow.add(const Duration(seconds: 30));
+        // local HTTP round-trip) inside kDowngradeStickyWindow (10s).
+        fakeNow = fakeNow.add(const Duration(seconds: 5));
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
         expect(
           monitor.state.value.sameWifi,
@@ -1050,7 +1050,7 @@ void main() {
         expect(monitor.state.value.sameWifi, isTrue);
 
         // Sticky window expires; the next cloud read only starts counting.
-        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
         expect(
           monitor.state.value.sameWifi,
@@ -1074,7 +1074,7 @@ void main() {
         expect(monitor.state.value.sameWifi, isTrue);
 
         // After the reset, one stray cloud read again cannot downgrade.
-        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
         expect(
           monitor.state.value.sameWifi,
@@ -1111,7 +1111,7 @@ void main() {
         );
 
         // After the sticky window, one more failed probe only starts counting.
-        fakeNow = fakeNow.add(kLocalReportHold + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
         monitor.notifyNetworkChanged(_deviceId);
         await tester.pump(const Duration(milliseconds: 400));
         await tester.pump();

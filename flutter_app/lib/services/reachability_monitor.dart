@@ -28,6 +28,15 @@ const Duration kBadgeSettleDelay = Duration(milliseconds: 500);
 /// slow to trust bad news).
 const int kSameWifiDowngradeConfirmations = 2;
 
+/// How long a confirmed `sameWifi=true` verdict stays sticky before the
+/// downgrade counter starts accumulating. Shorter than the shared
+/// [kLocalReportHold] (60s) which protects local-evidence freshness for
+/// rollback/evidence semantics — the badge downgrade path only needs to
+/// absorb brief LAN blips (e.g. device reboots), so 10s is sufficient.
+/// The [kSameWifiDowngradeConfirmations] = 2 still absorbs single
+/// transient cloud reads.
+const Duration kDowngradeStickyWindow = Duration(seconds: 10);
+
 /// Live routing facts for the currently selected device, maintained
 /// CONTINUOUSLY in the background so a relay tap reads a fresh value with ZERO
 /// probe latency instead of racing a fresh probe against the tap.
@@ -219,19 +228,19 @@ class ReachabilityMonitor {
     );
   }
 
-  /// Negative same-WiFi signal (a cloud-sourced status read or a failed fast
-  /// probe). A confirmed `sameWifi=true` verdict is sticky for
-  /// [kLocalReportHold] — a stray negative signal inside that window is
-  /// ignored entirely and does not even count toward the downgrade. Otherwise
-  /// the verdict only downgrades to false after
-  /// [kSameWifiDowngradeConfirmations] consecutive negative signals with no
-  /// local confirmation in between.
+/// Negative same-WiFi signal (a cloud-sourced status read or a failed fast
+/// probe). A confirmed `sameWifi=true` verdict is sticky for
+/// [kDowngradeStickyWindow] — a stray negative signal inside that window is
+/// ignored entirely and does not even count toward the downgrade. Otherwise
+/// the verdict only downgrades to false after
+/// [kSameWifiDowngradeConfirmations] consecutive negative signals with no
+/// local confirmation in between.
   void _applyNegativeSignal() {
     final currentNow = now();
     final current = _state.value;
     final sticky = current.sameWifi &&
         current.lastCheckedAt != null &&
-        currentNow.difference(current.lastCheckedAt!) < kLocalReportHold;
+        currentNow.difference(current.lastCheckedAt!) < kDowngradeStickyWindow;
     if (sticky) return;
     _consecutiveCloudReads++;
     if (!current.sameWifi) {
