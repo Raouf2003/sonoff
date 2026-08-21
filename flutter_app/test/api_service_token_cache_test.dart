@@ -139,8 +139,6 @@ void main() {
     });
 
     test('error handling (timeout, network) still works with shared client', () async {
-      final mockClient = _MockClient.single(http.Response('[]', 200));
-      final api = ApiService(client: mockClient, auth: _CountingAuth());
       // Mock a 401 to trigger onUnauthorized and ensure _checkObject still works
       final unauthClient = _MockClient({
         '/api/devices': http.Response(jsonEncode({'error': 'Unauthorized'}), 401),

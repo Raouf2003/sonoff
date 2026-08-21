@@ -310,6 +310,39 @@ class _SupersededRepo extends _FakeRepo {
   }
 }
 
+class _BusyTimeoutRepo extends _FakeRepo {
+  _BusyTimeoutRepo({super.gateControl = true});
+
+  bool failNextAsBusy = false;
+
+  @override
+  Future<RelayStatusResult> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+    ControlRoute route = ControlRoute.cloudOnly,
+    bool? sameWifiAtTap,
+  }) async {
+    controlCalls++;
+    if (failNextAsBusy) {
+      failNextAsBusy = false;
+      throw const DeviceTransportException(
+        'The device did not confirm the command before timing out.',
+        kind: TransportFailureKind.logical,
+        code: 'UNCONFIRMED',
+      );
+    }
+    if (gateControl) await releaseControl.future;
+    return RelayStatusResult(
+      online: true,
+      channels: {channel: ChannelReport(state)},
+      source: source,
+      seq: 1,
+    );
+  }
+}
+
 /// Socket-io client that can be DRIVEN by the test: `on`/`onConnect`/
 /// `onDisconnect`/`onConnectError` handlers are captured so the test can emit
 /// `device_status`/`device_update` events and fire connect/disconnect at will.
@@ -609,17 +642,71 @@ void main() {
     // Release first control (ON)
     repo.releaseControl.complete();
     await tester.pump();
-    // Allow microtask follow-up to fire
-    await tester.pump(const Duration(milliseconds: 50));
+    // Follow-up is now delayed by kMinRelayInterval (300ms) to let relay settle
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.pump();
     expect(
       repo.controlCalls,
       2,
-      reason: 'coalesced OFF should fire as follow-up after first completes',
+      reason: 'coalesced OFF should fire as follow-up after 300ms gap',
     );
     // After follow-up completes, final state should be OFF (DRY)
     await tester.pump();
     expect(find.text('DRY'), findsNWidgets(4));
+
+    await _unmount(tester);
+  });
+
+  testWidgets('first tap fires immediately with 0ms delay (regression guard)',
+      (tester) async {
+    final repo = _FakeRepo(gateControl: true);
+    await _pumpDevicesPage(tester, repo: repo);
+
+    final sw = Stopwatch()..start();
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    sw.stop();
+    expect(repo.controlCalls, 1);
+    expect(sw.elapsedMilliseconds, lessThan(100),
+        reason: 'first tap must fire immediately, not delayed by kMinRelayInterval');
+    expect(find.text('TURNING ON…'), findsOneWidget);
+
+    await _unmount(tester);
+  });
+
+  testWidgets('new tap during 300ms delay updates eventual target (last-wins)',
+      (tester) async {
+    final repo = _FakeRepo(gateControl: true);
+    await _pumpDevicesPage(tester, repo: repo);
+
+    // First tap ON
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(repo.controlCalls, 1);
+    // Second tap OFF while pending — queued OFF
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(find.text('TURNING OFF…'), findsOneWidget);
+
+    // Release first control (ON) — schedules follow-up OFF after 300ms
+    repo.releaseControl.complete();
+    await tester.pump();
+    expect(repo.controlCalls, 1);
+
+    // During the 300ms gap, tap again to ON — should update queued to ON
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    // Queued should now be ON — the tap should be accepted and coalesced
+    expect(repo.controlCalls, 1,
+        reason: 'new tap during gap should update queued, not fire immediate HTTP');
+
+    // After remaining delay, follow-up would fire with latest (ON), but since
+    // the device is already ON, no follow-up is needed
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    expect(repo.controlCalls, 1,
+        reason: 'latest queued ON already matches reported ON, no follow-up needed');
 
     await _unmount(tester);
   });
@@ -636,6 +723,52 @@ void main() {
     // No error SnackBar should be shown for SUPERSEDED
     expect(find.text('A newer command superseded this one'), findsNothing);
     expect(find.byType(SnackBar), findsNothing);
+
+    await _unmount(tester);
+  });
+
+  testWidgets('coalesced follow-up timeout shows "Device is busy, try again"',
+      (tester) async {
+    final repo = _BusyTimeoutRepo(gateControl: true);
+    await _pumpDevicesPage(tester, repo: repo);
+
+    // First tap ON
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(repo.controlCalls, 1);
+    // Second tap OFF while pending — queued
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(find.text('TURNING OFF…'), findsOneWidget);
+
+    // Make the follow-up OFF fail as busy timeout
+    repo.failNextAsBusy = true;
+    repo.releaseControl.complete();
+    await tester.pump();
+    // Wait for 300ms gap + follow-up execution
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.text('Device is busy, try again'), findsOneWidget);
+    expect(find.byType(SnackBar), findsOneWidget);
+
+    await _unmount(tester);
+  });
+
+  testWidgets('standalone timeout shows original message, not busy',
+      (tester) async {
+    final repo = _BusyTimeoutRepo(gateControl: false);
+    repo.failNextAsBusy = true;
+    await _pumpDevicesPage(tester, repo: repo);
+
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.text('The device did not confirm the command before timing out.'),
+        findsOneWidget);
+    expect(find.text('Device is busy, try again'), findsNothing);
 
     await _unmount(tester);
   });

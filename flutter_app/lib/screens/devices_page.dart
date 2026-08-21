@@ -141,6 +141,12 @@ class _DevicesPageState extends State<DevicesPage>
   static const Duration kRelayPendingIndicatorDelay =
       Duration(milliseconds: 200);
 
+  /// Minimum gap between the prior command's resolution and a coalesced
+  /// follow-up firing, to let the relay's physical contacts settle (≈150-200ms
+  /// on Tasmota). Only the coalesced follow-up path is delayed — the first tap
+  /// in any sequence still fires immediately (optimistic UI unaffected).
+  static const Duration kMinRelayInterval = Duration(milliseconds: 300);
+
   Timer? _statusTimer;
 
   /// Debounces the BADGE's visual representation of ReachabilityState. Rapid
@@ -173,6 +179,18 @@ class _DevicesPageState extends State<DevicesPage>
   // in-flight HTTP is not duplicated; after it completes a follow-up _toggle
   // is fired if the coalesced value still differs from the confirmed state.
   final Map<String, bool> _coalescedTarget = {};
+
+  // Follow-up timers for the kMinRelayInterval gap. While a timer is active,
+  // new taps for that key update _coalescedTarget in place (last-wins) and
+  // do not reset the timer — the follow-up fires once at the original
+  // delay expiry with the latest queued target.
+  final Map<String, Timer> _followUpTimers = {};
+
+  // Tracks whether the currently in-flight command for a key was itself a
+  // coalesced follow-up. Used in the catch block to show "Device is busy"
+  // for timeouts that follow a rapid-tap burst vs the generic message for a
+  // standalone single-tap timeout.
+  final Set<String> _coalescedFollowUpKeys = {};
 
   bool get _isOnline => _deviceState.connectivity == Connectivity.online;
   bool get _isOffline => _deviceState.connectivity == Connectivity.offline;
@@ -372,9 +390,14 @@ class _DevicesPageState extends State<DevicesPage>
       timer.cancel();
     }
     _pendingIndicatorTimers.clear();
+    for (final timer in _followUpTimers.values) {
+      timer.cancel();
+    }
+    _followUpTimers.clear();
     _pendingRelays.clear();
     _inFlightOps.clear();
     _coalescedTarget.clear();
+    _coalescedFollowUpKeys.clear();
     for (final c in _rippleControllers) {
       c.dispose();
     }
@@ -782,21 +805,50 @@ class _DevicesPageState extends State<DevicesPage>
     // visuals still reflect the device verdict.
     final key = '$_selectedDeviceId:$channel';
     final index = channel - 1;
-    if (_pendingRelays.contains(key)) {
+    final isInFlight = _pendingRelays.contains(key);
+    final isFollowUpScheduled = _followUpTimers.containsKey(key);
+    if (isInFlight || isFollowUpScheduled) {
       // Coalesce rapid taps: don't fire a second parallel HTTP request (which
-      // would yield SUPERSEDED). Remember the latest desired value and update
-      // the optimistic UI via the reducer's coalescing path.
+      // would yield SUPERSEDED). Remember the latest desired value.
       final currentDesired = _coalescedTarget.containsKey(key)
           ? _coalescedTarget[key]!
           : _channelStates[index].desired == 'ON';
       if (currentDesired == targetState) return;
       _coalescedTarget[key] = targetState;
-      final pendingOpId = _inFlightOps[key];
-      if (pendingOpId != null) {
-        ControlTimeline.mark(pendingOpId, _selectedDeviceId!, channel,
-            'Coalesced tap queued: ${targetState ? "ON" : "OFF"}');
+      if (isInFlight) {
+        final pendingOpId = _inFlightOps[key];
+        if (pendingOpId != null) {
+          ControlTimeline.mark(pendingOpId, _selectedDeviceId!, channel,
+              'Coalesced tap queued: ${targetState ? "ON" : "OFF"}');
+        }
+        _dispatchChannel(index, UserTap(targetState), DateTime.now());
+      } else {
+        // Follow-up already scheduled (300ms gap) — just update the queued
+        // target and the displayed pending UI to the latest. The existing
+        // timer will fire with the latest value at expiry (last-wins).
+        final cur = _channelStates[index];
+        if (!cur.pending) {
+          _channelStates[index] = cur.copyWith(
+            pending: true,
+            desired: targetState ? 'ON' : 'OFF',
+            showIndicator: false,
+          );
+          if (targetState) {
+            _rippleControllers[index].repeat(reverse: true);
+          } else {
+            _rippleControllers[index].stop();
+            _rippleControllers[index].reset();
+          }
+          setState(() {});
+        } else {
+          _dispatchChannel(index, UserTap(targetState), DateTime.now());
+        }
+        ControlTimeline.mark(
+            _inFlightOps[key] ?? 'follow-up',
+            _selectedDeviceId!,
+            channel,
+            'Coalesced tap updated during delay: ${targetState ? "ON" : "OFF"}');
       }
-      _dispatchChannel(index, UserTap(targetState), DateTime.now());
       HapticFeedback.lightImpact();
       return;
     }
@@ -909,11 +961,25 @@ class _DevicesPageState extends State<DevicesPage>
         }
       } else {
         ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Command failed');
-        final msg = e.toString().replaceFirst('Exception: ', '');
+        final rawMsg = e.toString().replaceFirst('Exception: ', '');
         // If the command failed but a newer device report already arrived
         // (socket confirmed), pending is resolved so the Timeout is a no-op and
         // the UI already shows the truth. Otherwise Timeout degrades to UNKNOWN.
         final socketConfirmed = !_channelStates[index].pending;
+        // Detect busy-from-rapid-tapping: this timeout follows a coalesced
+        // burst (either this op was itself a coalesced follow-up, or a
+        // follow-up was queued for this channel, or a follow-up timer is
+        // pending). In that case the generic 5s ACK message is misleading —
+        // show "Device is busy" instead.
+        final isBusy = _coalescedFollowUpKeys.contains(key) ||
+            _coalescedTarget.containsKey(key) ||
+            _followUpTimers.containsKey(key);
+        final msg = isBusy &&
+                (rawMsg.contains('did not acknowledge') ||
+                    rawMsg.contains('did not confirm') ||
+                    rawMsg.contains('UNCONFIRMED'))
+            ? 'Device is busy, try again'
+            : rawMsg;
         _dispatchChannel(index, Timeout(channel), DateTime.now());
         if (socketConfirmed) {
           // The device already confirmed a newer state (e.g. via tele/STATE)
@@ -932,16 +998,95 @@ class _DevicesPageState extends State<DevicesPage>
     } finally {
       _inFlightOps.remove('$_selectedDeviceId:$channel');
       ControlTimeline.end(opId);
-      _pendingRelays.remove(key);
       _pendingIndicatorTimers[key]?.cancel();
       _pendingIndicatorTimers.remove(key);
-      final queued = _coalescedTarget.remove(key);
+      // If this was a coalesced follow-up, clear its busy marker. The flag
+      // is per-invocation, so a follow-up that itself queued another follow-up
+      // will have that next follow-up's flag set separately.
+      final wasFollowUp = _coalescedFollowUpKeys.contains(key);
+      if (wasFollowUp) {
+        // Keep the flag until the next follow-up's timer fires or no more
+        // queued follow-ups remain. For a standalone follow-up that completes
+        // without further coalescing, clear it now.
+        if (!_coalescedTarget.containsKey(key)) {
+          _coalescedFollowUpKeys.remove(key);
+        }
+      }
+      final queued = _coalescedTarget[key];
       if (queued != null && mounted) {
-        final queuedStr = queued ? 'ON' : 'OFF';
-        if (_channelStates[index].reported != queuedStr) {
-          Future.microtask(() {
-            if (mounted) _toggle(channel, queued);
+        // Show the queued desired as pending during the gap so the UI
+        // continues to reflect the latest intent, not the just-completed
+        // command's intermediate result.
+        final curGap = _channelStates[index];
+        if (!curGap.pending) {
+          _channelStates[index] = curGap.copyWith(
+            pending: true,
+            desired: queued ? 'ON' : 'OFF',
+            showIndicator: false,
+          );
+          if (queued) {
+            _rippleControllers[index].repeat(reverse: true);
+          } else {
+            _rippleControllers[index].stop();
+            _rippleControllers[index].reset();
+          }
+          setState(() {});
+        }
+        // Schedule the follow-up with a minimum gap to let the relay settle.
+        // Clear the in-flight guard now and keep the follow-up timer as the
+        // coalescing guard for the 300ms window — new taps during the gap
+        // will update _coalescedTarget in place (last-wins at expiry) rather
+        // than starting a parallel request.
+        _pendingRelays.remove(key);
+        if (_followUpTimers.containsKey(key)) {
+          // Timer already scheduled — just updated _coalescedTarget to latest
+          // in the early coalesce guard; the existing timer will fire with
+          // the latest value at its original expiry.
+        } else {
+          _followUpTimers[key] = Timer(kMinRelayInterval, () {
+            _followUpTimers.remove(key);
+            if (!mounted) {
+              _coalescedTarget.remove(key);
+              _coalescedFollowUpKeys.remove(key);
+              return;
+            }
+            final latestQueued = _coalescedTarget.remove(key);
+            if (latestQueued != null) {
+              final latestStr = latestQueued ? 'ON' : 'OFF';
+              if (_channelStates[index].reported != latestStr) {
+                _coalescedFollowUpKeys.add(key);
+                _toggle(channel, latestQueued);
+              } else {
+                // No follow-up needed, but clear the gap's pending display
+                final cur = _channelStates[index];
+                if (cur.pending) {
+                  _channelStates[index] = cur.copyWith(
+                    pending: false,
+                    clearDesired: true,
+                    showIndicator: false,
+                    clearTapEpoch: true,
+                    clearOpId: true,
+                  );
+                  _applyChannelEffects(
+                      index, Timeout(channel), const [FollowUp.cancelPendingTimer]);
+                  if (mounted) setState(() {});
+                }
+                _coalescedFollowUpKeys.remove(key);
+              }
+            } else {
+              _coalescedFollowUpKeys.remove(key);
+            }
           });
+        }
+      } else {
+        // No queued follow-up — clear the single-flight guard.
+        _pendingRelays.remove(key);
+        _coalescedTarget.remove(key);
+        // If this was a follow-up that completed without queuing another,
+        // the busy flag was already cleared above; otherwise ensure it's
+        // cleared for standalone completions.
+        if (wasFollowUp && queued == null) {
+          _coalescedFollowUpKeys.remove(key);
         }
       }
     }
