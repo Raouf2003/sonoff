@@ -321,9 +321,18 @@ ReduceResult<ChannelState> channelReduce(
 
 ReduceResult<ChannelState> _applyTap(ChannelState state, UserTap event) {
   if (state.pending) {
-    // Single-flight per device_channel: a second tap while one command is in
-    // flight is ignored (never spawns a second transport call).
-    return ReduceResult(state, const [FollowUp.none]);
+    // Coalesce: a second tap while one command is in flight updates the
+    // desired value to the latest intent without starting a new pending
+    // lifecycle. The view's _pendingRelays guard ensures only one HTTP call
+    // is in flight; the queued desired will be sent as a follow-up after the
+    // first completes if it still differs from the confirmed state.
+    final targetStr = event.target ? 'ON' : 'OFF';
+    if (state.desired == targetStr) {
+      return ReduceResult(state, const [FollowUp.none]);
+    }
+    final next = state.copyWith(desired: targetStr);
+    final effect = targetStr == 'ON' ? FollowUp.rippleOn : FollowUp.rippleOff;
+    return ReduceResult(next, [effect], committed: false);
   }
   final next = state.copyWith(
     desired: event.target ? 'ON' : 'OFF',

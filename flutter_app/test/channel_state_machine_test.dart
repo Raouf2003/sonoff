@@ -34,12 +34,20 @@ void main() {
       expect(r.state.reported, isNull, reason: 'no optimistic-UI desync');
     });
 
-    test('second tap while pending is ignored (single-flight)', () {
+    test('second tap while pending is coalesced (single-flight with last-tap-wins)', () {
       final armed = channelReduce(const ChannelState(), const UserTap(false, opId: 'o1'),
           config, now: t0).state;
+      // Same target -> still ignored (no duplicate effect).
+      final same = channelReduce(armed, const UserTap(false, opId: 'o2'), config, now: t0);
+      expect(same.effects, [FollowUp.none]);
+      expect(same.state, unchanged(armed));
+      // Different target -> desired updated to latest, ripple reflects new intent,
+      // pending stays true with original opId preserved for backend correlation.
       final r = channelReduce(armed, const UserTap(true, opId: 'o2'), config, now: t0);
-      expect(r.effects, [FollowUp.none]);
-      expect(r.state, unchanged(armed));
+      expect(r.state.pending, isTrue);
+      expect(r.state.desired, 'ON');
+      expect(r.state.opId, 'o1');
+      expect(r.effects, [FollowUp.rippleOn]);
     });
   });
 

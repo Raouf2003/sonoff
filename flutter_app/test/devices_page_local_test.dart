@@ -288,6 +288,26 @@ class _FakeSocket implements io.Socket {
   void noSuchMethod(Invocation invocation) {}
 }
 
+class _SupersededRepo extends _FakeRepo {
+  _SupersededRepo() : super(gateControl: false);
+
+  @override
+  Future<RelayStatusResult> control(
+    String deviceId,
+    int channel,
+    String state, {
+    String? opId,
+    ControlRoute route = ControlRoute.cloudOnly,
+  }) async {
+    controlCalls++;
+    throw const ApiException(
+      'A newer command superseded this one',
+      statusCode: 409,
+      code: 'SUPERSEDED',
+    );
+  }
+}
+
 /// Socket-io client that can be DRIVEN by the test: `on`/`onConnect`/
 /// `onDisconnect`/`onConnectError` handlers are captured so the test can emit
 /// `device_status`/`device_update` events and fire connect/disconnect at will.
@@ -552,6 +572,67 @@ void main() {
       1,
       reason: 'a pending relay must not be re-sent on a second tap',
     );
+
+    await _unmount(tester);
+  });
+
+  testWidgets('rapid opposite taps coalesce to last-tap-wins with follow-up',
+      (tester) async {
+    final repo = _FakeRepo(gateControl: true);
+    await _pumpDevicesPage(tester, repo: repo);
+
+    expect(find.text('DRY'), findsNWidgets(4));
+
+    // First tap ON
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(repo.controlCalls, 1);
+    expect(find.text('TURNING ON…'), findsOneWidget);
+
+    // Second tap while pending should coalesce to OFF (toggle of pending ON)
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    expect(
+      repo.controlCalls,
+      1,
+      reason: 'coalesced tap must not fire immediate second request',
+    );
+    expect(
+      find.text('TURNING OFF…'),
+      findsOneWidget,
+      reason: 'optimistic UI should reflect coalesced OFF',
+    );
+
+    // Release first control (ON)
+    repo.releaseControl.complete();
+    await tester.pump();
+    // Allow microtask follow-up to fire
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+    expect(
+      repo.controlCalls,
+      2,
+      reason: 'coalesced OFF should fire as follow-up after first completes',
+    );
+    // After follow-up completes, final state should be OFF (DRY)
+    await tester.pump();
+    expect(find.text('DRY'), findsNWidgets(4));
+
+    await _unmount(tester);
+  });
+
+  testWidgets('SUPERSEDED error does not show toast (coalesced race)',
+      (tester) async {
+    final repo = _SupersededRepo();
+    await _pumpDevicesPage(tester, repo: repo);
+
+    await tester.tap(find.text('CHANNEL 1'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // No error SnackBar should be shown for SUPERSEDED
+    expect(find.text('A newer command superseded this one'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
 
     await _unmount(tester);
   });

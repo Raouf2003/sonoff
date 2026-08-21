@@ -168,6 +168,12 @@ class _DevicesPageState extends State<DevicesPage>
   // if the command resolves before the delay elapses.
   final Map<String, Timer> _pendingIndicatorTimers = {};
 
+  // Coalesced tap queue: when a tap arrives while one is already in flight for
+  // the same device:channel, the latest desired value is remembered here. The
+  // in-flight HTTP is not duplicated; after it completes a follow-up _toggle
+  // is fired if the coalesced value still differs from the confirmed state.
+  final Map<String, bool> _coalescedTarget = {};
+
   bool get _isOnline => _deviceState.connectivity == Connectivity.online;
   bool get _isOffline => _deviceState.connectivity == Connectivity.offline;
 
@@ -366,6 +372,9 @@ class _DevicesPageState extends State<DevicesPage>
       timer.cancel();
     }
     _pendingIndicatorTimers.clear();
+    _pendingRelays.clear();
+    _inFlightOps.clear();
+    _coalescedTarget.clear();
     for (final c in _rippleControllers) {
       c.dispose();
     }
@@ -772,8 +781,25 @@ class _DevicesPageState extends State<DevicesPage>
     // tap reach the transport layer so the local-first path can run; the card
     // visuals still reflect the device verdict.
     final key = '$_selectedDeviceId:$channel';
-    if (_pendingRelays.contains(key)) return;
     final index = channel - 1;
+    if (_pendingRelays.contains(key)) {
+      // Coalesce rapid taps: don't fire a second parallel HTTP request (which
+      // would yield SUPERSEDED). Remember the latest desired value and update
+      // the optimistic UI via the reducer's coalescing path.
+      final currentDesired = _coalescedTarget.containsKey(key)
+          ? _coalescedTarget[key]!
+          : _channelStates[index].desired == 'ON';
+      if (currentDesired == targetState) return;
+      _coalescedTarget[key] = targetState;
+      final pendingOpId = _inFlightOps[key];
+      if (pendingOpId != null) {
+        ControlTimeline.mark(pendingOpId, _selectedDeviceId!, channel,
+            'Coalesced tap queued: ${targetState ? "ON" : "OFF"}');
+      }
+      _dispatchChannel(index, UserTap(targetState), DateTime.now());
+      HapticFeedback.lightImpact();
+      return;
+    }
     final opId = ControlTimeline.begin(_selectedDeviceId!, channel);
     final now = DateTime.now();
 
@@ -860,32 +886,63 @@ class _DevicesPageState extends State<DevicesPage>
         ControlTimeline.end(opId);
         return;
       }
-      ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Command failed');
-      final msg = e.toString().replaceFirst('Exception: ', '');
-      // If the command failed but a newer device report already arrived
-      // (socket confirmed), pending is resolved so the Timeout is a no-op and
-      // the UI already shows the truth. Otherwise Timeout degrades to UNKNOWN.
-      final socketConfirmed = !_channelStates[index].pending;
-      _dispatchChannel(index, Timeout(channel), DateTime.now());
-      if (socketConfirmed) {
-        // The device already confirmed a newer state (e.g. via tele/STATE)
-        // while the REST wait timed out: the UI shows the truth, so a scary
-        // error toast would contradict the confirmed state. Stay quiet.
+      // SUPERSEDED is now rare due to coalescing; when it does occur (genuine
+      // cross-session race) don't show an error toast.
+      if (e is ApiException && e.code == 'SUPERSEDED') {
         ControlTimeline.mark(opId, _selectedDeviceId!, channel,
-            'REST failed but socket confirmed');
+            'SUPERSEDED suppressed');
+        // Clear pending without degrading to UNKNOWN — the superseding
+        // command's result will arrive via socket/REST.
+        final cur = _channelStates[index];
+        if (cur.pending) {
+          _channelStates[index] = cur.copyWith(
+            pending: false,
+            clearDesired: true,
+            showIndicator: false,
+            clearTapEpoch: true,
+            clearOpId: true,
+          );
+          _applyChannelEffects(
+              index, Timeout(channel), const [FollowUp.cancelPendingTimer]);
+          if (mounted) setState(() {});
+        }
       } else {
-        // Connectivity is NOT decided here: a single command failure is weak
-        // evidence and the reconcile poll below re-establishes truth from the
-        // device report (or the repeated-failure threshold).
-        _showError(msg);
+        ControlTimeline.mark(opId, _selectedDeviceId!, channel, 'Command failed');
+        final msg = e.toString().replaceFirst('Exception: ', '');
+        // If the command failed but a newer device report already arrived
+        // (socket confirmed), pending is resolved so the Timeout is a no-op and
+        // the UI already shows the truth. Otherwise Timeout degrades to UNKNOWN.
+        final socketConfirmed = !_channelStates[index].pending;
+        _dispatchChannel(index, Timeout(channel), DateTime.now());
+        if (socketConfirmed) {
+          // The device already confirmed a newer state (e.g. via tele/STATE)
+          // while the REST wait timed out: the UI shows the truth, so a scary
+          // error toast would contradict the confirmed state. Stay quiet.
+          ControlTimeline.mark(opId, _selectedDeviceId!, channel,
+              'REST failed but socket confirmed');
+        } else {
+          // Connectivity is NOT decided here: a single command failure is weak
+          // evidence and the reconcile poll below re-establishes truth from the
+          // device report (or the repeated-failure threshold).
+          _showError(msg);
+        }
+        _fetchStatus(silent: true); // reconcile
       }
-      _fetchStatus(silent: true); // reconcile
     } finally {
       _inFlightOps.remove('$_selectedDeviceId:$channel');
       ControlTimeline.end(opId);
       _pendingRelays.remove(key);
       _pendingIndicatorTimers[key]?.cancel();
       _pendingIndicatorTimers.remove(key);
+      final queued = _coalescedTarget.remove(key);
+      if (queued != null && mounted) {
+        final queuedStr = queued ? 'ON' : 'OFF';
+        if (_channelStates[index].reported != queuedStr) {
+          Future.microtask(() {
+            if (mounted) _toggle(channel, queued);
+          });
+        }
+      }
     }
   }
 

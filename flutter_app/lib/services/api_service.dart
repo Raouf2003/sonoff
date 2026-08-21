@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 
@@ -78,14 +79,49 @@ PreflightDecision decidePreflight(DeviceDuplicateStatus? status) {
 }
 
 class ApiService {
-  final AuthService _auth = AuthService();
+  ApiService({AuthService? auth}) : _auth = auth ?? AuthService();
+
+  final AuthService _auth;
 
   /// Registered by the app shell to log the user out when any request returns
   /// 401 (missing/expired/invalid token). No-op by default.
   static void Function()? onUnauthorized;
 
+  // ── Token cache (in-memory, single-flight) ──────────────────────────
+  // Caches the bearer token after the first secure-storage read. Subsequent
+  // calls reuse the cached value, saving 5-50ms per request. Concurrent
+  // callers during a cache miss share the same in-flight Future.
+  String? _cachedToken;
+  Future<String?>? _pendingTokenRead;
+
+  Future<String?> _getCachedToken() async {
+    if (_cachedToken != null) return _cachedToken;
+    if (_pendingTokenRead != null) return _pendingTokenRead!;
+    final future = _auth.getToken().then((t) {
+      if (t != null && t.isNotEmpty) _cachedToken = t;
+      return t;
+    });
+    _pendingTokenRead = future;
+    try {
+      return await future;
+    } finally {
+      _pendingTokenRead = null;
+    }
+  }
+
+  void _invalidateTokenCache() {
+    _cachedToken = null;
+    _pendingTokenRead = null;
+  }
+
+  @visibleForTesting
+  void clearTokenCacheForTesting() => _invalidateTokenCache();
+
+  @visibleForTesting
+  Future<String?> getCachedTokenForTesting() => _getCachedToken();
+
   Future<Map<String, String>> _headers() async {
-    final token = await _auth.getToken();
+    final token = await _getCachedToken();
     return {
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
@@ -159,8 +195,11 @@ class ApiService {
   }
 
   void _notifyUnauthorized(int statusCode) {
-    if (statusCode == 401 && ApiService.onUnauthorized != null) {
-      ApiService.onUnauthorized!();
+    if (statusCode == 401) {
+      _invalidateTokenCache();
+      if (ApiService.onUnauthorized != null) {
+        ApiService.onUnauthorized!();
+      }
     }
   }
 
