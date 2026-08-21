@@ -45,8 +45,17 @@ function installFakeConfigChannel(state) {
     }
     if (/^Rule(\d+)$/.test(key)) {
       const idx = Number(key.slice(4));
-      if (payload !== '' && payload !== undefined) {
-        state.rules[idx - 1] = { ...state.rules[idx - 1], State: 'ON', Rules: String(payload), Length: String(payload).length };
+      if (payload === '1' || payload === '0') {
+        // Real Tasmota: `Rule<n> 1` enables, `Rule<n> 0` disables — the rule
+        // TEXT is untouched. (Content writes are the non-numeric payloads.)
+        state.rules[idx - 1] = {
+          ...state.rules[idx - 1],
+          State: payload === '1' ? 'ON' : 'OFF',
+        };
+      } else if (payload !== '' && payload !== undefined) {
+        // Content write: stores the body. Model the observed real device:
+        // this alone does NOT change State (stays whatever it was).
+        state.rules[idx - 1] = { ...state.rules[idx - 1], Rules: String(payload), Length: String(payload).length };
       }
       return Promise.resolve({ [key]: state.rules[idx - 1] });
     }

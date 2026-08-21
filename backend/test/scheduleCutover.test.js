@@ -256,6 +256,174 @@ test('ensureDeviceClock corrects missing/stale Epoch via NTP rewrite; healthy cl
   }
 });
 
+// ─────────────────── 5. Rule2 activation (State:"ON") ──────────────────────
+
+const { dailySchedule } = (() => {
+  const dailySchedule = (over = {}) => ({
+    _id: 's1',
+    name: 'morning',
+    enabled: true,
+    deviceId: '34987AC30304',
+    channels: [1],
+    recurrence: { type: 'daily', daysOfWeek: [] },
+    timeRanges: [{ start: '07:00', end: '09:00' }],
+    ...over,
+  });
+  return { dailySchedule };
+})();
+
+// Local fake firmware that models the REAL device behavior from the MQTT log:
+// writing rule TEXT stores it but leaves State untouched (OFF); only an
+// explicit numeric payload activates/deactivates. `ignoreActivation` models a
+// hostile/faulty device where even `Rule2 1` fails to enable.
+function installRuleFake(state, { ignoreActivation = false } = {}) {
+  const orig = tasmotaConfigClient.requestTasmotaConfig;
+  const calls = [];
+  tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command, payload, opts = {}) => {
+    const key = opts.expectedResponseKey || command;
+    calls.push({ command, payload });
+    const m = /^Rule(\d+)$/.exec(key);
+    if (m) {
+      const idx = Number(m[1]);
+      if (payload === '1' || payload === '0') {
+        if (!ignoreActivation) {
+          state.rules[idx - 1] = { ...state.rules[idx - 1], State: payload === '1' ? 'ON' : 'OFF' };
+        }
+      } else if (payload !== '' && payload !== undefined) {
+        state.rules[idx - 1] = {
+          ...state.rules[idx - 1],
+          Rules: String(payload),
+          Length: String(payload).length,
+        };
+      }
+      return Promise.resolve({ [key]: state.rules[idx - 1] });
+    }
+    if (/^Timer(\d+)$/.test(key)) {
+      const idx = Number(key.slice(5));
+      const body = payload === '' || payload === undefined ? null : JSON.parse(payload);
+      if (body) state.timers[idx - 1] = { ...state.timers[idx - 1], ...body };
+      return Promise.resolve({ [key]: state.timers[idx - 1] });
+    }
+    if (key === 'Time') {
+      return Promise.resolve({ Time: 'x', Epoch: Math.floor(Date.now() / 1000) });
+    }
+    return Promise.reject(new Error(`unhandled ${key}`));
+  };
+  return {
+    calls,
+    restore() {
+      tasmotaConfigClient.requestTasmotaConfig = orig;
+    },
+  };
+}
+
+function emptyDeviceState() {
+  const timers = Array.from({ length: 16 }, () => ({
+    Enable: 0, Mode: 0, Time: '00:00', Window: 0, Days: '0000000', Repeat: 0, Output: 0, Action: 0,
+  }));
+  const rules = [
+    { index: 1, State: 'OFF', Once: 'OFF', StopOnError: 'OFF', Length: 0, Free: 511, Rules: '' },
+    { index: 2, State: 'OFF', Once: 'OFF', StopOnError: 'OFF', Length: 0, Free: 511, Rules: '' },
+    { index: 3, State: 'OFF', Once: 'OFF', StopOnError: 'OFF', Length: 0, Free: 511, Rules: '' },
+  ];
+  return { timers, rules };
+}
+
+test('computeWrites emits a rule write when text matches but State is OFF (activation-only)', () => {
+  const { compile } = require('../services/scheduleCompiler');
+  const plan = compile({
+    deviceId: '34987AC30304',
+    schedules: [dailySchedule({ channels: [1, 2] })],
+    device: { deviceId: '34987AC30304', channels: 4 },
+  });
+  assert.ok(plan.rules.length > 0, 'multi-channel plan must produce a rule');
+  const state = emptyDeviceState();
+  // Pre-store EXACTLY the desired text but leave the rule disabled.
+  const slotMap = new Map([[1, 1], [2, 2]]);
+  const clauses = [];
+  for (const t of plan.timers) {
+    const slot = slotMap.get(t.index);
+    const cmds = [];
+    for (const c of t.event.on) cmds.push(`Power${c} ON`);
+    for (const c of t.event.off) cmds.push(`Power${c} OFF`);
+    clauses.push(`ON Clock#Timer=${slot} DO Backlog ${cmds.join('; ')} ENDON`);
+  }
+  const text = clauses.join(' ');
+  state.rules[1] = { index: 2, State: 'OFF', Once: 'OFF', StopOnError: 'OFF', Length: text.length, Free: 511 - text.length, Rules: text };
+  const actual = {
+    timers: state.timers.map((t, i) => ({ index: i + 1, ...t })),
+    rules: state.rules,
+  };
+  const result = scheduleSyncService.computeWrites(plan, actual, []);
+  assert.strictEqual(result.okay, true);
+  const ruleWrites = result.writes.filter((w) => w.kind === 'rule');
+  assert.strictEqual(ruleWrites.length, 1,
+    'stored-but-disabled rule MUST be rewritten/re-activated, not skipped as "unchanged"');
+});
+
+test('sync sends Rule2 content write FOLLOWED BY activation (`Rule2` payload 1)', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = emptyDeviceState();
+  const fake = installRuleFake(state);
+  const origFindS = Schedule.find;
+  Schedule.find = async ({ deviceId, pendingDelete } = {}) =>
+    deviceId === '34987AC30304' && pendingDelete !== true
+      ? [dailySchedule({ channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] })]
+      : [];
+  const origFindD = Device.find;
+  Device.find = async () => [];
+  try {
+    const out = await scheduleSyncService.syncDevice('34987AC30304', {
+      deviceModel: { findOne: async () => ({ deviceId: '34987AC30304', channels: 4 }), updateOne: async () => ({}) },
+      scheduleModel: { find: async () => [dailySchedule({ channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] })] },
+    });
+    assert.strictEqual(out.status, 'synced', `expected synced, got ${out.status}: ${out.error}`);
+    const ruleCalls = fake.calls.filter((c) => c.command === 'Rule2');
+    const contentIdx = ruleCalls.findIndex((c) => c.payload.includes('Clock#Timer'));
+    const activateIdx = ruleCalls.findIndex((c) => c.payload === '1');
+    assert.ok(contentIdx !== -1, 'rule CONTENT write must be sent');
+    assert.ok(activateIdx !== -1, 'rule ACTIVATION command (payload "1") must be sent');
+    assert.ok(activateIdx > contentIdx, 'activation must come AFTER the content write');
+    // Verification recorded the active-state requirement.
+    const ruleVerdict = out.verification.find((v) => v.resource === 'Rule2');
+    assert.ok(ruleVerdict, 'Rule2 verification entry present');
+    assert.strictEqual(ruleVerdict.desired.State, 'ON');
+    assert.strictEqual(ruleVerdict.matches, true);
+  } finally {
+    fake.restore();
+    Schedule.find = origFindS;
+    Device.find = origFindD;
+  }
+});
+
+test('verify FAILS and retries when activation does not stick (State stays OFF)', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = emptyDeviceState();
+  const fake = installRuleFake(state, { ignoreActivation: true });
+  const origFindD = Device.find;
+  Device.find = async () => [];
+  try {
+    const out = await scheduleSyncService.syncDevice('34987AC30304', {
+      deviceModel: { findOne: async () => ({ deviceId: '34987AC30304', channels: 4 }), updateOne: async () => ({}) },
+      scheduleModel: { find: async () => [dailySchedule({ channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] })] },
+    });
+    assert.strictEqual(out.status, 'failed',
+      'a stored-but-disabled rule must NOT be reported as synced');
+    assert.strictEqual(out.verificationPassed, false);
+    assert.strictEqual(out.attempts, scheduleSyncService.MAX_SYNC_ATTEMPTS,
+      'all bounded retries must be exhausted');
+    const mismatched = out.verification.filter((v) => v.resource === 'Rule2' && !v.matches);
+    assert.ok(mismatched.length > 0, 'Rule2 mismatch (State OFF) recorded');
+    // Activation was attempted on every attempt.
+    const activations = fake.calls.filter((c) => c.command === 'Rule2' && c.payload === '1');
+    assert.ok(activations.length >= scheduleSyncService.MAX_SYNC_ATTEMPTS,
+      'activation command retried each attempt');
+  } finally {
+    fake.restore();
+    Device.find = origFindD;
+  }
+});
+
 after(() => {
   scheduleEngine.stop();
   scheduleSyncRetry.stop();

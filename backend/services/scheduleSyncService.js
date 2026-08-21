@@ -237,6 +237,9 @@ function computeWrites(plan, actual, managedTimerIndexes = []) {
   const wantsRule2 = plan.rules.length > 0;
   if (wantsRule2) {
     const rule2 = actual.rules.find((r) => r.index === STEES_RULE_INDEX);
+    // A rule with State OFF is STORED but DISABLED — it never executes. So a
+    // write is required whenever the text differs OR the rule is not active,
+    // even when the stored text already matches (activation-only pass).
     const occupied = rule2 && rule2.State !== 'OFF' && rule2.Rules !== '';
     if (occupied && rule2.Rules !== ruleText) {
       result.okay = false;
@@ -244,7 +247,8 @@ function computeWrites(plan, actual, managedTimerIndexes = []) {
       result.unsupportedReasons.push('Rule2 is not free');
       return result;
     }
-    if (!occupied || rule2.Rules !== ruleText) {
+    const needsActivation = !rule2 || String(rule2.State).toUpperCase() !== 'ON';
+    if (!occupied || rule2.Rules !== ruleText || needsActivation) {
       writes.push({ kind: 'rule', index: STEES_RULE_INDEX, text: ruleText });
     }
     touched.push('rule2');
@@ -468,7 +472,18 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
             });
           } else {
             logger.log(`[SYNC WRITE] traceId=${traceId} type=Rule slot=${w.index}`);
+            // 1) Store the rule body. On many Tasmota firmwares this alone
+            //    leaves the rule DISABLED (State:"OFF") — the raw device logs
+            //    proved exactly that.
             await tasmotaConfigClient.requestTasmotaConfig(deviceId, `Rule2`, w.text, {
+              timeoutMs: DEFAULT_TIMEOUT_MS,
+              expectedResponseKey: 'Rule2',
+              traceId,
+            });
+            // 2) ACTIVATE it: `Rule2 1` is the enable command, distinct from
+            //    writing the body. Idempotent when already ON.
+            logger.log(`[SYNC WRITE] traceId=${traceId} type=RuleActivate slot=${w.index}`);
+            await tasmotaConfigClient.requestTasmotaConfig(deviceId, `Rule2`, '1', {
               timeoutMs: DEFAULT_TIMEOUT_MS,
               expectedResponseKey: 'Rule2',
               traceId,
@@ -502,7 +517,14 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
             }
           } else {
             const current = after.rules.find((r) => r.index === w.index);
-            const matches = !!(current && current.Rules === w.text);
+            // A true match requires BOTH the exact rule text AND an ACTIVE
+            // rule (State ON). Text-only matching is what previously reported
+            // `synced` while the device held the rule disabled.
+            const matches = !!(
+              current &&
+              current.Rules === w.text &&
+              String(current.State).toUpperCase() === 'ON'
+            );
             verification.push({
               resource: `Rule${w.index}`,
               desired: { State: 'ON', Rules: w.text },
