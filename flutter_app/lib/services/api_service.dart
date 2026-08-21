@@ -79,9 +79,19 @@ PreflightDecision decidePreflight(DeviceDuplicateStatus? status) {
 }
 
 class ApiService {
-  ApiService({AuthService? auth}) : _auth = auth ?? AuthService();
+  ApiService({AuthService? auth, http.Client? client})
+      : _auth = auth ?? AuthService(),
+        _client = client ?? http.Client();
 
   final AuthService _auth;
+  final http.Client _client;
+
+  void dispose() {
+    _client.close();
+  }
+
+  @visibleForTesting
+  http.Client get clientForTesting => _client;
 
   /// Registered by the app shell to log the user out when any request returns
   /// 401 (missing/expired/invalid token). No-op by default.
@@ -206,7 +216,7 @@ class ApiService {
   Future<http.Response> post(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
     return _send(
-      () => http.post(
+      () => _client.post(
         Uri.parse('$kBaseUrl$path'),
         headers: headers,
         body: jsonEncode(body),
@@ -220,13 +230,13 @@ class ApiService {
     if (query != null) {
       uri = uri.replace(queryParameters: query);
     }
-    return _send(() => http.get(uri, headers: headers));
+    return _send(() => _client.get(uri, headers: headers));
   }
 
   Future<http.Response> put(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
     return _send(
-      () => http.put(
+      () => _client.put(
         Uri.parse('$kBaseUrl$path'),
         headers: headers,
         body: jsonEncode(body),
@@ -237,7 +247,7 @@ class ApiService {
   Future<http.Response> patch(String path, Map<String, dynamic> body) async {
     final headers = await _headers();
     return _send(
-      () => http.patch(
+      () => _client.patch(
         Uri.parse('$kBaseUrl$path'),
         headers: headers,
         body: jsonEncode(body),
@@ -247,7 +257,7 @@ class ApiService {
 
   Future<http.Response> delete(String path) async {
     final headers = await _headers();
-    return _send(() => http.delete(Uri.parse('$kBaseUrl$path'), headers: headers));
+    return _send(() => _client.delete(Uri.parse('$kBaseUrl$path'), headers: headers));
   }
 
   /// Lightweight, bounded reachability probe against the backend's
@@ -258,7 +268,7 @@ class ApiService {
   /// before the Socket.IO disconnect timeout does, without a heavyweight call.
   Future<bool> checkHealth() async {
     try {
-      final res = await http
+      final res = await _client
           .get(Uri.parse('$kBaseUrl/api/health'))
           .timeout(const Duration(seconds: 2));
       return res.statusCode == 200;

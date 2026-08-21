@@ -1,5 +1,6 @@
 const express = require('express');
 const Device = require('../models/Device');
+const deviceRegistry = require('../services/deviceRegistry');
 const mqttGateway = require('../services/mqttGateway');
 const runtimeState = require('../services/runtimeState');
 const { timeline } = require('../services/timeline');
@@ -20,17 +21,26 @@ router.post('/control', async (req, res) => {
       return res.status(400).json({ error: 'state must be ON, OFF, or TOGGLE' });
     }
 
-    const device = await Device.findOne({ deviceId });
+    // P3: deviceRegistry-first lookup (in-memory, ~0ms) with DB fallback on miss.
+    // Registry is kept in sync on provision/delete/unclaim; ownership transfer
+    // is authoritative via DB unique index, so a registry miss always falls
+    // back to the DB to avoid stale 404/403.
+    let device = deviceRegistry.get(deviceId);
     if (!device) {
-      return res.status(404).json({ error: 'Device not found' });
+      device = await Device.findOne({ deviceId });
+      if (!device) {
+        return res.status(404).json({ error: 'Device not found' });
+      }
     }
 
-    if (!device.ownerId || device.ownerId.toString() !== req.userId) {
+    const ownerIdStr = device.ownerId ? device.ownerId.toString() : null;
+    if (!ownerIdStr || ownerIdStr !== req.userId) {
       return res.status(403).json({ error: 'You do not own this device' });
     }
 
-    if (!Number.isInteger(channel) || channel < 1 || channel > (device.channels || 4)) {
-      return res.status(400).json({ error: `channel must be between 1 and ${device.channels || 4}` });
+    const channels = device.channels || 4;
+    if (!Number.isInteger(channel) || channel < 1 || channel > channels) {
+      return res.status(400).json({ error: `channel must be between 1 and ${channels}` });
     }
 
     if (!runtimeState.isOnline(deviceId)) {
