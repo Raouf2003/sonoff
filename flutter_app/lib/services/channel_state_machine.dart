@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'device_transport.dart';
 
 /// Pure relay-control state machine.
@@ -359,7 +360,7 @@ const Duration kRelaySettleWindow = Duration(seconds: 2);
 const bool _channelReportTrace = true;
 
 void _traceChannelReport(ChannelEvent event, String outcome) {
-  if (!_channelReportTrace) return;
+  if (!_channelReportTrace || !kDebugMode) return;
   final report = switch (event) {
     CloudReport(:final report) => report,
     LocalReport(:final report) => report,

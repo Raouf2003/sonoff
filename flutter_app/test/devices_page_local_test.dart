@@ -3359,5 +3359,109 @@ void main() {
 
       await _unmount(tester);
     });
+
+    testWidgets(
+      'integration: rapid taps + WiFi flap + badge debounce interact safely',
+      (tester) async {
+        // Verifies kMinRelayInterval (300ms), kBadgeSettleDelay (500ms) and
+        // kDowngradeStickyWindow (10s) work together without deadlock or
+        // stuck-pending when a burst of coalesced taps coincides with a WiFi
+        // transition. Exercises all three timers simultaneously.
+        final repo = _FakeRepo(gateControl: true, source: DeviceTransportSource.local);
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+        monitor.now = () => fakeNow;
+
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        // Initial: LAN badge (sameWifi true, cloud up) — local source confirms.
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('DRY'), findsNWidgets(4));
+
+        // Seed reachability as sameWifi true with a fresh timestamp so the
+        // 10s sticky window will absorb the upcoming cloud-sourced hiccup.
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // Rapid alternating taps: ON (pending) → OFF (coalesced,
+        // last-wins). This arms kMinRelayInterval gap handling.
+        await tester.tap(find.text('CHANNEL 1'));
+        await tester.pump();
+        expect(repo.controlCalls, 1);
+        expect(find.text('TURNING ON…'), findsOneWidget);
+
+        await tester.tap(find.text('CHANNEL 1'));
+        await tester.pump();
+        expect(repo.controlCalls, 1,
+            reason: 'second tap must coalesce, not fire second HTTP');
+        expect(find.text('TURNING OFF…'), findsOneWidget);
+
+        // While those taps are coalesced (kMinRelayInterval pending after first
+        // resolves), flap WiFi: socket drop → sameWifi cloud hiccup → reconnect,
+        // all inside kBadgeSettleDelay (500ms) and inside kDowngradeStickyWindow
+        // (10s). This is the exact burst from the badge test.
+        monitor.state.value =
+            monitor.state.value.copyWith(cloudSocketReady: false); // S2
+        await tester.pump(const Duration(milliseconds: 100));
+        // A transient cloud-sourced status read arrives while sameWifi is still
+        // fresh — must be absorbed by the 10s sticky window, not downgrade.
+        fakeNow = fakeNow.add(const Duration(seconds: 2));
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+        expect(monitor.state.value.sameWifi, isTrue,
+            reason: 'sticky window must absorb transient cloud read');
+        await tester.pump(const Duration(milliseconds: 100));
+        monitor.state.value =
+            monitor.state.value.copyWith(cloudSocketReady: true); // S1 reconnect
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // No badge flicker yet — still debounced.
+        expect(find.text('LAN'), findsOneWidget);
+
+        // Release the first (ON) command — schedules coalesced follow-up after
+        // 300ms gap. The follow-up should fire with the last queued target
+        // (OFF), which differs from the just-completed ON, so a second HTTP
+        // is expected after the gap.
+        repo.releaseControl.complete();
+        await tester.pump();
+        // Advance through both the relay gap (300ms) and badge settle (500ms)
+        // together — they overlap in wall time.
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump();
+
+        // (a) Relay: last-tapped was OFF, first completed as ON → follow-up
+        // must fire with OFF. This verifies the 300ms gap doesn't swallow the
+        // coalesced intent and the last-wins value is honored.
+        expect(repo.controlCalls, 2,
+            reason: 'coalesced OFF must fire as follow-up after 300ms gap');
+        // The coalesced OFF→ON sequence leaves desired ON pending during the
+        // gap, but since the gap found no work, the UI should settle to the
+        // confirmed ON (FLOWING) once timers clear.
+        // Allow the gap's pending display to clear (timer fired, no HTTP).
+        await tester.pump(const Duration(milliseconds: 100));
+        // (b) Badge: after 500ms debounce, still LAN (sticky absorbed the cloud
+        // read, no downgrade).
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
+        expect(monitor.state.value.sameWifi, isTrue);
+
+        // (c) No deadlock: all timers cleared, no stuck pending.
+        // A fresh tap should still work immediately (0ms, not blocked by stale
+        // gap or badge timers). ControlCalls: 1 (first ON) + 1 (coalesced OFF
+        // follow-up) + 1 (fresh CHANNEL 2) = 3.
+        await tester.tap(find.text('CHANNEL 2'));
+        await tester.pump();
+        expect(repo.controlCalls, 3,
+            reason: 'new device/channel tap must not be throttled by prior gap');
+
+        // (d) No exception — reaching here is the crash check.
+        await _unmount(tester);
+      },
+    );
   });
 }
