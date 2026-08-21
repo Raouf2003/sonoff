@@ -276,12 +276,17 @@ const { dailySchedule } = (() => {
 // writing rule TEXT stores it but leaves State untouched (OFF); only an
 // explicit numeric payload activates/deactivates. `ignoreActivation` models a
 // hostile/faulty device where even `Rule2 1` fails to enable.
-function installRuleFake(state, { ignoreActivation = false } = {}) {
+function installRuleFake(state, { ignoreActivation = false, timersArmed = true } = {}) {
   const orig = tasmotaConfigClient.requestTasmotaConfig;
   const calls = [];
+  let armed = timersArmed;
   tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command, payload, opts = {}) => {
     const key = opts.expectedResponseKey || command;
     calls.push({ command, payload });
+    if (key === 'Timers') {
+      if (payload === '1' || payload === '0') armed = payload === '1';
+      return Promise.resolve({ Timers: armed ? 'ON' : 'OFF' });
+    }
     const m = /^Rule(\d+)$/.exec(key);
     if (m) {
       const idx = Number(m[1]);
@@ -305,12 +310,18 @@ function installRuleFake(state, { ignoreActivation = false } = {}) {
       return Promise.resolve({ [key]: state.timers[idx - 1] });
     }
     if (key === 'Time') {
-      return Promise.resolve({ Time: 'x', Epoch: Math.floor(Date.now() / 1000) });
+      const { DateTime } = require('luxon');
+      const now = DateTime.now().setZone('Africa/Algiers');
+      return Promise.resolve({ Time: now.toFormat('yyyy-MM-dd\'T\'HH:mm:ss') });
+    }
+    if (key === 'Timers') {
+      return Promise.resolve({ Timers: timersArmed ? 'ON' : 'OFF' });
     }
     return Promise.reject(new Error(`unhandled ${key}`));
   };
   return {
     calls,
+    isArmed: () => armed,
     restore() {
       tasmotaConfigClient.requestTasmotaConfig = orig;
     },
@@ -421,6 +432,77 @@ test('verify FAILS and retries when activation does not stick (State stays OFF)'
   } finally {
     fake.restore();
     Device.find = origFindD;
+  }
+});
+
+test('sync ARMS globally-disarmed timers (`Timers` OFF → write "1") and reports it', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = emptyDeviceState();
+  const fake = installRuleFake(state, { timersArmed: false });
+  const origFindD = Device.find;
+  Device.find = async () => [];
+  try {
+    let storedInfo = null;
+    const stickyModel = {
+      findOne: async () => ({ deviceId: '34987AC30304', channels: 4, get scheduleSyncInfo() { return storedInfo; } }),
+      updateOne: async (_f, u) => { storedInfo = u.$set.scheduleSyncInfo; return {}; },
+    };
+    const schedModel = { find: async () => [dailySchedule({ channels: [1, 2], timeRanges: [{ start: '07:00', end: '08:00' }] })] };
+
+    const out = await scheduleSyncService.syncDevice('34987AC30304', {
+      deviceModel: stickyModel,
+      scheduleModel: schedModel,
+    });
+    assert.strictEqual(out.status, 'synced');
+    const armCalls = fake.calls.filter((c) => c.command === 'Timers');
+    assert.ok(
+      armCalls.some((c) => c.payload === '') && armCalls.some((c) => c.payload === '1'),
+      'Timers read + arm write must both be issued',
+    );
+    assert.strictEqual(fake.isArmed(), true, 'device must end up armed');
+    assert.ok(out.timersArmed && out.timersArmed.corrected === true,
+      'summary.timersArmed.corrected reports the fix');
+    // Idempotent second sync: already armed → read-only. The sticky model
+    // carries managedTimerIndexes from run 1, so slots stay "managed" and the
+    // run reaches the gates instead of exiting 'unsupported'.
+    fake.calls.length = 0;
+    await scheduleSyncService.syncDevice('34987AC30304', {
+      deviceModel: stickyModel,
+      scheduleModel: schedModel,
+    });
+    const armAgain = fake.calls.filter((c) => c.command === 'Timers');
+    assert.deepStrictEqual(armAgain.map((c) => c.payload), [''],
+      'armed device: only the Timers READ, no redundant arm write');
+  } finally {
+    fake.restore();
+    Device.find = origFindD;
+  }
+});
+
+test('Epoch-less firmware with CORRECT wall time is healthy (no false NTP correction)', async () => {
+  // Regression for the live-log false positive: this firmware's `Time` reply
+  // carries no Epoch — wall-string comparison must clear it.
+  const origReq = tasmotaConfigClient.requestTasmotaConfig;
+  const calls = [];
+  tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command) => {
+    calls.push(command);
+    if (command === 'Time') {
+      const { DateTime } = require('luxon');
+      return Promise.resolve({
+        Time: DateTime.now().setZone('Africa/Algiers').toFormat('yyyy-MM-dd\'T\'HH:mm:ss'),
+      });
+    }
+    return Promise.resolve({ [command]: {} });
+  };
+  try {
+    const r = await scheduleSyncService.ensureDeviceClock('DEV1', {
+      traceId: 't',
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.strictEqual(r.corrected, false, 'correct wall time must not trigger correction');
+    assert.deepStrictEqual(calls, ['Time'], 'read-only when healthy');
+  } finally {
+    tasmotaConfigClient.requestTasmotaConfig = origReq;
   }
 });
 

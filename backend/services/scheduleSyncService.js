@@ -452,6 +452,12 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     } catch (err) {
       logger.warn(`[SYNC CLOCK] traceId=${traceId} device=${deviceId} clock step error: ${err.message}`);
     }
+    // Global timer arm gate: per-timer Enable:1 is inert while `Timers` is OFF.
+    try {
+      summary.timersArmed = await ensureTimersArmed(deviceId, { traceId, logger });
+    } catch (err) {
+      logger.warn(`[SYNC TIMERS] traceId=${traceId} device=${deviceId} arm step error: ${err.message}`);
+    }
 
     // Apply phase with bounded retries: write changed resources, read back,
     // verify; on any verification failure retry the whole write set.
@@ -594,22 +600,53 @@ function sameTimer(a, b) {
   );
 }
 
-// Clock-drift threshold before correction fires (device Epoch vs server).
+// Clock-drift threshold before correction fires (device clock vs server).
 const CLOCK_DRIFT_TOLERANCE_SEC = 120;
 const NTP_SERVERS = ['pool.ntp.org', 'time.google.com', 'time.cloudflare.com'];
+
+// Schedules are authored in this zone; device-native Timers match the device's
+// LOCAL wall time, so that wall time is what the health check must agree with.
+const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Africa/Algiers';
+
+// Minutes-of-day the device's wall clock is ahead of the expected
+// APP_TIMEZONE wall clock (wraps at midnight). null when the Time string is
+// unparseable. This is the TZ-aware check: NTP keeps Epoch absolute, but
+// Timers match the device's LOCAL wall time, so a wrong Timezone shows up here
+// even when Epoch drift would be zero.
+function wallClockDriftSec(deviceTimeStr) {
+  if (typeof deviceTimeStr !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(deviceTimeStr);
+  if (!m) return null;
+  const { DateTime } = require('luxon');
+  const deviceLocal = DateTime.fromObject(
+    {
+      year: Number(m[1]), month: Number(m[2]), day: Number(m[3]),
+      hour: Number(m[4]), minute: Number(m[5]), second: Number(m[6]),
+    },
+    { zone: 'utc' }, // treat as plain wall time; only the HH:mm:ss matters
+  );
+  const expected = DateTime.now().setZone(APP_TIMEZONE);
+  const devMin = deviceLocal.hour * 3600 + deviceLocal.minute * 60 + deviceLocal.second;
+  const expMin = expected.hour * 3600 + expected.minute * 60 + expected.second;
+  let diff = Math.abs(devMin - expMin);
+  if (diff > 43200) diff = 86400 - diff; // midnight wrap
+  return diff;
+}
 
 // Verify the device clock is sane and, when it is not, (re)point NTP at
 // standard pools so the firmware self-corrects. Tasmota-native timers execute
 // on this clock, so this is what keeps window boundaries accurate.
 //
-// Steps:
-//   1. Read `Time` → expect an `Epoch` unix timestamp.
-//   2. |drift| <= tolerance AND Epoch present → OK, no writes.
-//   3. Otherwise publish each NtpServer<n> individually (own echo key) so the
-//      device resyncs from NTP. Timezone is deliberately NOT overwritten —
-//      that is user configuration; drift is logged loudly instead.
-// Every failure is non-fatal: the sync proceeds, the problem is visible in
-// logs and in summary.clock.
+// Health is checked in two tiers:
+//   1. `Epoch` unix timestamp when the firmware exposes it — absolute, exact.
+//   2. Fallback (firmwares whose `Time` reply has no Epoch): compare the
+//      device's wall-clock string against the expected APP_TIMEZONE wall
+//      time. This also catches a wrong-device-Timezone setup, because the
+//      wall string shifts with it.
+// On failure: republish each NtpServer<n> (own echo key) so the device
+// resyncs; if the wall string is ALSO offset after that, the mismatch is
+// almost certainly Timezone configuration — logged loudly, never overwritten
+// (user config). Every failure is non-fatal.
 async function ensureDeviceClock(deviceId, { traceId = '?', logger = console } = {}) {
   const result = { checked: true, corrected: false, driftSec: null, error: null };
   let timeRes = null;
@@ -630,12 +667,19 @@ async function ensureDeviceClock(deviceId, { traceId = '?', logger = console } =
   if (epoch !== null && epoch > 0) {
     result.driftSec = Math.round(Math.abs(Date.now() / 1000 - epoch));
     if (result.driftSec <= CLOCK_DRIFT_TOLERANCE_SEC) {
-      return result; // healthy
+      return result; // healthy (absolute check)
     }
+  } else {
+    // No Epoch on this firmware: fall back to the TZ-aware wall-clock check.
+    const wall = wallClockDriftSec(timeRes && timeRes.Time);
+    if (wall !== null && wall <= CLOCK_DRIFT_TOLERANCE_SEC) {
+      result.driftSec = wall;
+      return result; // healthy (wall check) — no false "CORRECTED" spam
+    }
+    if (wall !== null) result.driftSec = wall;
   }
 
-  // Missing Epoch (NTP never configured / clock unset) or excessive drift:
-  // repoint the NTP pools so the firmware corrects itself within minutes.
+  // Unhealthy: repoint NTP so the firmware corrects itself within minutes.
   for (let i = 0; i < NTP_SERVERS.length; i++) {
     try {
       await tasmotaConfigClient.requestTasmotaConfig(
@@ -657,8 +701,51 @@ async function ensureDeviceClock(deviceId, { traceId = '?', logger = console } =
     `[SYNC CLOCK] traceId=${traceId} device=${deviceId} CORRECTED — ` +
       `previousEpoch=${epoch === null ? 'none' : epoch} ` +
       `driftSec=${result.driftSec === null ? 'n/a' : result.driftSec} ` +
-      `(tolerance ${CLOCK_DRIFT_TOLERANCE_SEC}s). NTP pools rewritten; verify timezone on device.`,
+      `(tolerance ${CLOCK_DRIFT_TOLERANCE_SEC}s). NTP pools rewritten.` +
+      (epoch === null && result.driftSec !== null && result.driftSec > CLOCK_DRIFT_TOLERANCE_SEC
+        ? ' Wall-time offset persists after NTP: check device Timezone/TimeSTD/TimeDST config.'
+        : ''),
   );
+  return result;
+}
+
+// Tasmota arms/disarms ALL timers globally via `Timers 1` / `Timers 0`. A
+// per-timer Enable:1 does nothing while the global switch is OFF — the classic
+// "everything looks configured but nothing fires" trap. Read the flag and arm
+// it when needed; idempotent and non-fatal.
+async function ensureTimersArmed(deviceId, { traceId = '?', logger = console } = {}) {
+  const result = { checked: true, corrected: false, error: null };
+  let res = null;
+  try {
+    res = await tasmotaConfigClient.requestTasmotaConfig(
+      deviceId,
+      'Timers',
+      '',
+      { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: 'Timers', traceId },
+    );
+  } catch (err) {
+    result.error = `Timers read failed: ${err.message}`;
+    logger.warn(`[SYNC TIMERS] traceId=${traceId} device=${deviceId} ${result.error}`);
+    return result;
+  }
+  const state = res && res.Timers != null ? String(res.Timers).toUpperCase() : null;
+  if (state === 'ON') return result; // already armed
+  try {
+    await tasmotaConfigClient.requestTasmotaConfig(
+      deviceId,
+      'Timers',
+      '1',
+      { timeoutMs: DEFAULT_TIMEOUT_MS, expectedResponseKey: 'Timers', traceId },
+    );
+    result.corrected = true;
+    logger.warn(
+      `[SYNC TIMERS] traceId=${traceId} device=${deviceId} ARMED — global Timers was ` +
+        `${state === null ? 'unreadable' : state}; sent "Timers 1".`,
+    );
+  } catch (err) {
+    result.error = `Timers arm failed: ${err.message}`;
+    logger.warn(`[SYNC TIMERS] traceId=${traceId} device=${deviceId} ${result.error}`);
+  }
   return result;
 }
 
@@ -707,6 +794,7 @@ module.exports = {
   allocationView,
   syncEnabled,
   ensureDeviceClock,
+  ensureTimersArmed,
   SYNC_FLAG,
   MAX_SYNC_ATTEMPTS,
   USER_TRIGGER_TIMER,
