@@ -238,6 +238,7 @@ class _FakeRepo extends DeviceRepositoryService {
     String state, {
     String? opId,
     ControlRoute route = ControlRoute.cloudOnly,
+    bool? sameWifiAtTap,
   }) async {
     controlCalls++;
     lastRoute = route;
@@ -298,6 +299,7 @@ class _SupersededRepo extends _FakeRepo {
     String state, {
     String? opId,
     ControlRoute route = ControlRoute.cloudOnly,
+    bool? sameWifiAtTap,
   }) async {
     controlCalls++;
     throw const ApiException(
@@ -468,6 +470,7 @@ class _StaleControlRepo extends _FakeRepo {
     String state, {
     String? opId,
     ControlRoute route = ControlRoute.cloudOnly,
+    bool? sameWifiAtTap,
   }) async {
     controlCalls++;
     if (gateControl) await releaseControl.future;

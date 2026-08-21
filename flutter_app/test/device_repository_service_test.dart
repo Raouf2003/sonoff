@@ -769,6 +769,122 @@ void main() {
     });
   });
 
+  group('control: scoped fallback by sameWifi at tap time', () {
+    test('sameWifi==true + cloud availability failure → full fallback still succeeds (regression guard)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON',
+          route: ControlRoute.cloudOnly, sameWifiAtTap: true);
+
+      expect(cloud.controlCalls, 1);
+      expect(result.source, DeviceTransportSource.local,
+          reason: 'sameWifi==true must keep full 6s fallback');
+      expect(result.channels[1]!.state, 'ON');
+      expect(locator.cachedQueries, 1);
+    });
+
+    test('sameWifi==false + cloud failure + warm cache valid → fast fallback succeeds (stale-verdict edge case)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      final result = await repo.control(_deviceId, 1, 'ON',
+          route: ControlRoute.cloudOnly, sameWifiAtTap: false);
+
+      expect(cloud.controlCalls, 1);
+      expect(result.source, DeviceTransportSource.local,
+          reason: 'stale sameWifi==false but warm cache valid → fast probe must succeed');
+      expect(result.channels[1]!.state, 'ON');
+      expect(locator.mDnsQueries, 0,
+          reason: 'fast fallback must not run mDNS');
+    });
+
+    test('sameWifi==false + cloud failure + no local cache → fast fallback surfaces cloud error immediately (no 6s wait)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final repo = _repo(cloud, locator: _FakeLocator()); // no cache
+
+      final sw = Stopwatch()..start();
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON',
+            route: ControlRoute.cloudOnly, sameWifiAtTap: false),
+        throwsA(isA<ApiException>().having((e) => e.code, 'code', 'NETWORK_ERROR')),
+      );
+      sw.stop();
+      expect(sw.elapsedMilliseconds, lessThan(1000),
+          reason: 'fast fallback must not wait 6s');
+      expect(cloud.controlCalls, 1);
+    });
+
+    test('sameWifi==false + cloud 5xx → fast fallback still scoped (no full discovery)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('boom', statusCode: 503);
+      final repo = _repo(cloud, locator: _FakeLocator());
+
+      final sw = Stopwatch()..start();
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON',
+            route: ControlRoute.cloudOnly, sameWifiAtTap: false),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 's', 503)),
+      );
+      sw.stop();
+      expect(sw.elapsedMilliseconds, lessThan(1000));
+    });
+
+    test('logical rejection never triggers fallback regardless of sameWifi (true)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('Forbidden', statusCode: 403);
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON',
+            route: ControlRoute.cloudOnly, sameWifiAtTap: true),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 's', 403)),
+      );
+      expect(cloud.controlCalls, 1);
+      expect(cm.called, isEmpty, reason: 'logical rejection must never fallback');
+      expect(locator.cachedQueries, 0);
+    });
+
+    test('logical rejection never triggers fast fallback regardless of sameWifi (false)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('Forbidden', statusCode: 403);
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      await expectLater(
+        repo.control(_deviceId, 1, 'ON',
+            route: ControlRoute.cloudOnly, sameWifiAtTap: false),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 's', 403)),
+      );
+      expect(cloud.controlCalls, 1);
+      expect(cm.called, isEmpty);
+      expect(locator.cachedQueries, 0);
+    });
+
+    test('sameWifi null (unknown) defaults to full fallback (safety)', () async {
+      final cloud = _FakeCloudApi()
+        ..controlError = const ApiException('down', code: 'NETWORK_ERROR');
+      final cm = _localRelayCm();
+      final locator = _FakeLocator(cached: '192.168.1.5');
+      final repo = _repo(cloud, locator: locator, cm: cm);
+
+      // No sameWifiAtTap passed (null) → should behave like true (full fallback)
+      final result = await repo.control(_deviceId, 1, 'ON',
+          route: ControlRoute.cloudOnly);
+      expect(result.source, DeviceTransportSource.local);
+    });
+  });
+
   group('same-WiFi detection (isDeviceOnSameNetwork)', () {
     test('no cached IP → false (defaults to cloud)', () async {
       final cloud = _FakeCloudApi();

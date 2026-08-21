@@ -848,6 +848,7 @@ class _DevicesPageState extends State<DevicesPage>
         targetState ? 'ON' : 'OFF',
         opId: opId,
         route: route,
+        sameWifiAtTap: sameWifi,
       );
       if (!mounted) {
         ControlTimeline.end(opId);

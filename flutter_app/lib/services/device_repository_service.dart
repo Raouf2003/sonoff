@@ -633,6 +633,7 @@ class DeviceRepositoryService {
     String state, {
     String? opId,
     ControlRoute route = ControlRoute.cloudOnly,
+    bool? sameWifiAtTap,
   }) async {
     _tl(opId, deviceId, channel, 'Repository control entered');
     final seq = ++_seq;
@@ -674,6 +675,43 @@ class DeviceRepositoryService {
           rethrow;
         }
         if (i == 0) {
+          // Scoped fallback: when the cloud was the primary and sameWifi was
+          // false at tap time (genuinely off-WiFi), don't pay the full 6s
+          // discovery. Do only a fast warm-cache probe (400ms) as a stale-
+          // verdict sanity check — if the device is actually reachable (warm
+          // cache still valid due to hysteresis lag) the fast probe succeeds;
+          // otherwise surface the cloud error immediately without full discovery.
+          if (attempt == ControlRoute.cloudOnly && sameWifiAtTap == false) {
+            firstError = e;
+            _tl(opId, deviceId, channel,
+                '$attempt attempt failed — fast warm-probe fallback (sameWifi==false)');
+            _log('$attempt control failed for $deviceId (${_describe(e)}); '
+                'trying fast warm-cache probe');
+            try {
+              // Fast warm-cache probe: 800ms = 2×kLocalControlFastTimeout (400ms for
+              // identity check + 400ms for control) — no mDNS, no 6s budget.
+              final local = await _localControlFast(deviceId, channel, state, opId: opId)
+                  .timeout(const Duration(milliseconds: 800));
+              _tl(opId, deviceId, channel, 'Fast fallback succeeded');
+              _lastSource = DeviceTransportSource.local;
+              _log('fast fallback success for $deviceId channel $channel');
+              return parseRelayStatus(
+                local,
+                source: DeviceTransportSource.local,
+                seq: ++_seq,
+              );
+            } on Object catch (fastError) {
+              if (_isLogicalRejection(fastError)) {
+                _tl(opId, deviceId, channel, 'Fast fallback rejected');
+                _log('fast fallback REJECTED for $deviceId (${_describe(fastError)})');
+                rethrow;
+              }
+              _log('fast fallback failed for $deviceId (${_describe(fastError)}); '
+                  'surfacing cloud error without full discovery');
+              // ignore: unnecessary_non_null_assertion
+              Error.throwWithStackTrace(firstError!, StackTrace.current);
+            }
+          }
           // Availability failure: the primary path is unusable RIGHT NOW, which
           // is exactly when a stale routing verdict during a network transition
           // bites. Retry the opposite transport exactly once.
