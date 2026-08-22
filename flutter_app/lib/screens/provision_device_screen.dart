@@ -806,7 +806,11 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       return;
     }
     if (_wifiBound) return;
-    final expected = _tasmotaApSsid;
+    // Prefer the SSID the user actually picked in the scan sheet: devices that
+    // were configured before broadcast their fallback AP under their Hostname
+    // (commonly the MAC/topic string), NOT the factory "tasmota-XXXXXX" name.
+    // The placeholder stays as the wildcard fallback for the pure-manual path.
+    final expected = _selectedDeviceApSsid ?? _tasmotaApSsid;
     try {
       final info = await _wifiBindChannel.invokeMethod<Map<dynamic, dynamic>>(
         'ensureBoundToActiveWifi',
@@ -3717,9 +3721,13 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
       if (!mounted) return;
       final available = result?['available'] == true;
       final raw = result?['networks'] as List<dynamic>? ?? const [];
+      // Tolerant decode: the native channel now returns maps ({name, rssi,
+      // bssid}); older payloads were plain strings. This picker only needs
+      // the names.
       final ssids = raw
-          .whereType<String>()
-          .where((s) => s.trim().isNotEmpty)
+          .map(ScannedNetwork.decode)
+          .map((n) => n.name)
+          .where((s) => s.isNotEmpty)
           .toSet()
           .toList()
         ..sort();
@@ -3854,6 +3862,40 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
   }
 }
 
+// One scanned Wi-Fi network. The native scanWifi channel returns maps with
+// {name, rssi, bssid}; string-only entries (older payload) decode with an
+// unknown signal level so both shapes stay compatible.
+class ScannedNetwork {
+  final String name;
+  final int rssi; // dBm; -100 when unknown
+  final String? bssid;
+
+  const ScannedNetwork(this.name, this.rssi, this.bssid);
+
+  static ScannedNetwork decode(dynamic e) {
+    if (e is Map) {
+      final name = (e['name'] ?? e['ssid'] ?? '').toString().trim();
+      final rssi = e['rssi'] is num ? (e['rssi'] as num).toInt() : -100;
+      final bssid = e['bssid']?.toString();
+      return ScannedNetwork(name, rssi, (bssid == null || bssid.isEmpty) ? null : bssid);
+    }
+    return ScannedNetwork(e.toString().trim(), -100, null);
+  }
+}
+
+// Tasmota setup APs: factory name "tasmota-*" or the MAC/hostname a
+// previously-configured device broadcasts in setup mode (bare 12 hex digits).
+bool isDeviceApSsid(String ssid) =>
+    ssid.toLowerCase().startsWith('tasmota') ||
+    RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(ssid.trim());
+
+int rssiBars(int rssi) => rssi >= -55 ? 3 : (rssi >= -67 ? 2 : (rssi >= -75 ? 1 : 0));
+
+String rssiLabel(int rssi) =>
+    switch (rssiBars(rssi)) { 3 => 'Strong', 2 => 'Good', 1 => 'Fair', _ => 'Weak' };
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Plain in-app device-AP list for the Connect step (Android API 29+). Reuses
 // the same scan + list UI as the Configure step's home Wi-Fi picker, minus the
 // manual-entry field: the fallback for a bad/absent scan is the manual
@@ -3869,7 +3911,7 @@ class _DeviceApPickerSheet extends StatefulWidget {
 class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
   static const _scanChannel = MethodChannel('stees/wifi_settings');
 
-  List<String> _networks = const [];
+  List<ScannedNetwork> _networks = const [];
   bool _scanning = false;
   String? _scanMessage;
 
@@ -3892,21 +3934,27 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
       if (!mounted) return;
       final available = result?['available'] == true;
       final raw = result?['networks'] as List<dynamic>? ?? const [];
-      final ssids = raw
-          .whereType<String>()
-          .where((s) => s.trim().isNotEmpty)
-          .toSet()
-          .toList()
-        ..sort();
+      // Dedupe by name keeping the strongest reported signal.
+      final byName = <String, ScannedNetwork>{};
+      for (final e in raw) {
+        final n = ScannedNetwork.decode(e);
+        if (n.name.isEmpty) continue;
+        final cur = byName[n.name];
+        if (cur == null || n.rssi > cur.rssi) byName[n.name] = n;
+      }
+      // Device setup networks first (strongest signal first); everything else
+      // follows alphabetically below the divider.
+      final all = byName.values.toList();
+      final devices = all.where((n) => isDeviceApSsid(n.name)).toList()
+        ..sort((a, b) => b.rssi.compareTo(a.rssi));
+      final others = all.where((n) => !isDeviceApSsid(n.name)).toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       setState(() {
         _scanning = false;
-        _networks = ssids;
+        _networks = [...devices, ...others];
         _scanMessage = !available
             ? 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.'
-            : (ssids.isEmpty
-                ? 'No Wi-Fi networks found. If the device setup network '
-                    '(tasmota-XXXX) is not listed, use Open Wi-Fi Settings.'
-                : null);
+            : (all.isEmpty ? 'No Wi-Fi networks found nearby.' : null);
       });
     } on TimeoutException {
       debugPrint('[PROVISION] device-AP scan timed out after 10s');
@@ -3931,6 +3979,96 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
 
   void _selectManual() {
     Navigator.of(context).pop('_manual');
+  }
+
+  // Device setup network row: stream-tinted card, DEVICE chip, signal label,
+  // and (when several device APs are visible) a BSSID suffix so identical
+  // names can be told apart. A single detected device gets an emphasized
+  // border and an explicit "tap to connect" cue.
+  Widget _deviceTile(ScannedNetwork n, SteesColors colors, {required bool highlighted}) {
+    final bars = rssiBars(n.rssi);
+    return Material(
+      color: colors.stream.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(AppRadius.md),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        onTap: () => _selectNetwork(n.name),
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(AppRadius.md),
+            border: Border.all(
+              color: colors.stream.withValues(alpha: highlighted ? 0.7 : 0.4),
+              width: highlighted ? 1.6 : 1.1,
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              Icon(Icons.settings_remote, size: 22, color: colors.stream),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      n.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: colors.foam),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      highlighted
+                          ? 'Detected \u2014 tap to connect'
+                          : '${rssiLabel(n.rssi)} signal${n.bssid != null ? '  \u00b7  ID \u2026${n.bssid!.substring(n.bssid!.length >= 5 ? n.bssid!.length - 5 : 0)}' : ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.85)),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                switch (bars) { 3 => Icons.wifi, 2 => Icons.wifi_2_bar, 1 => Icons.wifi_1_bar, _ => Icons.signal_wifi_statusbar_null },
+                size: 16,
+                color: colors.mist.withValues(alpha: 0.8),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: colors.stream.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  'DEVICE',
+                  style: GoogleFonts.sora(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.stream),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _otherTile(ScannedNetwork n, SteesColors colors) {
+    return Material(
+      color: colors.submerged,
+      borderRadius: BorderRadius.circular(AppRadius.md),
+      child: ListTile(
+        dense: true,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+        leading: Icon(Icons.wifi_tethering, size: 20, color: colors.mist),
+        title: Text(
+          n.name,
+          style: GoogleFonts.inter(fontSize: 13.5, color: colors.mist.withValues(alpha: 0.9)),
+          overflow: TextOverflow.ellipsis,
+        ),
+        onTap: () => _selectNetwork(n.name),
+      ),
+    );
   }
 
   @override
@@ -3965,7 +4103,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
             ),
             const SizedBox(height: AppSpacing.xs),
             Text(
-              'Tap the device setup network, then Continue.',
+              'Tap your device\u2019s setup network below to connect.',
               style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -3988,40 +4126,80 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                   ),
                 ),
               )
-            else if (_networks.isNotEmpty)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 320),
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: _networks.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 4),
-                  itemBuilder: (ctx, i) {
-                    final ssid = _networks[i];
-                    // Tasmota setup APs (tasmota-*) get a device icon so the
-                    // right network stands out from the user's home networks.
-                    final isDeviceAp = ssid.toLowerCase().startsWith('tasmota');
-                    return Material(
-                      color: colors.submerged,
-                      borderRadius: BorderRadius.circular(AppRadius.md),
-                      child: ListTile(
-                        dense: true,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-                        leading: Icon(
-                          isDeviceAp ? Icons.settings_remote : Icons.wifi_tethering,
-                          size: 20,
-                          color: isDeviceAp ? colors.stream : colors.mist,
-                        ),
-                        title: Text(
-                          ssid,
-                          style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: () => _selectNetwork(ssid),
-                      ),
-                    );
-                  },
+            else ...[
+              if (!_networks.any((n) => isDeviceApSsid(n.name)))
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: colors.sunlight.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    border: Border.all(color: colors.sunlight.withValues(alpha: 0.3)),
+                  ),
+                  child: Text(
+                    'Don\u2019t see your device? Power-cycle it (hold its button '
+                    '\u2248 5 s) until its LED blinks, then tap refresh. Setup networks '
+                    'start with \u201ctasmota-\u201d or show the device ID.',
+                    style: GoogleFonts.inter(fontSize: 11.5, color: colors.mist.withValues(alpha: 0.9)),
+                  ),
                 ),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.45,
+                ),
+                child: Builder(builder: (ctx) {
+                  final devices = _networks.where((n) => isDeviceApSsid(n.name)).toList();
+                  final others = _networks.where((n) => !isDeviceApSsid(n.name)).toList();
+                  final singleDevice = devices.length == 1;
+                  return ListView(
+                    shrinkWrap: true,
+                    children: [
+                      if (devices.isNotEmpty) ...[
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4, bottom: 6),
+                          child: Text(
+                            'DEVICE SETUP NETWORKS',
+                            style: GoogleFonts.sora(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.6,
+                              color: colors.stream,
+                            ),
+                          ),
+                        ),
+                        for (final n in devices)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: _deviceTile(n, colors, highlighted: singleDevice),
+                          ),
+                      ],
+                      if (others.isNotEmpty) ...[
+                        if (devices.isNotEmpty)
+                          Divider(height: 16, thickness: 1, color: colors.border),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4, bottom: 6),
+                          child: Text(
+                            'OTHER WI-FI NETWORKS',
+                            style: GoogleFonts.sora(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.6,
+                              color: colors.mist.withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ),
+                        for (final n in others)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: _otherTile(n, colors),
+                          ),
+                      ],
+                    ],
+                  );
+                }),
               ),
+            ],
             const SizedBox(height: AppSpacing.xl),
             ListTile(
               dense: true,
@@ -4032,7 +4210,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                 style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
               ),
               subtitle: Text(
-                'Manual: pick tasmota-XXXX yourself',
+                'Manual: join the device\u2019s network in Android settings yourself',
                 style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
               ),
               onTap: _selectManual,

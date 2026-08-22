@@ -222,31 +222,29 @@ class MainActivity : FlutterActivity() {
         mainHandler.postDelayed({
             val scanned: List<android.net.wifi.ScanResult> =
                 runCatching { wifi.scanResults }.getOrDefault(emptyList())
-            val names: MutableList<String> = mutableListOf()
+            // Dedupe by SSID keeping the STRONGEST radio (same SSID can be
+            // broadcast by several BSSIDs); carry RSSI + BSSID so the UI can
+            // surface signal strength and disambiguate multiple device APs.
+            data class Entry(val rssi: Int, val bssid: String?)
+            val best = LinkedHashMap<String, Entry>()
             for (sr in scanned) {
                 val name = sr.SSID?.trim()?.removeSurrounding("\"")
-                if (!name.isNullOrBlank() && name != "<unknown ssid>" && !names.contains(name)) {
-                    names.add(name)
+                if (name.isNullOrBlank() || name == "<unknown ssid>") continue
+                val cur = best[name]
+                if (cur == null || sr.level > cur.rssi) {
+                    best[name] = Entry(sr.level, sr.BSSID)
                 }
             }
-            names.sort()
-            if (names.isEmpty()) {
-                result.success(
-                    mapOf(
-                        "available" to true,
-                        "networks" to emptyList<String>(),
-                        "reason" to if (started) "no networks found" else "scan rejected",
-                    )
-                )
-            } else {
-                result.success(
-                    mapOf(
-                        "available" to true,
-                        "networks" to names,
-                        "reason" to null,
-                    )
-                )
+            val networks = best.map { (name, e) ->
+                mapOf("name" to name, "rssi" to e.rssi, "bssid" to e.bssid)
             }
+            result.success(
+                mapOf(
+                    "available" to true,
+                    "networks" to networks,
+                    "reason" to if (started) (if (networks.isEmpty()) "no networks found" else null) else "scan rejected",
+                )
+            )
         }, 1200)
     }
 
@@ -370,10 +368,17 @@ class MainActivity : FlutterActivity() {
      * - If the wizard still shows the placeholder "tasmota-XXXX" the expected
      *   value is used as a prefix wildcard ("tasmota-"), matching any device AP.
      * - Otherwise an exact, case-insensitive comparison is required.
+     * - A bare 12-hex-digit active SSID is always accepted as a device AP:
+     *   Tasmota names its fallback AP after Hostname, and devices configured
+     *   before (Topic/Hostname = canonical MAC) re-enter setup mode under
+     *   their MAC-looking name instead of "tasmota-XXXXXX". The probe on
+     *   192.168.4.1 stays the authoritative reachability test.
      * - If the active SSID could not be read (permission restricted), we cannot
      *   prove a match. Call the binding anyway so the probe on 192.168.4.1 is
      *   the authoritative reachability test, and log the limitation.
      */
+    private val macSsidRe = Regex("^[0-9A-Fa-f]{12}$")
+
     private fun ssidMatches(expected: String, active: String?): Boolean {
         if (active == null) {
             Log.d("SteesProvision", "[probe] SSID unavailable; relying on the active-network probe instead")
@@ -383,9 +388,15 @@ class MainActivity : FlutterActivity() {
         val act = active.trim()
         if (exp.lowercase().endsWith("xxxx")) {
             val prefix = exp.dropLast(4).lowercase()
-            return prefix.isNotEmpty() && act.lowercase().startsWith(prefix)
+            if (prefix.isNotEmpty() && act.lowercase().startsWith(prefix)) return true
+        } else if (exp.equals(act, ignoreCase = true)) {
+            return true
         }
-        return exp.equals(act, ignoreCase = true)
+        if (macSsidRe.matches(act)) {
+            Log.d("SteesProvision", "[probe] active SSID is a MAC-shaped device AP; accepting for bind")
+            return true
+        }
+        return false
     }
 
     private fun getNetworkInfo(result: MethodChannel.Result) {
