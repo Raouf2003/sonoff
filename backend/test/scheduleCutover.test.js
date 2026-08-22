@@ -510,3 +510,94 @@ after(() => {
   scheduleEngine.stop();
   scheduleSyncRetry.stop();
 });
+
+// ───────────────────── 4. Audit hardening guards ───────────────────────────
+
+test('retry sweep processes candidates STRICTLY sequentially (no concurrent burst)', async () => {
+  const origFindS = Schedule.find;
+  const origFindD = Device.find;
+  const origOnline = scheduleSyncRetry.isOnlineFn;
+  const origSync = scheduleSyncRetry.syncFn;
+  const origEnabled = scheduleSyncService.syncEnabled;
+  const origDeleteMany = Schedule.deleteMany;
+
+  Schedule.deleteMany = async () => ({ deletedCount: 0 });
+  Schedule.find = async (q) => (q && q.pendingDelete === true
+    ? [{ deviceId: 'D1' }, { deviceId: 'D2' }, { deviceId: 'D3' }]
+    : []);
+  Device.find = async () => [];
+  scheduleSyncRetry.isOnlineFn = () => true;
+  scheduleSyncService.syncEnabled = () => true;
+
+  let active = 0;
+  let maxActive = 0;
+  scheduleSyncRetry.syncFn = async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 5));
+    active -= 1;
+    return { status: 'synced' };
+  };
+
+  try {
+    const res = await scheduleSyncRetry.sweep();
+    assert.strictEqual(res.status, 'done');
+    assert.strictEqual(res.retried, 3);
+    assert.strictEqual(maxActive, 1, `sweep must never run candidate syncs concurrently (max=${maxActive})`);
+  } finally {
+    Schedule.find = origFindS;
+    Schedule.deleteMany = origDeleteMany;
+    Device.find = origFindD;
+    scheduleSyncRetry.isOnlineFn = origOnline;
+    scheduleSyncRetry.syncFn = origSync;
+    scheduleSyncService.syncEnabled = origEnabled;
+  }
+});
+
+async function clockCaseWithEpoch(driftSec) {
+  const origReq = tasmotaConfigClient.requestTasmotaConfig;
+  const commands = [];
+  tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command, payload) => {
+    commands.push({ command, payload });
+    if (command === 'Time') {
+      // Epoch computed at call time so the drift is exact regardless of when
+      // the test runs (no second-boundary flake).
+      return Promise.resolve({ Epoch: Math.round(Date.now() / 1000) - driftSec });
+    }
+    return Promise.resolve({ [command]: payload });
+  };
+  try {
+    const r = await scheduleSyncService.ensureDeviceClock('DEV1', {
+      traceId: 't',
+      logger: { log: () => {}, warn: () => {} },
+    });
+    return {
+      corrected: r.corrected,
+      reportedDrift: r.driftSec,
+      ntpWrites: commands.filter((c) => /^NtpServer\d$/.test(c.command)).length,
+    };
+  } finally {
+    tasmotaConfigClient.requestTasmotaConfig = origReq;
+  }
+}
+
+test('clock drift 119s is within tolerance: healthy, zero NTP writes', async () => {
+  const out = await clockCaseWithEpoch(119);
+  assert.strictEqual(out.corrected, false);
+  assert.strictEqual(out.reportedDrift, 119);
+  assert.strictEqual(out.ntpWrites, 0);
+});
+
+test('clock drift exactly 120s is INCLUSIVE tolerance: healthy, no rewrite (> not >=)', async () => {
+  const out = await clockCaseWithEpoch(120);
+  assert.strictEqual(out.corrected, false, 'driftSec <= CLOCK_DRIFT_TOLERANCE_SEC must stay healthy at exactly 120');
+  assert.strictEqual(out.reportedDrift, 120);
+  assert.strictEqual(out.ntpWrites, 0);
+});
+
+test('clock drift 121s exceeds tolerance: NTP rewrite fires with all three pools', async () => {
+  const out = await clockCaseWithEpoch(121);
+  assert.strictEqual(out.corrected, true);
+  assert.strictEqual(out.reportedDrift, 121);
+  assert.strictEqual(out.ntpWrites, 3, 'NtpServer1..3 must all be republished');
+});

@@ -219,3 +219,33 @@ test('a channel outside the device capacity is reported as a conflict, not appli
   assert.ok(plan.conflicts.some((c) => c.includes('targets channel 9')));
   assert.strictEqual(plan.requiredTimerCount, 0);
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Overlap-merge semantics (audit item 1): timeRanges are ON-windows by
+// definition (Schedule model, engine _desiredState, dry-run reference all
+// agree). A second schedule covering a sub-window of another is an ON-range,
+// NEVER a "pause" — so overlapping union must produce exactly the merged
+// envelope with no mid-window toggles. This test PINS that behavior.
+// ─────────────────────────────────────────────────────────────────────────
+test('overlap: sub-window schedule merges into envelope (no mid-window ch2 OFF/ON events)', () => {
+  const a = schedule({ _id: 'sA', name: 'A', channels: [1, 2], timeRanges: [{ start: '10:00', end: '11:00' }] });
+  const b = schedule({ _id: 'sB', name: 'B', channels: [2], timeRanges: [{ start: '10:30', end: '10:45' }] });
+  const plan = compile({ deviceId: 'DEV1', schedules: [a, b], device: DEVICE });
+
+  assert.strictEqual(plan.unsupportedReasons.length, 0);
+  // Union semantics: only the envelope edges are transitions.
+  assert.strictEqual(plan.timers.length, 2, `expected envelope-only timers, got ${plan.timers.length}`);
+  assert.deepStrictEqual(plan.timers.map((t) => t.config.Time), ['10:00', '11:00']);
+  assert.ok(!plan.timers.some((t) => ['10:30', '10:45'].includes(t.config.Time)),
+    'sub-window edges must NOT emit timers under ON-window semantics');
+  for (const t of plan.timers) {
+    assert.strictEqual(t.config.Action, 3);
+    assert.deepStrictEqual(t.event.on.concat(t.event.off).sort().join(','), '1,2',
+      'both channels switch together at the envelope edges');
+  }
+  assert.strictEqual(
+    plan.rules[0].text,
+    'ON Clock#Timer=1 DO Backlog Power1 ON; Power2 ON ENDON ' +
+    'ON Clock#Timer=2 DO Backlog Power1 OFF; Power2 OFF ENDON',
+  );
+});
