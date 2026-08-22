@@ -8,6 +8,21 @@ const SYNC_FLAG = 'TASMOTA_SCHEDULE_SYNC_ENABLED';
 const MAX_SYNC_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 5000;
 
+// Tasmota factory timer state (as observed live in Phase 5): what an orphaned
+// managed slot is reset to when a shrinking plan no longer uses it. Output
+// stays 1 (never 0) so real firmware readback matches byte-for-byte and
+// verification cannot fail on firmware Output normalization.
+const FACTORY_DEFAULT_TIMER = Object.freeze({
+  Enable: 0,
+  Mode: 0,
+  Time: '00:00',
+  Window: 0,
+  Days: '0000000',
+  Repeat: 0,
+  Output: 1,
+  Action: 0,
+});
+
 // Ownership contract (explicit, stable across syncs):
 //  - Timer3 is the user Rule1 trigger on the real device - NEVER managed.
 //  - Rule1 and Rule3 are user rules - NEVER written.
@@ -87,15 +102,19 @@ function isDefaultTimer(t) {
 }
 
 function timerPayload(t) {
+  // Verbatim: no falsy-coercion. The historical `Enable: t.Enable || 1` /
+  // `Repeat: t.Repeat || 1` made it STRUCTURALLY IMPOSSIBLE to publish a
+  // disarming clear (Enable:0/Repeat:0 silently became 1/1 on the wire).
+  // Every caller passes a complete normalizeTimer()-shaped config.
   return JSON.stringify({
-    Enable: t.Enable || 1,
-    Mode: t.Mode || 0,
+    Enable: t.Enable,
+    Mode: t.Mode,
     Time: t.Time,
-    Window: t.Window || 0,
+    Window: t.Window,
     Days: t.Days,
-    Repeat: t.Repeat || 1,
-    Output: t.Output || 0,
-    Action: t.Action || 0,
+    Repeat: t.Repeat,
+    Output: t.Output,
+    Action: t.Action,
   });
 }
 
@@ -270,6 +289,29 @@ function computeWrites(plan, actual, managedTimerIndexes = []) {
       desired.Output === current.Output &&
       desired.Action === current.Action;
     if (!same) writes.push({ kind: 'timer', index: slot, desired });
+    touched.push(slot);
+  }
+
+  // Orphan cleanup (plan-shrink / schedule deletion): a slot previously managed
+  // by an earlier plan that the current plan no longer uses would otherwise
+  // stay ARMED on the device forever - firing its stale Clock#Timer event with
+  // no Rule2 clause to catch it, permanently leaked (never factory-default,
+  // never reusable). Reset every such orphan to FACTORY_DEFAULT_TIMER. These
+  // writes flow through the normal apply + readback-verify loop below, so a
+  // clear is CONFIRMED on the device, never assumed. Slots already default are
+  // skipped (idempotent). result.managed comes from allocateSlots and already
+  // excludes orphans, so the post-sync persistence drops them automatically.
+  const allocationSlots = new Set(result.allocation.values());
+  const seenOrphans = new Set();
+  for (const slot of managedTimerIndexes) {
+    if (slot === USER_TRIGGER_TIMER || allocationSlots.has(slot) || seenOrphans.has(slot)) continue;
+    seenOrphans.add(slot);
+    const current = actual.timers.find((t) => t.index === slot);
+    if (!current || isDefaultTimer(current)) {
+      touched.push(slot); // nothing to publish; ownership drop only
+      continue;
+    }
+    writes.push({ kind: 'timer', index: slot, desired: { ...FACTORY_DEFAULT_TIMER } });
     touched.push(slot);
   }
 
@@ -460,8 +502,13 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     summary.conflicts = plan.conflicts.slice();
     summary.unsupportedReasons = plan.unsupportedReasons.slice();
     summary.plan = planView(plan);
+    // Sticky ownership recorded by previous successful syncs. Read BEFORE the
+    // empty-plan fast-path: a device whose schedules were all deleted/disabled
+    // still owns orphaned onboard timers that must be cleared, not ignored.
+    const managedIndexes =
+      (device && device.scheduleSyncInfo && device.scheduleSyncInfo.managedTimerIndexes) || [];
 
-    if (plan.requiredTimerCount === 0 && plan.rules.length === 0) {
+    if (plan.requiredTimerCount === 0 && plan.rules.length === 0 && managedIndexes.length === 0) {
       summary.status = 'synced';
       summary.verificationPassed = true;
       summary.error = 'No scheduled actions to sync';
@@ -470,7 +517,6 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
 
     logger.log(`[SYNC INITIAL READ] traceId=${traceId}`);
     const actual = await readDeviceScheduleState(deviceId, { traceId });
-    const managedIndexes = (device && device.scheduleSyncInfo && device.scheduleSyncInfo.managedTimerIndexes) || [];
     summary.protected = protectedResources(actual, managedIndexes);
     const result = computeWrites(plan, actual, managedIndexes);
     summary.allocation = allocationView(result.allocation || new Map());
@@ -843,6 +889,7 @@ module.exports = {
   normalizeRule,
   isDefaultTimer,
   timerPayload,
+  FACTORY_DEFAULT_TIMER,
   buildRuleText,
   isSteesOwnedRule2,
   allocateSlots,

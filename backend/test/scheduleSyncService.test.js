@@ -950,3 +950,116 @@ test('protectedResources stops listing a recognized STEES Rule2 but still lists 
     'foreign Rule2 must still be reported as protected',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Orphan-slot cleanup (plan-shrink / deletion): previously-managed timer slots
+// that a smaller plan no longer uses must be reset to factory default,
+// VERIFIED on-device, and dropped from Device.scheduleSyncInfo.
+// Mirrors live evidence from 34987AC30304: slots 1/2/6/7 managed, schedules
+// deleted -> Timer6/Timer7 stayed armed forever.
+// ---------------------------------------------------------------------------
+
+function liveEvidenceState() {
+  const state = deviceState();
+  const st = (time) => ({ Enable: 1, Mode: 0, Time: time, Window: 0, Days: '1111111', Repeat: 1, Output: 1, Action: 3 });
+  state.timers[0] = st('16:47'); // Timer1
+  state.timers[1] = st('16:48'); // Timer2
+  state.timers[5] = st('20:16'); // Timer6 (orphan candidate)
+  state.timers[6] = st('20:20'); // Timer7 (orphan candidate)
+  state.rules[1] = {
+    index: 2, State: 'ON', Once: 'OFF', StopOnError: 'OFF',
+    Rules:
+      'ON Clock#Timer=1 DO Backlog Power1 ON; Power2 ON ENDON ' +
+      'ON Clock#Timer=2 DO Backlog Power1 OFF; Power2 OFF ENDON ' +
+      'ON Clock#Timer=6 DO Backlog Power1 ON ENDON ' +
+      'ON Clock#Timer=7 DO Backlog Power1 OFF ENDON',
+  };
+  return state;
+}
+
+const MANAGED_4 = [1, 2, 6, 7];
+
+function recordingOwnedModel(managed) {
+  const updates = [];
+  return {
+    updates,
+    deviceModel: {
+      findOne: async ({ deviceId }) => ({
+        ...deviceDoc,
+        scheduleSyncInfo: { managedTimerIndexes: managed.slice(), status: 'synced', lastSyncedAt: new Date(), error: null },
+      }),
+      updateOne: async (filter, update) => { updates.push(update); return { ok: 1 }; },
+    },
+  };
+}
+
+test('plan shrink: orphaned managed slots 6/7 are cleared to factory default, verified, and dropped from ownership', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = liveEvidenceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [dailySchedule({ channels: [1, 2], timeRanges: [{ start: '18:40', end: '23:59' }] })];
+  const rec = recordingOwnedModel(MANAGED_4);
+  const out = await syncService.syncDevice('34987AC30304', {
+    deviceModel: rec.deviceModel,
+    scheduleModel: fakeScheduleModel,
+  });
+  assert.strictEqual(out.status, 'synced', `got ${out.status}: ${out.error}`);
+  assert.strictEqual(out.verificationPassed, true);
+  // Slots 1/2 rewritten to the new window; slots 6/7 reset as orphans.
+  assert.deepStrictEqual(out.changedTimers.slice().sort(), [1, 2, 6, 7]);
+  assert.deepStrictEqual(out.changedRules, [2], 'shrunk Rule2 text is rewritten');
+  const clearVerifies = out.verification.filter((v) => ['Timer6', 'Timer7'].includes(v.resource));
+  assert.strictEqual(clearVerifies.length, 2, 'cleared slots must be read back, not assumed');
+  for (const v of clearVerifies) {
+    assert.strictEqual(v.matches, true);
+    assert.deepStrictEqual(v.desired, syncService.FACTORY_DEFAULT_TIMER);
+  }
+  // Physical (simulated) confirmation: Enable 0, factory fields restored.
+  for (const idx of [5, 6]) {
+    assert.strictEqual(state.timers[idx].Enable, 0);
+    assert.strictEqual(state.timers[idx].Time, '00:00');
+    assert.strictEqual(state.timers[idx].Days, '0000000');
+    assert.strictEqual(state.timers[idx].Action, 0);
+    assert.strictEqual(state.timers[idx].Output, 1);
+  }
+  // Ownership shrinks to exactly the active set.
+  assert.strictEqual(rec.updates.length, 1);
+  assert.deepStrictEqual(rec.updates[0].$set.scheduleSyncInfo.managedTimerIndexes.sort(), [1, 2]);
+});
+
+test('zero schedules left: every previously-managed slot is cleared and ownership empties', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = liveEvidenceState();
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [];
+  const rec = recordingOwnedModel(MANAGED_4);
+  const out = await syncService.syncDevice('34987AC30304', {
+    deviceModel: rec.deviceModel,
+    scheduleModel: fakeScheduleModel,
+  });
+  assert.strictEqual(out.status, 'synced', `got ${out.status}: ${out.error}`);
+  assert.deepStrictEqual(out.changedTimers.slice().sort(), [1, 2, 6, 7], 'all four managed slots must be cleared');
+  assert.strictEqual(out.changedRules.length, 0, 'no plan -> no Rule2 rewrite (residual text is inert once timers are disarmed)');
+  assert.ok(out.verification.length >= 4 && out.verification.every((v) => v.matches === true));
+  for (const idx of [0, 1, 5, 6]) {
+    assert.strictEqual(state.timers[idx].Enable, 0, `Timer${idx + 1} must be disarmed`);
+  }
+  assert.deepStrictEqual(rec.updates[0].$set.scheduleSyncInfo.managedTimerIndexes, []);
+});
+
+test('computeWrites: orphan cleanup emits factory-default clears only when needed (idempotent)', () => {
+  const plan = compile({ deviceId: '34987AC30304', schedules: [dailySchedule()], device: deviceDoc });
+  // World A: orphan slot 7 holds an armed stale timer -> clear emitted.
+  const a = deviceState();
+  a.timers[6] = { Enable: 1, Mode: 0, Time: '20:20', Window: 0, Days: '1111111', Repeat: 1, Output: 1, Action: 3 };
+  const actualA = { timers: a.timers.map((t, i) => ({ index: i + 1, ...syncService.normalizeTimer(t) })), rules: a.rules };
+  const resA = syncService.computeWrites(plan, actualA, [1, 2, 7]);
+  const clears = resA.writes.filter((w) => w.index === 7);
+  assert.strictEqual(clears.length, 1);
+  assert.deepStrictEqual(clears[0].desired, syncService.FACTORY_DEFAULT_TIMER);
+  // World B: orphan already factory-default -> NO clear write (idempotent).
+  const b = deviceState();
+  const actualB = { timers: b.timers.map((t, i) => ({ index: i + 1, ...syncService.normalizeTimer(t) })), rules: b.rules };
+  const resB = syncService.computeWrites(plan, actualB, [1, 2, 7]);
+  assert.strictEqual(resB.writes.filter((w) => w.index === 7).length, 0);
+});
