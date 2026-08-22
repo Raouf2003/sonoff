@@ -1063,3 +1063,26 @@ test('computeWrites: orphan cleanup emits factory-default clears only when neede
   const resB = syncService.computeWrites(plan, actualB, [1, 2, 7]);
   assert.strictEqual(resB.writes.filter((w) => w.index === 7).length, 0);
 });
+
+test('isSteesOwnedRule2: after ownership loss (unclaim/reclaim), compiler-signature timers keep Rule2 ours', () => {
+  const plan = multiChannelPlan();
+  // managed=[] simulates a wiped Device.scheduleSyncInfo while the physical
+  // device still holds STEES Action-3 timers in slots 1/2 + their clauses.
+  const a = staleLegacyActual({ ruleText: LEGACY_RULE2_TEXT, managed: [] });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, true,
+    'Action-3 timer occupancy must count as STEES-owned, else every post-reclaim sync deadlocks unsupported');
+  assert.ok(result.writes.some((w) => w.kind === 'rule'), 'Rule2 rewrite proceeds');
+});
+
+test('isSteesOwnedRule2: direct-action user timers (Action 0/1) hosting clause targets stay rejected', () => {
+  const plan = multiChannelPlan();
+  // Slot 7 occupied by a USER direct timer (Action 1): grammar-valid clauses
+  // pointing at it must still be treated as foreign.
+  const a = staleLegacyActual({ ruleText: 'ON Clock#Timer=7 DO Power1 ON ENDON', extraOccupiedSlot: 7 });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, false);
+  assert.ok(result.unsupportedReasons.includes('Rule2 is not free'));
+});
