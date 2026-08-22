@@ -465,6 +465,33 @@ function syncDevice(deviceId, options) {
 // Sync one device: read -> compile -> allocate -> diff -> apply (if enabled)
 // -> readback verify with bounded retries. Never throws for expected conditions.
 // Returns a structured result ({ status, changedTimers, changedRules, ... }).
+// Persist the sync outcome onto Device.scheduleSyncInfo. EVERY terminal
+// outcome goes through this so the stored status can never go stale: leaving
+// a previous 'synced' in place after a failure made the retry sweep and the
+// startup backfill believe the device was converged and skip it forever.
+// managedTimerIndexes is sticky ownership — preserved verbatim on failures
+// (orphan cleanup depends on it), replaced only by a verified synced result.
+async function persistOutcome(deviceModel, deviceId, managedTimerIndexes, status, error) {
+  if (!deviceModel || typeof deviceModel.updateOne !== 'function') return;
+  try {
+    await deviceModel.updateOne(
+      { deviceId },
+      {
+        $set: {
+          scheduleSyncInfo: {
+            managedTimerIndexes: managedTimerIndexes || [],
+            status,
+            lastSyncedAt: new Date(),
+            error: error || null,
+          },
+        },
+      },
+    );
+  } catch (_) {
+    // Persistence of the outcome must never mask the sync result itself.
+  }
+}
+
 async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule, traceId = '?', source = 'unknown', logger = console } = {}) {
   const summary = {
     status: 'pending',
@@ -526,6 +553,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
       summary.conflicts = result.conflicts;
       summary.unsupportedReasons = result.unsupportedReasons;
       summary.error = result.unsupportedReasons[0] || 'Plan cannot be safely applied';
+      await persistOutcome(deviceModel, deviceId, managedIndexes, 'unsupported', summary.error);
       return summary;
     }
 
@@ -539,6 +567,9 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     );
 
     if (!syncEnabled()) {
+      // Dry run: deliberately NOT persisted. A preview must never clobber the
+      // device's real recorded state ('synced'/'failed') — the flag-off path
+      // publishes nothing, so there is no new truth to store.
       summary.status = 'pending';
       summary.error = `${SYNC_FLAG} is disabled - no writes published (dry run complete)`;
       return summary;
@@ -654,21 +685,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
           summary.verificationPassed = true;
           summary.error = null;
           summary.attempts = attempts;
-          if (deviceModel && typeof deviceModel.updateOne === 'function') {
-            await deviceModel.updateOne(
-              { deviceId },
-              {
-                $set: {
-                  scheduleSyncInfo: {
-                    managedTimerIndexes: result.managed,
-                    status: 'synced',
-                    lastSyncedAt: new Date(),
-                    error: null,
-                  },
-                },
-              },
-            );
-          }
+          await persistOutcome(deviceModel, deviceId, result.managed, 'synced', null);
           return summary;
         }
       } catch (err) {
@@ -679,11 +696,13 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     summary.status = 'failed';
     summary.verificationPassed = false;
     summary.error = lastError ? lastError.message : 'Sync failed after bounded retries';
+    await persistOutcome(deviceModel, deviceId, managedIndexes, 'failed', summary.error);
     return summary;
   } catch (err) {
     summary.status = 'failed';
     summary.verificationPassed = false;
     summary.error = err.message;
+    await persistOutcome(deviceModel, deviceId, [], 'failed', err.message);
     return summary;
   }
 }

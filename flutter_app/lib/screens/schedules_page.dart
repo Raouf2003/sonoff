@@ -124,8 +124,35 @@ class _SchedulesPageState extends State<SchedulesPage> {
     );
     if (ok != true) return;
     try {
-      await _api.deleteSchedule(id);
+      final res = await _api.deleteSchedule(id);
       if (mounted) _load();
+      // Deferred delete: the row is hidden, but the device-side Timer/Rule
+      // removal only completes when the device reconnects (retry sweep).
+      // Say so instead of silently pretending the device already forgot.
+      if (res['deferred'] == true && mounted) {
+        final colors = context.steesColors;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.cloud_off_outlined, size: 16, color: colors.well),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Removing from device — finishes once it reconnects.',
+                    style: GoogleFonts.inter(fontSize: 13, color: colors.well),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: colors.stream,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+            margin: const EdgeInsets.all(AppSpacing.lg),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the schedule');
     }
@@ -359,6 +386,14 @@ class _ScheduleTileState extends State<_ScheduleTile> {
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(fontSize: 11, color: colors.mist),
                         ),
+                        const SizedBox(height: 3),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: _SyncBadge(
+                            status: (s['deviceSyncStatus'] as String?) ?? 'pending',
+                            error: s['deviceSyncError'] as String?,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -441,5 +476,53 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
     if (m == null) return 0;
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
+  }
+}
+
+/// Device-convergence badge for a schedule row. Sync runs per DEVICE
+/// (scheduleSyncService.syncDevice), so this mirrors the owning device's
+/// scheduleSyncInfo status, surfaced by GET /api/schedules as
+/// deviceSyncStatus/deviceSyncError:
+///   synced            -> green  "On device"
+///   failed/unsupported-> red    "Failed" (tap for the backend error)
+///   pending/other     -> amber  "Pending"
+class _SyncBadge extends StatelessWidget {
+  final String status;
+  final String? error;
+
+  const _SyncBadge({required this.status, this.error});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    final failed = status == 'failed' || status == 'unsupported';
+    final synced = status == 'synced';
+    final color = synced ? colors.leaf : (failed ? colors.danger : colors.sunlight);
+    final label = synced ? 'On device' : (failed ? 'Failed' : 'Pending');
+    final icon = synced ? Icons.check_circle : (failed ? Icons.error_outline : Icons.schedule);
+
+    Widget chip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: GoogleFonts.inter(fontSize: 9.5, fontWeight: FontWeight.w600, color: color),
+          ),
+        ],
+      ),
+    );
+
+    if (failed && (error?.isNotEmpty ?? false)) {
+      chip = Tooltip(message: error, preferBelow: false, child: chip);
+    }
+    return chip;
   }
 }

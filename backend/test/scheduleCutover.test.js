@@ -601,3 +601,137 @@ test('clock drift 121s exceeds tolerance: NTP rewrite fires with all three pools
   assert.strictEqual(out.reportedDrift, 121);
   assert.strictEqual(out.ntpWrites, 3, 'NtpServer1..3 must all be republished');
 });
+
+// ───────────────── 5. Outcome persistence (no stale success) ───────────────
+
+const cutoverSchedule = () => ({
+  _id: 'sX',
+  deviceId: 'DEV1',
+  name: 'x',
+  enabled: true,
+  channels: [1],
+  recurrence: { type: 'daily', daysOfWeek: [] },
+  timeRanges: [{ start: '07:00', end: '08:00' }],
+});
+
+test('unsupported outcome is persisted with status unsupported, keeping sticky ownership', async () => {
+  const origReq = tasmotaConfigClient.requestTasmotaConfig;
+  // Every slot reads back occupied by an unmanaged user timer -> the plan
+  // cannot fit -> computeWrites returns not-okay BEFORE any write.
+  tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command, payload, opts = {}) => {
+    const key = opts.expectedResponseKey || command;
+    if (/^Timer\d+$/.test(key)) {
+      return Promise.resolve({ [key]: { Enable: 1, Mode: 0, Time: '09:00', Window: 0, Days: '1111111', Repeat: 1, Output: 2, Action: 1 } });
+    }
+    if (/^Rule\d+$/.test(key)) {
+      return Promise.resolve({ [key]: { State: 'OFF', Once: 'OFF', StopOnError: 'OFF', Length: 0, Free: 511, Rules: '' } });
+    }
+    return Promise.reject(new Error(`unhandled ${key}`));
+  };
+  const updates = [];
+  const deviceModel = {
+    findOne: async () => ({
+      deviceId: 'DEV1',
+      channels: 4,
+      // Stale previous SUCCESS must be overwritten by this run's outcome.
+      scheduleSyncInfo: { managedTimerIndexes: [5], status: 'synced', lastSyncedAt: new Date(), error: null },
+    }),
+    updateOne: async (_f, u) => { updates.push(u); },
+  };
+  try {
+    const out = await scheduleSyncService.syncDevice('DEV1', {
+      deviceModel,
+      scheduleModel: { find: async () => [cutoverSchedule()] },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.strictEqual(out.status, 'unsupported');
+    assert.strictEqual(updates.length, 1, 'terminal outcome must be persisted');
+    assert.strictEqual(updates[0].$set.scheduleSyncInfo.status, 'unsupported');
+    assert.ok(updates[0].$set.scheduleSyncInfo.error);
+    assert.deepStrictEqual(
+      updates[0].$set.scheduleSyncInfo.managedTimerIndexes,
+      [5],
+      'sticky ownership MUST survive failure persistence (orphan cleanup depends on it)',
+    );
+  } finally {
+    tasmotaConfigClient.requestTasmotaConfig = origReq;
+  }
+});
+
+test('failed outcome after exhausted retries is persisted (not stale synced)', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const origReq = tasmotaConfigClient.requestTasmotaConfig;
+  let writeNo = 0;
+  tasmotaConfigClient.requestTasmotaConfig = async (deviceId, command, payload, opts = {}) => {
+    const key = opts.expectedResponseKey || command;
+    if (/^Time$/.test(key)) return Promise.resolve({ Time: '2026-08-22T12:00:00' });
+    if (/^Timers$/.test(key)) return Promise.resolve({ Timers: 'ON' });
+    if (/^Timer\d+$/.test(key)) {
+      const body = payload ? JSON.parse(payload) : null;
+      if (body) {
+        // Sabotage readback: Enable never sticks -> verification always fails.
+        return Promise.resolve({ [key]: { ...body, Enable: 0 } });
+      }
+      return Promise.resolve({ [key]: { Enable: 0, Mode: 0, Time: '00:00', Window: 0, Days: '0000000', Repeat: 0, Output: 1, Action: 0 } });
+    }
+    if (/^Rule\d+$/.test(key)) {
+      writeNo += 1;
+      return Promise.resolve({ [key]: { State: 'ON', Once: 'OFF', StopOnError: 'OFF', Length: 0, Free: 511, Rules: String(payload || '') } });
+    }
+    return Promise.reject(new Error(`unhandled ${key}`));
+  };
+  const updates = [];
+  const deviceModel = {
+    findOne: async () => ({ deviceId: 'DEV1', channels: 4, scheduleSyncInfo: { managedTimerIndexes: [], status: 'synced', lastSyncedAt: new Date(), error: null } }),
+    updateOne: async (_f, u) => { updates.push(u); },
+  };
+  try {
+    const out = await scheduleSyncService.syncDevice('DEV1', {
+      deviceModel,
+      scheduleModel: { find: async () => [cutoverSchedule()] },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.strictEqual(out.status, 'failed');
+    assert.strictEqual(out.attempts, scheduleSyncService.MAX_SYNC_ATTEMPTS);
+    const last = updates[updates.length - 1];
+    assert.strictEqual(last.$set.scheduleSyncInfo.status, 'failed');
+    assert.ok(last.$set.scheduleSyncInfo.error);
+  } finally {
+    tasmotaConfigClient.requestTasmotaConfig = origReq;
+    delete process.env.TASMOTA_SCHEDULE_SYNC_ENABLED;
+  }
+});
+
+test('retry sweep treats unsupported devices as retry candidates', async () => {
+  const origFindS = Schedule.find;
+  const origFindD = Device.find;
+  const origDeleteMany = Schedule.deleteMany;
+  const origOnline = scheduleSyncRetry.isOnlineFn;
+  const origSync = scheduleSyncRetry.syncFn;
+  const origEnabled = scheduleSyncService.syncEnabled;
+
+  Schedule.find = async () => [];
+  Schedule.deleteMany = async () => ({ deletedCount: 0 });
+  let capturedQuery = null;
+  Device.find = async (q) => { capturedQuery = q; return [{ deviceId: 'D-UNS' }]; };
+  scheduleSyncRetry.isOnlineFn = () => true;
+  scheduleSyncService.syncEnabled = () => true;
+  const synced = [];
+  scheduleSyncRetry.syncFn = async (id) => { synced.push(id); return { status: 'synced' }; };
+
+  try {
+    const res = await scheduleSyncRetry.sweep();
+    assert.strictEqual(res.retried, 1);
+    assert.deepStrictEqual(synced, ['D-UNS']);
+    assert.deepStrictEqual(capturedQuery, {
+      'scheduleSyncInfo.status': { $in: ['failed', 'unsupported'] },
+    }, 'sweep candidate query must include unsupported');
+  } finally {
+    Schedule.find = origFindS;
+    Schedule.deleteMany = origDeleteMany;
+    Device.find = origFindD;
+    scheduleSyncRetry.isOnlineFn = origOnline;
+    scheduleSyncRetry.syncFn = origSync;
+    scheduleSyncService.syncEnabled = origEnabled;
+  }
+});

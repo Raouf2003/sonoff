@@ -131,13 +131,25 @@ router.get('/', async (req, res) => {
     const schedules = await Schedule.find({ ownerId: req.userId, pendingDelete: { $ne: true } }).sort({ createdAt: -1 });
 
     const deviceIds = [...new Set(schedules.map((s) => s.deviceId))];
-    const devices = await Device.find({ ownerId: req.userId, deviceId: { $in: deviceIds } });
+    // scheduleSyncInfo is select:false — explicitly pulled so every schedule
+    // row can carry its DEVICE's convergence state (sync runs per device, not
+    // per schedule; the badge mirrors what syncDevice() actually tracks).
+    const devices = await Device.find({ ownerId: req.userId, deviceId: { $in: deviceIds } }).select('+scheduleSyncInfo');
     const deviceMap = new Map(devices.map((d) => [d.deviceId, d.name]));
+    const syncMap = new Map(devices.map((d) => [
+      d.deviceId,
+      {
+        status: (d.scheduleSyncInfo && d.scheduleSyncInfo.status) || 'pending',
+        error: (d.scheduleSyncInfo && d.scheduleSyncInfo.error) || null,
+      },
+    ]));
 
     res.json(
       schedules.map((s) => ({
         ...s.toJSON(),
         deviceName: deviceMap.get(s.deviceId) || null,
+        deviceSyncStatus: syncMap.get(s.deviceId)?.status || 'pending',
+        deviceSyncError: syncMap.get(s.deviceId)?.error || null,
       })),
     );
   } catch (err) {
