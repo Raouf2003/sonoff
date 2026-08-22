@@ -163,6 +163,53 @@ function buildRuleText(planTimers, allocation) {
   return text.length <= MAX_RULE_LENGTH ? text : null;
 }
 
+// Recognize Rule2 content authored by ANY STEES compiler revision. Ownership is
+// established by PATTERN, never byte-equality against the current plan (the
+// historical byte-exact check misclassified legitimately-edited STEES rules as
+// "user configuration" whenever channel sets, event counts, or clause spacing
+// drifted - e.g. legacy join(';') vs current join('; ') bodies). Recognition
+// requires BOTH:
+//   1. Grammar: every clause matches `ON Clock#Timer=<n> DO <body> ENDON`,
+//      where <body> is `Backlog Power<d> ON|OFF` commands joined by ';' with
+//      any spacing (or a single bare `Power<d> ON|OFF`).
+//   2. Slot ownership: every referenced Clock#Timer=<n> slot is either a slot
+//      STEES previously managed or a factory-default free slot. This rejects a
+//      foreign automation that merely mimics our grammar but drives the user's
+//      trigger Timer3 or an unmanaged occupied timer.
+// Mixed content (our clause + foreign tail like `ON Sys#Boot DO ...`) fails the
+// full-consumption check and stays protected.
+function isSteesOwnedRule2(rule2, actual, managedTimerIndexes = []) {
+  if (!rule2 || typeof rule2.Rules !== 'string' || rule2.Rules.trim() === '') return false;
+  const managed = new Set(managedTimerIndexes);
+  const freeSlots = new Set(
+    ((actual && actual.timers) || [])
+      .filter((t) => t.index !== USER_TRIGGER_TIMER && isDefaultTimer(t))
+      .map((t) => t.index),
+  );
+  const text = rule2.Rules;
+  const clauseRe = /ON\s+Clock#Timer=(\d+)\s+DO\s+(.+?)\s+ENDON/gi;
+  let consumed = 0;
+  let m;
+  while ((m = clauseRe.exec(text)) !== null) {
+    consumed += m[0].length;
+    const slot = Number(m[1]);
+    if (!managed.has(slot) && !freeSlots.has(slot)) return false;
+    const parts = m[2].split(';').map((s) => s.trim()).filter(Boolean);
+    if (/^backlog\b/i.test(parts[0])) {
+      parts[0] = parts[0].replace(/^backlog\s+/i, '');
+    } else if (parts.length > 1) {
+      // Multiple commands without a Backlog wrapper is not compiler output.
+      return false;
+    }
+    for (const p of parts) {
+      if (!/^Power\d+\s+(?:ON|OFF)$/i.test(p)) return false;
+    }
+  }
+  if (consumed === 0) return false;
+  const remainder = text.replace(new RegExp(clauseRe.source, 'gi'), '');
+  return remainder.trim() === '';
+}
+
 // Decide the physical allocation for a compiled plan (logical index 1..N ->
 // physical slot 1..16). Ownership: skip the user trigger timer and every
 // occupied non-default slot. A slot previously recorded as STEES-managed is
@@ -240,8 +287,12 @@ function computeWrites(plan, actual, managedTimerIndexes = []) {
     // A rule with State OFF is STORED but DISABLED — it never executes. So a
     // write is required whenever the text differs OR the rule is not active,
     // even when the stored text already matches (activation-only pass).
+    // Occupancy conflicts apply ONLY to foreign content: a Rule2 that matches
+    // the STEES ownership pattern (any compiler revision) is ours and is
+    // safely rewritten below, even when its stored text differs from the new
+    // plan (legitimate edits must never dead-lock into "Rule2 is not free").
     const occupied = rule2 && rule2.State !== 'OFF' && rule2.Rules !== '';
-    if (occupied && rule2.Rules !== ruleText) {
+    if (occupied && !isSteesOwnedRule2(rule2, actual, managedTimerIndexes)) {
       result.okay = false;
       result.conflicts.push('Rule2 is occupied by user configuration and cannot be overwritten');
       result.unsupportedReasons.push('Rule2 is not free');
@@ -278,7 +329,12 @@ function protectedResources(actual, managedTimerIndexes = []) {
     rules.push({ index, reason: 'user rule' });
   }
   const rule2 = (actual.rules || []).find((r) => r.index === STEES_RULE_INDEX);
-  if (rule2 && rule2.State !== 'OFF' && rule2.Rules !== '') {
+  if (
+    rule2 &&
+    rule2.State !== 'OFF' &&
+    rule2.Rules !== '' &&
+    !isSteesOwnedRule2(rule2, actual, managedTimerIndexes)
+  ) {
     rules.push({ index: STEES_RULE_INDEX, reason: 'occupied by user config' });
   }
   return { timers, rules };
@@ -788,6 +844,7 @@ module.exports = {
   isDefaultTimer,
   timerPayload,
   buildRuleText,
+  isSteesOwnedRule2,
   allocateSlots,
   protectedResources,
   planView,

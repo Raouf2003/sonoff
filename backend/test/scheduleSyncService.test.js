@@ -803,3 +803,150 @@ test('a failed sync in the middle of a same-device queue does not poison the nex
   const rD = await syncService.syncDevice('DEV-FAIL', m);
   assert.strictEqual(rD.status, 'pending', 'future sync works after a previous failure');
 });
+
+// ---------------------------------------------------------------------------
+// Rule2 ownership recognition (isSteesOwnedRule2): pattern-based, not
+// byte-exact. A Rule2 authored by ANY STEES compiler revision must be
+// recognized as ours and safely overwritten; genuinely foreign content must
+// still hard-fail with "Rule2 is not free".
+// ---------------------------------------------------------------------------
+
+// Legacy compiler output: ';' separators WITHOUT spaces (as found live on
+// device 34987AC30304), referencing previously-managed slots 1 and 2.
+const LEGACY_RULE2_TEXT =
+  'ON Clock#Timer=1 DO Backlog Power1 ON;Power2 ON;Power3 ON ENDON ' +
+  'ON Clock#Timer=2 DO Backlog Power1 OFF;Power2 OFF;Power3 OFF ENDON';
+
+const multiChannelSchedule = () =>
+  dailySchedule({
+    name: 'تز',
+    channels: [1, 2, 3],
+    timeRanges: [{ start: '18:40', end: '23:59' }],
+  });
+
+// Device holding the STALE legacy STEES state: old-format Rule2 (State ON),
+// old 16:47/16:48 timer configs in the sticky-managed slots 1/2.
+function staleLegacyActual({ ruleText = LEGACY_RULE2_TEXT, managed = [1, 2], extraOccupiedSlot = null } = {}) {
+  const base = deviceState();
+  const timers = base.timers.map((t, i) => ({ index: i + 1, ...syncService.normalizeTimer(t) }));
+  const oldSteesTimer = (time) =>
+    syncService.normalizeTimer({ Enable: 1, Mode: 0, Time: time, Window: 0, Days: '1111111', Repeat: 1, Output: 1, Action: 3 });
+  timers[0] = { index: 1, ...oldSteesTimer('16:47') };
+  timers[1] = { index: 2, ...oldSteesTimer('16:48') };
+  if (extraOccupiedSlot !== null) {
+    // A user-authored timer occupying an unrelated slot (unmanaged by STEES).
+    timers[extraOccupiedSlot - 1] = {
+      index: extraOccupiedSlot,
+      ...syncService.normalizeTimer({ Enable: 1, Time: '09:00', Days: '1111111', Repeat: 1, Output: 2, Action: 1 }),
+    };
+  }
+  const rules = base.rules.map((r) => ({ ...r }));
+  rules[1] = { index: 2, State: 'ON', Once: 'OFF', StopOnError: 'OFF', Length: ruleText.length, Free: 511 - ruleText.length, Rules: ruleText };
+  return { timers, rules, managed };
+}
+
+function multiChannelPlan() {
+  return compile({ deviceId: '34987AC30304', schedules: [multiChannelSchedule()], device: deviceDoc });
+}
+
+test('isSteesOwnedRule2: legacy no-space STEES text over managed slots is recognized as ours', async () => {
+  process.env.TASMOTA_SCHEDULE_SYNC_ENABLED = 'true';
+  const state = deviceState();
+  // Seed the stale legacy world directly into the fake device.
+  const legacy = staleLegacyActual();
+  for (let i = 0; i < 16; i++) {
+    const { index, ...plain } = legacy.timers[i];
+    state.timers[i] = plain;
+  }
+  state.rules[1] = { ...legacy.rules[1] };
+
+  installFakeConfigChannel(state);
+  schedulesFixture = () => [multiChannelSchedule()];
+  const ownedDeviceModel = {
+    findOne: async ({ deviceId }) => ({
+      ...deviceDoc,
+      // Sticky ownership recorded by earlier successful syncs: slots 1/2.
+      scheduleSyncInfo: { managedTimerIndexes: [1, 2], status: 'synced', lastSyncedAt: new Date(), error: null },
+    }),
+    updateOne: async () => ({ ok: 1 }),
+  };
+  const out = await syncService.syncDevice('34987AC30304', {
+    deviceModel: ownedDeviceModel,
+    scheduleModel: fakeScheduleModel,
+  });
+  assert.strictEqual(out.status, 'synced', `expected synced, got ${out.status}: ${out.error}`);
+  assert.strictEqual(out.verificationPassed, true);
+  assert.deepStrictEqual(out.changedTimers.slice().sort(), [1, 2], 'stale 16:47/16:48 timers must be rewritten');
+  assert.deepStrictEqual(out.changedRules, [2], 'Rule2 must be recognized as ours and rewritten');
+  assert.ok(out.verification.every((v) => v.matches === true), 'every resource must verify');
+  assert.strictEqual(state.timers[0].Time, '18:40');
+  assert.strictEqual(state.timers[1].Time, '23:59');
+  const ruleWrite = out.intendedWrites.find((w) => w.kind === 'rule');
+  assert.ok(ruleWrite, 'a Rule2 write was intended');
+  assert.strictEqual(state.rules[1].Rules, ruleWrite.text, 'device now holds the exact new compiled text');
+  assert.ok(ruleWrite.text.includes('; Power2 ON'), 'new text uses current "; " spacing (rewrite happened)');
+  assert.strictEqual(String(state.rules[1].State).toUpperCase(), 'ON');
+});
+test('isSteesOwnedRule2: foreign Energy#Total rule is still rejected as not free', () => {
+  const plan = multiChannelPlan();
+  const foreign = 'ON Energy#Total>75 DO Power1 OFF ENDON';
+  const a = staleLegacyActual({ ruleText: foreign });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, false);
+  assert.ok(result.unsupportedReasons.includes('Rule2 is not free'));
+  assert.ok(result.conflicts.some((c) => c.includes('occupied by user configuration')));
+});
+
+test('isSteesOwnedRule2: STEES grammar pointing at user Timer3 is rejected', () => {
+  const plan = multiChannelPlan();
+  const a = staleLegacyActual({ ruleText: 'ON Clock#Timer=3 DO Power1 ON ENDON' });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, false);
+  assert.ok(result.unsupportedReasons.includes('Rule2 is not free'), 'slot 3 is never STEES-managed or default-free');
+});
+
+test('isSteesOwnedRule2: STEES grammar driving an unmanaged occupied slot is rejected', () => {
+  const plan = multiChannelPlan();
+  // Slot 7 holds a user timer (non-default) and is absent from managed [1,2].
+  const a = staleLegacyActual({ ruleText: 'ON Clock#Timer=7 DO Power1 ON ENDON', extraOccupiedSlot: 7 });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, false);
+  assert.ok(result.unsupportedReasons.includes('Rule2 is not free'));
+});
+
+test('isSteesOwnedRule2: mixed STEES clause + foreign tail fails full-consumption check', () => {
+  const plan = multiChannelPlan();
+  const mixed = LEGACY_RULE2_TEXT + ' ON Sys#Boot DO Power4 ON ENDON';
+  const a = staleLegacyActual({ ruleText: mixed });
+  const actual = { timers: a.timers, rules: a.rules };
+  const result = syncService.computeWrites(plan, actual, a.managed);
+  assert.strictEqual(result.okay, false);
+  assert.ok(result.unsupportedReasons.includes('Rule2 is not free'));
+});
+
+test('protectedResources stops listing a recognized STEES Rule2 but still lists foreign content', () => {
+  const ours = staleLegacyActual(); // legacy text over managed slots
+  const protectedOurs = syncService.protectedResources(
+    { timers: ours.timers, rules: ours.rules },
+    ours.managed,
+  );
+  assert.deepStrictEqual(
+    protectedOurs.rules.map((r) => r.index),
+    [1, 3],
+    'recognized Rule2 must NOT be reported as occupied-by-user-config',
+  );
+
+  const foreign = 'ON Rules#Created=1 DO Power1 ON ENDON';
+  const theirs = staleLegacyActual({ ruleText: foreign });
+  const protectedTheirs = syncService.protectedResources(
+    { timers: theirs.timers, rules: theirs.rules },
+    theirs.managed,
+  );
+  assert.ok(
+    protectedTheirs.rules.some((r) => r.index === 2 && r.reason === 'occupied by user config'),
+    'foreign Rule2 must still be reported as protected',
+  );
+});
