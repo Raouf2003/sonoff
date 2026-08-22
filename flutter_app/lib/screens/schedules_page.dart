@@ -415,6 +415,7 @@ class _ScheduleTileState extends State<_ScheduleTile> {
                           child: _SyncBadge(
                             status: (s['deviceSyncStatus'] as String?) ?? 'pending',
                             error: s['deviceSyncError'] as String?,
+                            deviceOnline: (s['deviceOnline'] as bool?) ?? false,
                           ),
                         ),
                       ],
@@ -505,24 +506,58 @@ class _ScheduleTileState extends State<_ScheduleTile> {
 /// Device-convergence badge for a schedule row. Sync runs per DEVICE
 /// (scheduleSyncService.syncDevice), so this mirrors the owning device's
 /// scheduleSyncInfo status, surfaced by GET /api/schedules as
-/// deviceSyncStatus/deviceSyncError:
-///   synced            -> green  "On device"
-///   failed/unsupported-> red    "Failed" (tap for the backend error)
-///   pending/other     -> amber  "Pending"
+/// deviceSyncStatus/deviceSyncError/deviceOnline:
+///   synced                     -> green "On device"
+///   unsupported                -> amber "Doesn't fit device" (plan cannot
+///                                 physically fit: slots/Rule2), tap = reason
+///   failed + device offline    -> grey  "Waiting · offline" (self-heals on
+///                                 reconnect via the retry sweep)
+///   failed (reachable)         -> red   "Failed" — real write failure,
+///                                 tap for the backend error
+///   pending / never synced     -> amber "Pending"
 class _SyncBadge extends StatelessWidget {
   final String status;
   final String? error;
+  final bool deviceOnline;
 
-  const _SyncBadge({required this.status, this.error});
+  const _SyncBadge({required this.status, this.error, this.deviceOnline = false});
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
-    final failed = status == 'failed' || status == 'unsupported';
+    final failed = status == 'failed';
+    final unsupported = status == 'unsupported';
     final synced = status == 'synced';
-    final color = synced ? colors.leaf : (failed ? colors.danger : colors.sunlight);
-    final label = synced ? 'On device' : (failed ? 'Failed' : 'Pending');
-    final icon = synced ? Icons.check_circle : (failed ? Icons.error_outline : Icons.schedule);
+    final waiting = failed && !deviceOnline;
+
+    final color = synced
+        ? colors.leaf
+        : unsupported || waiting || !failed
+            ? colors.sunlight
+            : colors.danger;
+    final label = synced
+        ? 'On device'
+        : unsupported
+            ? 'Doesn\'t fit device'
+            : waiting
+                ? 'Waiting · offline'
+                : failed
+                    ? 'Failed'
+                    : 'Pending';
+    final icon = synced
+        ? Icons.check_circle
+        : unsupported
+            ? Icons.rule_outlined
+            : waiting
+                ? Icons.cloud_off_outlined
+                : failed
+                    ? Icons.error_outline
+                    : Icons.schedule;
+
+    String? tooltip;
+    if (unsupported && (error?.isNotEmpty ?? false)) tooltip = error;
+    if (waiting) tooltip = 'Will sync automatically when the device reconnects.';
+    if (failed && !waiting && (error?.isNotEmpty ?? false)) tooltip = error;
 
     Widget chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
@@ -543,8 +578,8 @@ class _SyncBadge extends StatelessWidget {
       ),
     );
 
-    if (failed && (error?.isNotEmpty ?? false)) {
-      chip = Tooltip(message: error, preferBelow: false, child: chip);
+    if (tooltip != null) {
+      chip = Tooltip(message: tooltip, preferBelow: false, child: chip);
     }
     return chip;
   }

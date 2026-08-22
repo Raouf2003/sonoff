@@ -2,6 +2,7 @@ const express = require('express');
 const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
 const scheduleSyncService = require('../services/scheduleSyncService');
+const runtimeState = require('../services/runtimeState');
 
 const router = express.Router();
 
@@ -141,6 +142,10 @@ router.get('/', async (req, res) => {
       {
         status: (d.scheduleSyncInfo && d.scheduleSyncInfo.status) || 'pending',
         error: (d.scheduleSyncInfo && d.scheduleSyncInfo.error) || null,
+        // Liveness lives in runtimeState (LWT-authoritative), not the DB. The
+        // badge uses it to show "Waiting (offline)" instead of a misleading
+        // hard failure while the device is simply unreachable.
+        online: runtimeState.isOnline(d.deviceId),
       },
     ]));
 
@@ -150,6 +155,7 @@ router.get('/', async (req, res) => {
         deviceName: deviceMap.get(s.deviceId) || null,
         deviceSyncStatus: syncMap.get(s.deviceId)?.status || 'pending',
         deviceSyncError: syncMap.get(s.deviceId)?.error || null,
+        deviceOnline: syncMap.get(s.deviceId)?.online ?? false,
       })),
     );
   } catch (err) {
