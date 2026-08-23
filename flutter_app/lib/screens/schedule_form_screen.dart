@@ -154,8 +154,9 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
     setState(() => _saving = true);
     try {
+      Map<String, dynamic>? saved;
       if (_isEdit) {
-        await _api.updateSchedule(
+        final res = await _api.updateSchedule(
           widget.existing!['_id'] as String,
           {
             'name': name,
@@ -170,8 +171,9 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
             'timeRanges': timeRanges,
           },
         );
+        saved = (res['schedule'] as Map<String, dynamic>?) ?? res;
       } else {
-        await _api.createSchedule(
+        final res = await _api.createSchedule(
           name: name,
           deviceId: widget.deviceId,
           channels: channels,
@@ -183,8 +185,11 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
           },
           timeRanges: timeRanges,
         );
+        saved = (res['schedule'] as Map<String, dynamic>?) ?? res;
       }
-      if (mounted) Navigator.of(context).pop(true);
+      // Pop with the saved payload so the caller can key a device-sync watch
+      // on it; legacy `true` remains the fallback contract.
+      if (mounted) Navigator.of(context).pop(saved);
     } catch (e) {
       _err(e is ApiException ? e.message : 'Could not save the schedule');
     } finally {

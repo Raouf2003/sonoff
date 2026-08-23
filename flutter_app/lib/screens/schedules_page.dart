@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
@@ -20,10 +22,120 @@ class _SchedulesPageState extends State<SchedulesPage> {
   bool _loading = true;
   bool _loadError = false;
 
+  // Deferred-sync visual flow, shared by every CRUD action: cards/chips
+  // linger while the device-side sync catches up. The backend cannot tell
+  // clients when the sweep physically finalizes (rows leave GET at soft-
+  // delete), so liveness is polled from the existing /api/status endpoint and
+  // drives an online/offline state machine per watched action.
+  //   kind=create/delete -> full-card dim treatment (nothing/something is
+  //                         materially appearing/vanishing on the device)
+  //   kind=edit/toggle   -> non-blocking corner chip (old config stays valid
+  //                         until the new sync lands)
+  final List<_SyncWatch> _syncWatches = [];
+  Timer? _removalTimer;
+
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _removalTimer?.cancel();
+    super.dispose();
+  }
+
+  void _upsertWatch(_SyncWatch watch) {
+    _syncWatches.removeWhere((w) => w.scheduleId == watch.scheduleId);
+    _syncWatches.add(watch);
+    _startSyncSweeper();
+  }
+
+  void _clearWatch(String? scheduleId) {
+    if (scheduleId == null) return;
+    final before = _syncWatches.length;
+    _syncWatches.removeWhere((w) => w.scheduleId == scheduleId);
+    if (_syncWatches.length != before && mounted) setState(() {});
+  }
+
+  /// Lazily started ticker: one /api/status poll per affected device per tick
+  /// (LWT-authoritative, via ApiService.getStatus) advances every watch:
+  ///   ONLINE   -> short 12 s grace (delete-time sync + sweep finalize), then
+  ///               the watch settles (chip clears / dim card finalizes).
+  ///   OFFLINE  -> latched: dim card / chip persists indefinitely with the
+  ///               reconnect label until an online transition starts the grace.
+  /// Poll failures leave watches untouched; a blind 90 s fallback bounds the
+  /// worst case so a broken API can never pin UI forever.
+  static const _onlineGrace = Duration(seconds: 12);
+  static const _blindFallback = Duration(seconds: 90);
+  bool _presencePollBusy = false;
+
+  void _startSyncSweeper() {
+    _removalTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
+      _sweepSyncWatches();
+    });
+  }
+
+  Future<void> _sweepSyncWatches() async {
+    if (!mounted || _syncWatches.isEmpty || _presencePollBusy) return;
+    _presencePollBusy = true;
+    final now = DateTime.now();
+    var changed = false;
+    try {
+      final deviceIds = _syncWatches
+          .map((w) => w.schedule['deviceId'] as String?)
+          .whereType<String>()
+          .toSet();
+      final onlineByDevice = <String, bool>{};
+      for (final deviceId in deviceIds) {
+        try {
+          final status = await _api.getStatus(deviceId);
+          onlineByDevice[deviceId] = status['online'] == true;
+        } catch (_) {
+          onlineByDevice[deviceId] = false; // unknown: treated as no-transition
+        }
+      }
+      if (!mounted) return;
+      final settled = <_SyncWatch>[];
+      for (final w in _syncWatches) {
+        final deviceId = w.schedule['deviceId'] as String?;
+        final online = deviceId != null ? onlineByDevice[deviceId] : false;
+        if (online == false) {
+          // Went (or stayed) offline: latch the indefinite waiting state.
+          if (w.phase != 'offline' || w.dismissAt != null) changed = true;
+          w.phase = 'offline';
+          w.dismissAt = null;
+          continue;
+        }
+        if (online == null) {
+          // Status unknown (poll failed): keep current state, but never let a
+          // watch stick forever on a broken API.
+          if (now.difference(w.startedAt) > _blindFallback &&
+              w.startedAt.add(_blindFallback).isBefore(now)) {
+            settled.add(w);
+            changed = true;
+          }
+          continue;
+        }
+        // Device is online: first observation opens the grace window.
+        w.dismissAt ??= now.add(_onlineGrace);
+        if (now.isAfter(w.dismissAt!)) {
+          settled.add(w);
+          changed = true;
+        }
+      }
+      for (final s in settled) {
+        _syncWatches.remove(s);
+      }
+      if (_syncWatches.isEmpty) {
+        _removalTimer?.cancel();
+        _removalTimer = null;
+      }
+      if (changed || settled.isNotEmpty) setState(() {});
+    } finally {
+      _presencePollBusy = false;
+    }
   }
 
   Future<void> _load() async {
@@ -66,7 +178,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
       _schedules.where((s) => s['deviceId'] == deviceId).toList();
 
   Future<void> _add(String deviceId) async {
-    final created = await Navigator.of(context).push<bool>(
+    final result = await Navigator.of(context).push<Object?>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
           deviceId: deviceId,
@@ -75,12 +187,13 @@ class _SchedulesPageState extends State<SchedulesPage> {
         ),
       ),
     );
-    if (created == true) _load();
+    await _load();
+    _watchFromResult(result, 'create');
   }
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
     final deviceId = schedule['deviceId'] as String;
-    final changed = await Navigator.of(context).push<bool>(
+    final result = await Navigator.of(context).push<Object?>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
           deviceId: deviceId,
@@ -90,7 +203,25 @@ class _SchedulesPageState extends State<SchedulesPage> {
         ),
       ),
     );
-    if (changed == true) _load();
+    await _load();
+    _watchFromResult(result, 'edit');
+  }
+
+  // The form pops the saved schedule payload (or legacy `true`). A payload
+  // means a real device sync was triggered server-side: open a watch so the
+  // card reflects convergence (dim for create, chip for edit).
+  void _watchFromResult(Object? result, String kind) {
+    if (!mounted) return;
+    if (result is Map && result['_id'] != null) {
+      final schedule = Map<String, dynamic>.from(result);
+      _upsertWatch(_SyncWatch(
+        kind: kind,
+        scheduleId: schedule['_id'] as String?,
+        schedule: schedule,
+      ));
+    } else if (result == true) {
+      // Legacy/unknown payload: nothing to key on — plain reload only.
+    }
   }
 
   Future<void> _toggle(Map<String, dynamic> schedule) async {
@@ -99,9 +230,18 @@ class _SchedulesPageState extends State<SchedulesPage> {
     setState(() => schedule['enabled'] = target);
     try {
       await _api.toggleSchedule(id);
+      // Old enabled-state stays valid on the device until the new sync lands:
+      // non-blocking "Updating…" chip driven by the shared presence watcher.
+      _upsertWatch(_SyncWatch(
+        kind: 'toggle',
+        scheduleId: id,
+        schedule: Map<String, dynamic>.from(schedule),
+      ));
+      setState(() {});
     } catch (e) {
       if (!mounted) return;
       setState(() => schedule['enabled'] = !target);
+      _clearWatch(id);
       _showError(e is ApiException ? e.message : 'Could not update the schedule');
     }
   }
@@ -123,11 +263,44 @@ class _SchedulesPageState extends State<SchedulesPage> {
       ),
     );
     if (ok != true) return;
+    // "Pending then confirmed" flow: the card moves out of the live list into
+    // a dimmed watch immediately (no network wait), and stays visible while
+    // the device-side removal catches up.
+    final previousIndex = _schedules.indexOf(schedule);
+    final watch = _SyncWatch(
+      kind: 'delete',
+      scheduleId: schedule['_id'] as String?,
+      schedule: schedule,
+    );
+    setState(() {
+      if (previousIndex >= 0) _schedules.removeAt(previousIndex);
+      _syncWatches.add(watch);
+    });
+    _startSyncSweeper();
     try {
-      await _api.deleteSchedule(id);
-      if (mounted) _load();
+      final res = await _api.deleteSchedule(id);
+      if (!mounted) return;
+      if (res['deferred'] == true) {
+        // Device offline / removal not yet confirmed on hardware: latch the
+        // offline phase (indefinite dimmed card + reconnect label). The
+        // presence sweeper settles it once /api/status reports online again.
+        setState(() => watch.phase = 'offline');
+      } else {
+        // Degraded/immediate path (native sync off): already gone server-side.
+        _clearWatch(watch.scheduleId);
+      }
     } catch (e) {
-      if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the schedule');
+      // Hard failure: restore the card to its original slot, normal look.
+      _clearWatch(watch.scheduleId);
+      if (!mounted) return;
+      setState(() {
+        if (previousIndex >= 0 && previousIndex <= _schedules.length) {
+          _schedules.insert(previousIndex, schedule);
+        } else {
+          _schedules.add(schedule);
+        }
+      });
+      _showError(e is ApiException ? e.message : 'Could not delete the schedule');
     }
   }
 
@@ -171,22 +344,37 @@ class _SchedulesPageState extends State<SchedulesPage> {
         physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
         padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.xxxl),
         itemCount: _devices.length,
-        itemBuilder: (_, i) => _DeviceSection(
-          device: _devices[i],
-          schedules: _schedulesOf(_devices[i]['deviceId'] as String),
-          onAdd: () => _add(_devices[i]['deviceId'] as String),
-          onEdit: _edit,
-          onToggle: _toggle,
-          onDelete: _delete,
-        ),
+        itemBuilder: (_, i) {
+          final deviceId = _devices[i]['deviceId'] as String;
+          return _DeviceSection(
+            device: _devices[i],
+            schedules: _schedulesOf(deviceId),
+            watches: _syncWatches
+                .where((w) => w.schedule['deviceId'] == deviceId)
+                .toList(),
+            onAdd: () => _add(deviceId),
+            onEdit: _edit,
+            onToggle: _toggle,
+            onDelete: _delete,
+          );
+        },
       ),
     );
   }
 }
 
+_SyncWatch? _watchById(List<_SyncWatch> watches, String? id) {
+  if (id == null) return null;
+  for (final w in watches) {
+    if (w.scheduleId == id) return w;
+  }
+  return null;
+}
+
 class _DeviceSection extends StatelessWidget {
   final Map<String, dynamic> device;
   final List<Map<String, dynamic>> schedules;
+  final List<_SyncWatch> watches;
   final VoidCallback onAdd;
   final void Function(Map<String, dynamic>) onEdit;
   final void Function(Map<String, dynamic>) onToggle;
@@ -195,11 +383,59 @@ class _DeviceSection extends StatelessWidget {
   const _DeviceSection({
     required this.device,
     required this.schedules,
+    required this.watches,
     required this.onAdd,
     required this.onEdit,
     required this.onToggle,
     required this.onDelete,
   });
+
+  /// Chip treatment for edit/toggle: the old schedule config remains valid on
+  /// the device until the new sync lands, so the card stays FULLY normal and
+  /// interactive — only a small corner chip communicates convergence.
+  Widget _chipOverlay(BuildContext context, _ScheduleTile tile, _SyncWatch watch) {
+    final colors = context.steesColors;
+    final offline = watch.phase == 'offline';
+    return Stack(
+      children: [
+        tile,
+        Positioned(
+          top: 6,
+          right: 6,
+          child: Tooltip(
+            message: _syncWatchLabel(watch) ?? '',
+            preferBelow: false,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: (offline ? colors.mist : colors.sunlight).withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: (offline ? colors.mist : colors.sunlight).withValues(alpha: 0.5),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_syncWatchIcon(watch), size: 10, color: offline ? colors.mist : colors.sunlight),
+                  const SizedBox(width: 4),
+                  Text(
+                    offline ? 'DEVICE OFFLINE' : 'UPDATING\u2026',
+                    style: GoogleFonts.sora(
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.1,
+                      color: offline ? colors.mist : colors.sunlight,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -260,7 +496,7 @@ class _DeviceSection extends StatelessWidget {
             ),
             Padding(
               padding: const EdgeInsets.all(AppSpacing.md),
-              child: schedules.isEmpty
+              child: (schedules.isEmpty && watches.isEmpty)
                   ? Container(
                       width: double.infinity,
                       padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
@@ -278,13 +514,39 @@ class _DeviceSection extends StatelessWidget {
                   : Column(
                       children: [
                         for (final (i, schedule) in schedules.indexed) ...[
-                          _ScheduleTile(
-                            schedule: schedule,
-                            onEdit: () => onEdit(schedule),
-                            onToggle: () => onToggle(schedule),
-                            onDelete: () => onDelete(schedule),
-                          ),
-                          if (i < schedules.length - 1) const SizedBox(height: AppSpacing.sm),
+                          Builder(builder: (ctx) {
+                            final watch = _watchById(watches, schedule['_id'] as String?);
+                            if (watch == null) {
+                              return _ScheduleTile(
+                                schedule: schedule,
+                                onEdit: () => onEdit(schedule),
+                                onToggle: () => onToggle(schedule),
+                                onDelete: () => onDelete(schedule),
+                              );
+                            }
+                            if (watch.isDim) {
+                              // create: nothing existed before — full dim card.
+                              return _buildDimmedWatchCard(ctx, watch);
+                            }
+                            // edit/toggle: old config stays valid — normal
+                            // interactive card + corner chip only.
+                            return _chipOverlay(
+                              ctx,
+                              _ScheduleTile(
+                                schedule: schedule,
+                                onEdit: () => onEdit(schedule),
+                                onToggle: () => onToggle(schedule),
+                                onDelete: () => onDelete(schedule),
+                              ),
+                              watch,
+                            );
+                          }),
+                          if (i < schedules.length - 1 || watches.any((w) => w.kind == 'delete'))
+                            const SizedBox(height: AppSpacing.sm),
+                        ],
+                        for (final (i, w) in watches.where((w) => w.kind == 'delete').indexed) ...[
+                          _buildDimmedWatchCard(context, w),
+                          if (i < watches.length - 1) const SizedBox(height: AppSpacing.sm),
                         ],
                       ],
                     ),
@@ -442,4 +704,100 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     if (m == null) return 0;
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
   }
+}
+
+/// A CRUD action awaiting device-side convergence. The backend hides
+/// soft-deleted rows immediately and cannot report sweep finalization, so
+/// liveness is polled (/api/status) and drives phase 'active' -> 'offline'
+/// with a bounded grace before the watch settles.
+class _SyncWatch {
+  /// create | edit | toggle | delete — picks the visual treatment + wording.
+  final String kind;
+  final String? scheduleId;
+  final Map<String, dynamic> schedule;
+  final DateTime startedAt = DateTime.now();
+  String phase = 'active'; // 'active' | 'offline'
+  DateTime? dismissAt;
+
+  _SyncWatch({required this.kind, required this.scheduleId, required this.schedule});
+
+  bool get isDim => kind == 'create' || kind == 'delete';
+}
+
+/// Status-line / chip wording per kind and phase. Null return = no label yet.
+String? _syncWatchLabel(_SyncWatch w) {
+  if (w.phase == 'offline') {
+    switch (w.kind) {
+      case 'create':
+        return 'Device offline \u2014 will finish syncing once it reconnects.';
+      case 'delete':
+        return 'Device offline \u2014 will finish removing once it reconnects.';
+      default:
+        return 'Device offline \u2014 will update once it reconnects.';
+    }
+  }
+  switch (w.kind) {
+    case 'delete':
+      return 'Removing\u2026';
+    case 'create':
+      return 'Syncing to device\u2026';
+    default:
+      return 'Updating\u2026';
+  }
+}
+
+IconData _syncWatchIcon(_SyncWatch w) {
+  if (w.phase == 'offline') return Icons.cloud_off_outlined;
+  switch (w.kind) {
+    case 'create':
+      return Icons.sync_outlined;
+    default:
+      return Icons.hourglass_top;
+  }
+}
+
+/// Dimmed full-card treatment for create/delete: nothing/something is
+/// materially appearing or vanishing on the device, so the card reads as
+/// not-yet-real until the sync lands.
+Widget _buildDimmedWatchCard(
+  BuildContext context,
+  _SyncWatch watch,
+) {
+  final colors = context.steesColors;
+  final label = _syncWatchLabel(watch);
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      IgnorePointer(
+        child: Opacity(
+          opacity: 0.45,
+          child: _ScheduleTile(
+            schedule: watch.schedule,
+            onEdit: () {},
+            onToggle: () {},
+            onDelete: () {},
+          ),
+        ),
+      ),
+      const SizedBox(height: 4),
+      Row(
+        children: [
+          Icon(_syncWatchIcon(watch), size: 12, color: colors.mist.withValues(alpha: 0.8)),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              label ?? '',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                fontStyle: FontStyle.italic,
+                color: colors.mist.withValues(alpha: 0.85),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ],
+  );
 }
