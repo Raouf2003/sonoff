@@ -112,7 +112,9 @@ class _ApConnectMock {
         }
         connectCalls++;
         lastSsid = (call.arguments as Map)['ssid'] as String?;
-        return null;
+        // New contract (B): the native side resolves connectToAp itself with
+        // the terminal stage — no getState polling on the Dart side anymore.
+        return <String, dynamic>{'stage': stage};
       case 'getState':
         return <String, dynamic>{'stage': stage};
       case 'cancel':

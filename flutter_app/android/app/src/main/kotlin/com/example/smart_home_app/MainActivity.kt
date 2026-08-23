@@ -3,10 +3,12 @@ package com.example.smart_home_app
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
@@ -65,6 +67,8 @@ class MainActivity : FlutterActivity() {
                         startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
                         result.success(null)
                     }
+                    "openLocationSettings" -> openLocationSettings(result)
+                    "openAppSettings" -> openAppSettings(result)
                     "scanWifi" -> scanWifi(result)
                     else -> result.notImplemented()
                 }
@@ -167,6 +171,34 @@ class MainActivity : FlutterActivity() {
      * if it is missing we request it at runtime. On any failure we degrade
      * gracefully (Dart keeps "Enter network manually").
      */
+    /**
+     * Android 10+ hides Wi-Fi scan results from apps entirely when the
+     * system Location service is OFF — even with location permission
+     * granted. This is the #1 cause of "networks visible in Settings but
+     * not in the app". Surface it so the UI can guide the user.
+     */
+    private fun isLocationServiceEnabled(): Boolean {
+        val lm = applicationContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        return runCatching {
+            lm?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true ||
+                lm?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true
+        }.getOrDefault(true)
+    }
+
+    private fun openLocationSettings(result: MethodChannel.Result) {
+        startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+        result.success(null)
+    }
+
+    private fun openAppSettings(result: MethodChannel.Result) {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName"),
+        )
+        startActivity(intent)
+        result.success(null)
+    }
+
     private fun scanWifi(result: MethodChannel.Result) {
         val permission = requiredScanPermission()
         if (permission != null && checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
@@ -217,6 +249,7 @@ class MainActivity : FlutterActivity() {
             return
         }
         val wifi: WifiManager = wm
+        val locationOn = isLocationServiceEnabled()
         val started = runCatching { wifi.startScan() }.getOrDefault(false)
         // Scan results arrive asynchronously; read them shortly after startScan().
         mainHandler.postDelayed({
@@ -241,8 +274,15 @@ class MainActivity : FlutterActivity() {
             result.success(
                 mapOf(
                     "available" to true,
+                    "locationEnabled" to locationOn,
                     "networks" to networks,
-                    "reason" to if (started) (if (networks.isEmpty()) "no networks found" else null) else "scan rejected",
+                    "reason" to if (started) {
+                        when {
+                            networks.isNotEmpty() -> null
+                            !locationOn -> "location services off"
+                            else -> "no networks found"
+                        }
+                    } else "scan rejected",
                 )
             )
         }, 1200)
@@ -469,6 +509,26 @@ class MainActivity : FlutterActivity() {
         apConnectError = null
         apConnectStage = "requesting"
 
+        // Resolve the ORIGINAL Dart call exactly once on the first terminal
+        // event (or a 20 s guard) instead of letting Dart poll getState. A
+        // dedicated runnable is used so cancelling the timeout never touches
+        // the shared handler's other delayed work.
+        var settled = false
+        var timeoutRunnable: Runnable? = null
+        val settle = { stage: String ->
+            if (!settled) {
+                settled = true
+                timeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+                result.success(mapOf("stage" to stage))
+            }
+            Unit
+        }
+        timeoutRunnable = Runnable {
+            apConnectStage = "timeout"
+            apConnectError = "Specifier request timed out after 20s."
+            settle("timeout")
+        }
+
         val specifier = WifiNetworkSpecifier.Builder().setSsid(ssid).build()
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -488,9 +548,12 @@ class MainActivity : FlutterActivity() {
                 val bound =
                     runCatching { connectivityManager.bindProcessToNetwork(network) }.getOrDefault(false)
                 Log.d("SteesProvision", "[ap_connect] bindProcessToNetwork=$bound")
-                if (!bound) {
+                if (bound) {
+                    settle("available")
+                } else {
                     apConnectStage = "failed"
                     apConnectError = "bindProcessToNetwork failed; cannot route the probe to the AP."
+                    settle("bindFailed")
                 }
             }
 
@@ -498,18 +561,20 @@ class MainActivity : FlutterActivity() {
                 apConnectStage = "unavailable"
                 apConnectError = "onUnavailable: no matching AP found or request rejected by the system."
                 Log.d("SteesProvision", "[ap_connect] onUnavailable")
+                settle("unavailable")
             }
 
             override fun onLost(network: Network) {
                 apConnectStage = "lost"
                 apConnectError = "onLost: the connection to the AP was dropped."
                 Log.d("SteesProvision", "[ap_connect] onLost network=$network")
+                settle("lost")
             }
         }
         apConnectCallback = cb
         connectivityManager.requestNetwork(request, cb)
         apConnectStage = "awaiting_system"
-        result.success(null)
+        mainHandler.postDelayed(timeoutRunnable, 20_000L)
     }
 
     private fun apConnectDisconnect() {

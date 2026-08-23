@@ -256,7 +256,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   // Bounded wait for the specifier to reach onAvailable: single request, no
   // retry loop. Mirrors the probe grace so the user is not left hanging.
-  static const Duration _apConnectDeadline = Duration(seconds: 20);
+  // (B) the specifier-join deadline now lives natively in MainActivity.kt
+// (connectToAp resolves itself after 20 s) — no Dart-side deadline needed.
 
   late final ApiService _api;
 
@@ -301,6 +302,13 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   String? _error;
   Timer? _reachTimer;
   Timer? _waitTimer;
+  // Connect-step progress transparency (B/E): live elapsed counters for the
+  // specifier-join await and the AP probe grace, so neither 20 s window looks
+  // frozen.
+  Timer? _joinTicker;
+  int _joinElapsedSec = 0;
+  Timer? _probeTicker;
+  int _probeElapsedSec = 0;
   DateTime? _waitStart;
 
   // The device identity IS the canonical physical MAC, derived locally the
@@ -520,6 +528,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     unawaited(_releaseWifiBinding());
     _reachTimer?.cancel();
     _waitTimer?.cancel();
+    _joinTicker?.cancel();
+    _probeTicker?.cancel();
     _waitStageTimer?.cancel();
     _stageRebootTimer?.cancel();
     _closeProvisionSocket();
@@ -663,7 +673,16 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
         _apConnectPending = 'Connecting to $ssid…';
       });
     }
+    // E: live elapsed counter so the join await never looks frozen.
+    final sw = Stopwatch()..start();
+    _joinElapsedSec = 0;
+    _joinTicker?.cancel();
+    _joinTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _joinElapsedSec = sw.elapsed.inSeconds);
+    });
     final stage = await _requestApConnect(ssid);
+    _joinTicker?.cancel();
     if (!mounted || _step != _Step.connect) return false;
     if (stage == null) return false; // manual fallback already happened
     if (stage == 'available') {
@@ -673,21 +692,42 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] programmatic AP join bound; probing next');
       return true;
     }
-    _failProgrammatic(
-      'Could not connect to the device setup network $ssid. Make sure the '
-      'device is powered on and in setup mode. If the join prompt was declined '
-      'or the AP is password-protected, use Open Wi-Fi Settings instead.',
-    );
+    // C: every terminal stage now arrives immediately (native resolves on the
+    // callback), so give each one its precise recovery copy instead of a
+    // generic message after a blind wait.
+    final message = switch (stage) {
+      'lost' =>
+        'The connection to "$ssid" was dropped before setup could start. '
+            'Stay close to the device and try again.',
+      'bindFailed' =>
+        'The phone couldn\u2019t route traffic to the device network. Toggle '
+            'Wi-Fi off/on, then try again.',
+      'timeout' =>
+        'The system took too long to join "$ssid". Make sure the device is '
+            'powered on and in pairing mode, then try again.',
+      _ =>
+        'Could not connect to the device setup network $ssid. Make sure the '
+            'device is powered on and in setup mode. If the join prompt was '
+            'declined or the AP is password-protected, use Open Wi-Fi Settings '
+            'instead.',
+    };
+    _failProgrammatic(message);
     return false;
   }
 
   // Issues one specifier request and waits for it to settle. Returns:
   //   'available' → bound, proceed to the probe
-  //   other stage → terminal specifier outcome (unavailable/lost/failed)
+  //   terminal stage → 'unavailable' | 'lost' | 'bindFailed' | 'timeout' |
+  //                    'failed'
   //   null        → a hard fallback already happened (permission denied etc.)
+  //
+  // B: the native side now resolves `connectToAp` itself on the first
+  // terminal callback (or its own 20 s guard) — no more getState polling.
   Future<String?> _requestApConnect(String ssid) async {
+    Map<dynamic, dynamic>? res;
     try {
-      await _apConnectChannel.invokeMethod<void>('connectToAp', {'ssid': ssid});
+      res = await _apConnectChannel.invokeMethod<Map<dynamic, dynamic>>(
+          'connectToAp', {'ssid': ssid});
     } on PlatformException catch (e) {
       debugPrint('[PROVISION] connectToAp PlatformException: ${e.code} ${e.message}');
       if (e.code == 'PERMISSION_DENIED' || e.code == 'UNSUPPORTED' || e.code == 'BAD_SSID') {
@@ -709,28 +749,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       debugPrint('[PROVISION] connectToAp threw: $e');
       return 'failed';
     }
-    final deadline = DateTime.now().add(_apConnectDeadline);
-    while (DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      if (!mounted || _step != _Step.connect) return null;
-      Map<dynamic, dynamic>? st;
-      try {
-        st =
-            await _apConnectChannel.invokeMethod<Map<dynamic, dynamic>>('getState');
-      } catch (e) {
-        debugPrint('[PROVISION] getState threw: $e');
-        return 'failed';
-      }
-      final stage = st?['stage'] as String?;
-      if (stage == 'available') return 'available';
-      if (stage == 'unavailable' || stage == 'lost' || stage == 'failed') {
-        debugPrint('[PROVISION] specifier stage=$stage');
-        return stage!;
-      }
-      // requesting / awaiting_system / idle → keep waiting inside the poll.
-    }
-    debugPrint('[PROVISION] specifier state deadline exceeded');
-    return 'failed';
+    final stage = res?['stage']?.toString() ?? 'failed';
+    debugPrint('[PROVISION] specifier stage=$stage');
+    if (stage == 'available') return 'available';
+    return stage;
   }
 
   void _failProgrammatic(String message) {
@@ -990,7 +1012,46 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       });
     }
     // Small stabilization delay BEFORE the first probe (not after a failure).
+    // E: per-second elapsed counter keeps the grace window visibly alive.
+    _probeElapsedSec = 0;
+    _probeTicker?.cancel();
+    _probeTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _step != _Step.connect || gen != _apProbeGen) {
+        _probeTicker?.cancel();
+        return;
+      }
+      setState(() => _probeElapsedSec = DateTime.now().difference(_apProbeStart!).inSeconds);
+    });
     _reachTimer = Timer(_stabilizeDelay, () => _runApProbe(gen));
+  }
+
+  /// C: manual-path wrong-network detection — if the phone is clearly on a
+  /// non-device network (readable SSID that is neither tasmota-* nor a
+  /// MAC-named AP) and the device isn't answering, say so immediately instead
+  /// of burning the full grace window on a hopeless wait.
+  Future<bool> _isProbablyWrongNetwork() async {
+    if (_apConnectMode) return false; // programmatic join: picked exactly this SSID
+    try {
+      final info = await _wifiBindChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getNetworkInfo');
+      final ssid = info?['activeSsid']?.toString();
+      if (ssid == null || ssid.isEmpty || ssid == '<unknown>') return false;
+      final looksDevice = ssid.toLowerCase().startsWith('tasmota') ||
+          RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(ssid.trim());
+      return !looksDevice;
+    } catch (_) {
+      return false; // unreadable: no verdict, keep probing
+    }
+  }
+
+  Future<void> _failProbe(String message) async {
+    _probeTicker?.cancel();
+    _reachTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _error = message;
+    });
   }
 
   Future<void> _runApProbe(int gen) async {
@@ -1003,6 +1064,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     if (!mounted || _step != _Step.connect || gen != _apProbeGen) return;
 
     if (await _isReachable()) {
+      _probeTicker?.cancel();
       _reachTimer?.cancel();
       _waitStageTimer?.cancel();
       _stageRebootTimer?.cancel();
@@ -1046,6 +1108,19 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
     if (!mounted || _step != _Step.connect || gen != _apProbeGen) return;
 
+    // C: after two unanswered probes on a clearly non-device network, exit
+    // immediately with targeted copy instead of the generic timeout.
+    if (_apAttempt >= 2 && await _isProbablyWrongNetwork()) {
+      final activeSsid = _selectedDeviceApSsid;
+      debugPrint('[PROVISION] wrong-network early exit');
+      await _failProbe(
+        'You\u2019re connected to ${activeSsid ?? 'your own network'} \u2014 that '
+        'isn\u2019t the device\u2019s setup network. Reopen the picker and choose '
+        'the device\u2019s network (starts with "tasmota-" or shows its ID).',
+      );
+      return;
+    }
+
     // Not reachable YET. Keep the neutral state and retry within the grace
     // window. No error is shown during this phase.
     final elapsed = DateTime.now().difference(_apProbeStart!);
@@ -1056,6 +1131,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     }
 
     // Grace period exhausted — only now is a failure surfaced to the user.
+    _probeTicker?.cancel();
     if (_recoveryMode) {
       traceLog('RECOVERY', 'AP_NOT_FOUND total=${_trace.elapsedMs}ms');
     }
@@ -2793,7 +2869,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     const SizedBox(width: AppSpacing.sm),
                     Flexible(
                       child: Text(
-                        _apConnectPending ?? 'Checking device connection…',
+                        _apConnectPending != null
+                            ? '${_apConnectPending!} (${_joinElapsedSec}s)'
+                            : 'Checking device\u2026 ${_probeElapsedSec}s',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
                       ),
@@ -3914,6 +3992,27 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
   List<ScannedNetwork> _networks = const [];
   bool _scanning = false;
   String? _scanMessage;
+  // Android hides Wi-Fi scan results from apps when Location is off, and
+  // returns nothing when the location permission was denied. Both must be
+  // explained — an empty list otherwise reads as "the app is broken".
+  bool _locationOff = false;
+  bool _permDenied = false;
+
+  Future<void> _openLocationSettingsAndRescan() async {
+    try {
+      await _scanChannel.invokeMethod<void>('openLocationSettings');
+    } catch (_) {}
+    if (mounted) await _scan();
+  }
+
+  Future<void> _openAppSettingsAndRescan() async {
+    try {
+      await _scanChannel.invokeMethod<void>('openAppSettings');
+    } catch (_) {}
+    // Returning from app settings does not guarantee permission changed;
+    // rescan anyway — worst case the banner reappears with fresh truth.
+    if (mounted) await _scan();
+  }
 
   @override
   void initState() {
@@ -3951,9 +4050,14 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       setState(() {
         _scanning = false;
+        _locationOff = result?['locationEnabled'] == false;
+        final reason = result?['reason']?.toString() ?? '';
+        _permDenied = !available && reason.contains('permission');
         _networks = [...devices, ...others];
         _scanMessage = !available
-            ? 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.'
+            ? (_permDenied
+                ? null // dedicated banner below handles it
+                : 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.')
             : (all.isEmpty ? 'No Wi-Fi networks found nearby.' : null);
       });
     } on TimeoutException {
@@ -3979,6 +4083,56 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
 
   void _selectManual() {
     Navigator.of(context).pop('_manual');
+  }
+
+  /// Actionable diagnostic banner for scan-blocking causes (Location off,
+  /// permission denied) — explains WHY the list is empty and offers the exact
+  /// settings screen that fixes it, then rescans on return.
+  Widget _scanFixBanner({
+    required SteesColors colors,
+    required IconData icon,
+    required String text,
+    required String actionLabel,
+    required Future<void> Function() onAction,
+  }) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: colors.sunlight.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(color: colors.sunlight.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 14, color: colors.sunlight),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  text,
+                  style: GoogleFonts.inter(fontSize: 11.5, color: colors.mist.withValues(alpha: 0.9)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () => onAction(),
+              icon: Icon(icon, size: 13),
+              label: Text(actionLabel, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+              style: TextButton.styleFrom(foregroundColor: colors.stream, padding: const EdgeInsets.symmetric(horizontal: 8)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // Device setup network row: stream-tinted card, DEVICE chip, signal label,
@@ -4127,6 +4281,23 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                 ),
               )
             else ...[
+              if (_locationOff)
+                _scanFixBanner(
+                  colors: colors,
+                  icon: Icons.location_on_outlined,
+                  text: 'Android hides nearby Wi-Fi networks from apps until '
+                      'Location is turned on.',
+                  actionLabel: 'Turn on Location',
+                  onAction: _openLocationSettingsAndRescan,
+                ),
+              if (_permDenied)
+                _scanFixBanner(
+                  colors: colors,
+                  icon: Icons.lock_outline,
+                  text: 'Wi-Fi scanning needs this app\u2019s location permission.',
+                  actionLabel: 'Allow in App Settings',
+                  onAction: _openAppSettingsAndRescan,
+                ),
               if (!_networks.any((n) => isDeviceApSsid(n.name)))
                 Container(
                   width: double.infinity,
