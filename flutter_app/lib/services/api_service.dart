@@ -503,12 +503,9 @@ class ApiService {
     return _checkObject(res, const [200], 'Failed to toggle schedule');
   }
 
-  /// Deletes a schedule. Returns the backend response so callers can react to
-  /// `deferred: true` (soft-hidden now; device-side Timer/Rule removal finishes
-  /// once the device reconnects) vs `degraded: true` (native sync off).
-  Future<Map<String, dynamic>> deleteSchedule(String id) async {
+  Future<void> deleteSchedule(String id) async {
     final res = await delete('/api/schedules/$id');
-    return _checkObject(res, const [200], 'Failed to delete schedule');
+    _checkObject(res, const [200], 'Failed to delete schedule');
   }
 
   Future<void> sendMqttCommand(String deviceId, String command) async {

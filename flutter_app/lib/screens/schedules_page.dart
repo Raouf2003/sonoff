@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
@@ -19,9 +19,6 @@ class _SchedulesPageState extends State<SchedulesPage> {
   List<Map<String, dynamic>> _schedules = [];
   bool _loading = true;
   bool _loadError = false;
-  // Generation token for the settle-tracking loop: a newer mutation cancels
-  // the previous tracker so loops never stack after rapid actions.
-  int _trackGen = 0;
 
   @override
   void initState() {
@@ -29,11 +26,11 @@ class _SchedulesPageState extends State<SchedulesPage> {
     _load();
   }
 
-  Future<void> _load({bool silent = false}) async {
-    if (!silent) {
-      setState(() => _loadError = false);
-      setState(() => _loading = true);
-    }
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _loadError = false;
+    });
     try {
       final results = await Future.wait([_api.getDevices(), _api.getSchedules()]);
       if (mounted) {
@@ -52,25 +49,6 @@ class _SchedulesPageState extends State<SchedulesPage> {
           _loadError = _devices.isEmpty;
         });
       }
-    }
-  }
-
-  /// Reload now, then keep silently re-fetching while any enabled schedule's
-  /// device badge has not settled on 'synced' (bounded ~15 s). The device sync
-  /// triggered by a CRUD action is fire-and-forget server-side: the instant
-  /// reload that used to follow create/edit/delete always raced it and froze
-  /// the badge on stale/Pending until a manual pull-to-refresh.
-  Future<void> _loadAndTrackSettlement() async {
-    final gen = ++_trackGen;
-    await _load();
-    for (var i = 0; i < 5; i++) {
-      await Future<void>.delayed(const Duration(seconds: 3));
-      if (!mounted || gen != _trackGen) return;
-      final unsettled = _schedules.any((s) =>
-          ((s['enabled'] as bool?) ?? false) &&
-          ((s['deviceSyncStatus'] as String?) ?? 'pending') != 'synced');
-      if (!unsettled) return;
-      await _load(silent: true);
     }
   }
 
@@ -97,7 +75,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
         ),
       ),
     );
-    if (created == true) _loadAndTrackSettlement();
+    if (created == true) _load();
   }
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
@@ -112,7 +90,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
         ),
       ),
     );
-    if (changed == true) _loadAndTrackSettlement();
+    if (changed == true) _load();
   }
 
   Future<void> _toggle(Map<String, dynamic> schedule) async {
@@ -121,7 +99,6 @@ class _SchedulesPageState extends State<SchedulesPage> {
     setState(() => schedule['enabled'] = target);
     try {
       await _api.toggleSchedule(id);
-      if (mounted) _loadAndTrackSettlement();
     } catch (e) {
       if (!mounted) return;
       setState(() => schedule['enabled'] = !target);
@@ -147,35 +124,8 @@ class _SchedulesPageState extends State<SchedulesPage> {
     );
     if (ok != true) return;
     try {
-      final res = await _api.deleteSchedule(id);
-      if (mounted) _loadAndTrackSettlement();
-      // Deferred delete: the row is hidden, but the device-side Timer/Rule
-      // removal only completes when the device reconnects (retry sweep).
-      // Say so instead of silently pretending the device already forgot.
-      if (res['deferred'] == true && mounted) {
-        final colors = context.steesColors;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                Icon(Icons.cloud_off_outlined, size: 16, color: colors.well),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Removing from device — finishes once it reconnects.',
-                    style: GoogleFonts.inter(fontSize: 13, color: colors.well),
-                  ),
-                ),
-              ],
-            ),
-            backgroundColor: colors.stream,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-            margin: const EdgeInsets.all(AppSpacing.lg),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
+      await _api.deleteSchedule(id);
+      if (mounted) _load();
     } catch (e) {
       if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the schedule');
     }
@@ -409,15 +359,6 @@ class _ScheduleTileState extends State<_ScheduleTile> {
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(fontSize: 11, color: colors.mist),
                         ),
-                        const SizedBox(height: 3),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: _SyncBadge(
-                            status: (s['deviceSyncStatus'] as String?) ?? 'pending',
-                            error: s['deviceSyncError'] as String?,
-                            deviceOnline: (s['deviceOnline'] as bool?) ?? false,
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -500,87 +441,5 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
     if (m == null) return 0;
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
-  }
-}
-
-/// Device-convergence badge for a schedule row. Sync runs per DEVICE
-/// (scheduleSyncService.syncDevice), so this mirrors the owning device's
-/// scheduleSyncInfo status, surfaced by GET /api/schedules as
-/// deviceSyncStatus/deviceSyncError/deviceOnline:
-///   synced                     -> green "On device"
-///   unsupported                -> amber "Doesn't fit device" (plan cannot
-///                                 physically fit: slots/Rule2), tap = reason
-///   failed + device offline    -> grey  "Waiting · offline" (self-heals on
-///                                 reconnect via the retry sweep)
-///   failed (reachable)         -> red   "Failed" — real write failure,
-///                                 tap for the backend error
-///   pending / never synced     -> amber "Pending"
-class _SyncBadge extends StatelessWidget {
-  final String status;
-  final String? error;
-  final bool deviceOnline;
-
-  const _SyncBadge({required this.status, this.error, this.deviceOnline = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.steesColors;
-    final failed = status == 'failed';
-    final unsupported = status == 'unsupported';
-    final synced = status == 'synced';
-    final waiting = failed && !deviceOnline;
-
-    final color = synced
-        ? colors.leaf
-        : unsupported || waiting || !failed
-            ? colors.sunlight
-            : colors.danger;
-    final label = synced
-        ? 'On device'
-        : unsupported
-            ? 'Doesn\'t fit device'
-            : waiting
-                ? 'Waiting · offline'
-                : failed
-                    ? 'Failed'
-                    : 'Pending';
-    final icon = synced
-        ? Icons.check_circle
-        : unsupported
-            ? Icons.rule_outlined
-            : waiting
-                ? Icons.cloud_off_outlined
-                : failed
-                    ? Icons.error_outline
-                    : Icons.schedule;
-
-    String? tooltip;
-    if (unsupported && (error?.isNotEmpty ?? false)) tooltip = error;
-    if (waiting) tooltip = 'Will sync automatically when the device reconnects.';
-    if (failed && !waiting && (error?.isNotEmpty ?? false)) tooltip = error;
-
-    Widget chip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 11, color: color),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: GoogleFonts.inter(fontSize: 9.5, fontWeight: FontWeight.w600, color: color),
-          ),
-        ],
-      ),
-    );
-
-    if (tooltip != null) {
-      chip = Tooltip(message: tooltip, preferBelow: false, child: chip);
-    }
-    return chip;
   }
 }

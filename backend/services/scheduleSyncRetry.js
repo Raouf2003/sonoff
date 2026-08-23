@@ -81,13 +81,7 @@ class ScheduleSyncRetry {
       // whole-document reads are tiny here.
       const pending = await Schedule.find({ pendingDelete: true });
       for (const s of pending) if (s.deviceId) ids.add(s.deviceId);
-      // 'failed' = apply/verify failed; 'unsupported' = plan could not be
-      // applied at all (slot exhaustion, occupied Rule2...). Both are retried:
-      // an unsupported plan becomes supportable the moment the user fixes or
-      // removes the offending schedules, and only the sweep converges it then.
-      const failed = await Device.find({
-        'scheduleSyncInfo.status': { $in: ['failed', 'unsupported'] },
-      });
+      const failed = await Device.find({ 'scheduleSyncInfo.status': 'failed' });
       for (const d of failed) if (d.deviceId) ids.add(d.deviceId);
       return Array.from(ids);
     })();

@@ -2,7 +2,6 @@ const express = require('express');
 const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
 const scheduleSyncService = require('../services/scheduleSyncService');
-const runtimeState = require('../services/runtimeState');
 
 const router = express.Router();
 
@@ -132,30 +131,13 @@ router.get('/', async (req, res) => {
     const schedules = await Schedule.find({ ownerId: req.userId, pendingDelete: { $ne: true } }).sort({ createdAt: -1 });
 
     const deviceIds = [...new Set(schedules.map((s) => s.deviceId))];
-    // scheduleSyncInfo is select:false — explicitly pulled so every schedule
-    // row can carry its DEVICE's convergence state (sync runs per device, not
-    // per schedule; the badge mirrors what syncDevice() actually tracks).
-    const devices = await Device.find({ ownerId: req.userId, deviceId: { $in: deviceIds } }).select('+scheduleSyncInfo');
+    const devices = await Device.find({ ownerId: req.userId, deviceId: { $in: deviceIds } });
     const deviceMap = new Map(devices.map((d) => [d.deviceId, d.name]));
-    const syncMap = new Map(devices.map((d) => [
-      d.deviceId,
-      {
-        status: (d.scheduleSyncInfo && d.scheduleSyncInfo.status) || 'pending',
-        error: (d.scheduleSyncInfo && d.scheduleSyncInfo.error) || null,
-        // Liveness lives in runtimeState (LWT-authoritative), not the DB. The
-        // badge uses it to show "Waiting (offline)" instead of a misleading
-        // hard failure while the device is simply unreachable.
-        online: runtimeState.isOnline(d.deviceId),
-      },
-    ]));
 
     res.json(
       schedules.map((s) => ({
         ...s.toJSON(),
         deviceName: deviceMap.get(s.deviceId) || null,
-        deviceSyncStatus: syncMap.get(s.deviceId)?.status || 'pending',
-        deviceSyncError: syncMap.get(s.deviceId)?.error || null,
-        deviceOnline: syncMap.get(s.deviceId)?.online ?? false,
       })),
     );
   } catch (err) {
