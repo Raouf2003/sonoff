@@ -173,7 +173,7 @@ test('PATCH /schedules/:id/enable toggles and triggers EXACTLY ONE sync', async 
   }
 });
 
-test('DELETE /schedules/:id (device online, sync confirms) removes the row', async () => {
+test('DELETE /schedules/:id (flag on) responds IMMEDIATELY: soft-delete + exactly one trigger, no blocking sync', async () => {
   triggers = [];
   const runtimeState = require('../services/runtimeState');
   const origSync = scheduleSyncService.syncDevice;
@@ -181,13 +181,20 @@ test('DELETE /schedules/:id (device online, sync confirms) removes the row', asy
   const origOnline = runtimeState.isOnline;
   const origRelease = scheduleEngine.release;
   let deleted = false;
+  let savedPendingDelete = null;
   const doc = scheduleDoc();
   doc.pendingDelete = false;
+  doc.save = async function () { savedPendingDelete = this.pendingDelete; };
   doc.deleteOne = async () => { deleted = true; };
   const origFindOne = Schedule.findOne;
   Schedule.findOne = async (query) =>
     query._id === 'sch1' && query.ownerId === 'owner1' ? doc : null;
-  scheduleSyncService.syncDevice = async () => ({ status: 'synced', deviceId: DEVICE.deviceId });
+  // If the route ever blocks on a direct syncDevice await again, this slow
+  // stub makes the test time out instead of passing silently.
+  scheduleSyncService.syncDevice = async () => {
+    await new Promise((r) => setTimeout(r, 30000));
+    return { status: 'synced', deviceId: DEVICE.deviceId };
+  };
   scheduleSyncService.syncEnabled = () => true;
   runtimeState.isOnline = () => true;
   scheduleEngine.release = async () => {};
@@ -198,8 +205,10 @@ test('DELETE /schedules/:id (device online, sync confirms) removes the row', asy
       const body = await res.json();
       assert.strictEqual(res.status, 200);
       assert.strictEqual(body.ok, true);
-      assert.strictEqual(body.deferred, false);
-      assert.strictEqual(deleted, true, 'row physically removed after confirmed sync');
+      assert.strictEqual(body.deferred, true, 'flag-on delete is always deferred (sweep finalizes)');
+      assert.strictEqual(savedPendingDelete, true, 'row soft-deleted before responding');
+      assert.strictEqual(deleted, false, 'physical removal belongs to the retry sweep, not the route');
+      assert.deepStrictEqual(triggers, [DEVICE.deviceId], 'exactly one fire-and-forget trigger');
     } finally {
       await close();
     }
@@ -212,26 +221,16 @@ test('DELETE /schedules/:id (device online, sync confirms) removes the row', asy
   }
 });
 
-test('DELETE /schedules/:id (device offline) soft-deletes — row kept as pendingDelete', async () => {
-  const runtimeState = require('../services/runtimeState');
-  const origSync = scheduleSyncService.syncDevice;
+test('DELETE /schedules/:id (flag off) degrades to legacy immediate physical removal', async () => {
+  triggers = [];
   const origEnabled = scheduleSyncService.syncEnabled;
-  const origOnline = runtimeState.isOnline;
-  let savedPendingDelete = null;
   let deleted = false;
   const doc = scheduleDoc();
-  doc.save = async function () { savedPendingDelete = this.pendingDelete; };
   doc.deleteOne = async () => { deleted = true; };
   const origFindOne = Schedule.findOne;
   Schedule.findOne = async (query) =>
     query._id === 'sch1' && query.ownerId === 'owner1' ? doc : null;
-  scheduleSyncService.syncDevice = async () => ({
-    status: 'failed',
-    deviceId: DEVICE.deviceId,
-    error: 'CFG_TIMEOUT',
-  });
-  scheduleSyncService.syncEnabled = () => true;
-  runtimeState.isOnline = () => false;
+  scheduleSyncService.syncEnabled = () => false;
   try {
     const { base, close } = await start();
     try {
@@ -239,16 +238,14 @@ test('DELETE /schedules/:id (device offline) soft-deletes — row kept as pendin
       const body = await res.json();
       assert.strictEqual(res.status, 200);
       assert.strictEqual(body.ok, true);
-      assert.strictEqual(body.deferred, true, 'delete deferred while device unreachable');
-      assert.strictEqual(savedPendingDelete, true, 'row marked pendingDelete');
-      assert.strictEqual(deleted, false, 'row NOT physically removed on failed sync');
+      assert.strictEqual(body.degraded, true, 'legacy path reported');
+      assert.strictEqual(deleted, true, 'row removed immediately without device coordination');
+      assert.deepStrictEqual(triggers, [], 'no trigger in degraded mode');
     } finally {
       await close();
     }
   } finally {
     Schedule.findOne = origFindOne;
-    scheduleSyncService.syncDevice = origSync;
     scheduleSyncService.syncEnabled = origEnabled;
-    runtimeState.isOnline = origOnline;
   }
 });

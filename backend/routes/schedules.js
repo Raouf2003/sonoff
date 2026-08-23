@@ -246,10 +246,14 @@ router.delete('/:id', async (req, res) => {
     const deviceId = schedule.deviceId;
 
     // Ghost-schedule guard: the device's onboard Timer/Rule copy must not
-    // outlive the DB row. Soft-delete first (hidden from API + compiler),
-    // revert channels the schedule is physically holding ON right now, then
-    // remove the device-side timers with a DEFINITIVE awaited sync. The row is
-    // only physically deleted once the device confirms ('synced').
+    // outlive the DB row. Soft-delete first (hidden from API + compiler) and
+    // revert channels the schedule is physically holding ON right now. Under
+    // an enabled native sync the response returns IMMEDIATELY and convergence
+    // happens fire-and-forget (same pattern as create/edit): awaiting the
+    // full sync here stalled the HTTP response up to ~95 s with the device
+    // unreachable, forcing a manual refresh before the row visibly
+    // disappeared. The retry sweep owns both the device-side Timer/Rule
+    // removal AND the final physical deletion once the device confirms.
     schedule.pendingDelete = true;
     await schedule.save();
 
@@ -259,35 +263,18 @@ router.delete('/:id', async (req, res) => {
       console.error('[schedules] release on delete error:', err.message);
     }
 
-    let sync;
-    try {
-      sync = await scheduleSyncService.syncDevice(deviceId, { source: 'schedule-delete' });
-    } catch (err) {
-      sync = { status: 'failed', deviceId, error: err.message };
-    }
-
-    if (sync.status !== 'synced') {
-      if (!scheduleSyncService.syncEnabled()) {
-        // Graceful degradation: native sync is off, so there is no device copy
-        // to coordinate with. Fall back to legacy immediate removal and say so.
-        await schedule.deleteOne();
-        console.warn(
-          `[schedules] ${SYNC_FLAG_OFF_NOTE} — delete of "${schedule.name}" completed without device confirmation`,
-        );
-        return res.json({ ok: true, deferred: false, degraded: true, sync });
-      }
-      // Device offline or sync failed: keep the soft-deleted row. The retry
-      // sweep finalizes (physically deletes) it once the device is reachable.
+    if (!scheduleSyncService.syncEnabled()) {
+      // Graceful degradation: native sync is off, so there is no device copy
+      // to coordinate with. Fall back to legacy immediate removal and say so.
+      await schedule.deleteOne();
       console.warn(
-        `[schedules] delete of "${schedule.name}" deferred for ${deviceId}: ` +
-          `status=${sync.status}${sync.error ? ` (${sync.error})` : ''}`,
+        `[schedules] ${SYNC_FLAG_OFF_NOTE} — delete of "${schedule.name}" completed without device confirmation`,
       );
-      return res.json({ ok: true, deferred: true, sync });
+      return res.json({ ok: true, deferred: false, degraded: true });
     }
 
-    await schedule.deleteOne();
-    const postSync = triggerDeviceSync(deviceId, 'schedule-delete');
-    res.json({ ok: true, deferred: false, sync, syncPostDelete: postSync });
+    const sync = triggerDeviceSync(deviceId, 'schedule-delete');
+    res.json({ ok: true, deferred: true, sync });
   } catch (err) {
     console.error('Delete schedule error:', err);
     res.status(500).json({ error: 'Internal server error' });
