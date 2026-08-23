@@ -192,27 +192,41 @@ function buildRuleText(planTimers, allocation) {
 //      where <body> is `Backlog Power<d> ON|OFF` commands joined by ';' with
 //      any spacing (or a single bare `Power<d> ON|OFF`).
 //   2. Slot ownership: every referenced Clock#Timer=<n> slot is either a slot
-//      STEES previously managed or a factory-default free slot. This rejects a
-//      foreign automation that merely mimics our grammar but drives the user's
-//      trigger Timer3 or an unmanaged occupied timer.
+//      STEES previously managed, a factory-default free slot, OR an occupied
+//      slot whose timer carries the compiler signature (Action === 3 - STEES
+//      emits Action 3 ONLY for multi-channel rule events; direct events are
+//      0/1). The Action-3 acceptance un-deadlocks ownership resets (unclaim/
+//      reclaim wipes scheduleSyncInfo while the device keeps its STEES timers):
+//      without it the stored rule was misclassified as foreign forever and
+//      every sync latched 'unsupported' / 'Rule2 is not free'. Timer3 (user
+//      trigger) stays absolutely excluded, and plain user timers (Action 0/1)
+//      stay rejected.
 // Mixed content (our clause + foreign tail like `ON Sys#Boot DO ...`) fails the
 // full-consumption check and stays protected.
 function isSteesOwnedRule2(rule2, actual, managedTimerIndexes = []) {
   if (!rule2 || typeof rule2.Rules !== 'string' || rule2.Rules.trim() === '') return false;
   const managed = new Set(managedTimerIndexes);
-  const freeSlots = new Set(
-    ((actual && actual.timers) || [])
-      .filter((t) => t.index !== USER_TRIGGER_TIMER && isDefaultTimer(t))
-      .map((t) => t.index),
+  const timersByIndex = new Map(
+    ((actual && actual.timers) || []).map((t) => [t.index, t]),
   );
+  const slotAcceptable = (slot) => {
+    if (slot === USER_TRIGGER_TIMER) return false; // user trigger: never ours
+    if (managed.has(slot)) return true;
+    const t = timersByIndex.get(slot);
+    if (!t) return false; // unknown slot: cannot prove ownership
+    if (isDefaultTimer(t)) return true; // factory-default free slot
+    // Occupied: only the compiler signature makes it ours. Direct-action
+    // timers (Action 0/1) are indistinguishable from user automations ->
+    // rejected.
+    return toNum(t.Action) === 3 && toNum(t.Enable) === 1;
+  };
   const text = rule2.Rules;
   const clauseRe = /ON\s+Clock#Timer=(\d+)\s+DO\s+(.+?)\s+ENDON/gi;
   let consumed = 0;
   let m;
   while ((m = clauseRe.exec(text)) !== null) {
     consumed += m[0].length;
-    const slot = Number(m[1]);
-    if (!managed.has(slot) && !freeSlots.has(slot)) return false;
+    if (!slotAcceptable(Number(m[1]))) return false;
     const parts = m[2].split(';').map((s) => s.trim()).filter(Boolean);
     if (/^backlog\b/i.test(parts[0])) {
       parts[0] = parts[0].replace(/^backlog\s+/i, '');
@@ -465,6 +479,33 @@ function syncDevice(deviceId, options) {
 // Sync one device: read -> compile -> allocate -> diff -> apply (if enabled)
 // -> readback verify with bounded retries. Never throws for expected conditions.
 // Returns a structured result ({ status, changedTimers, changedRules, ... }).
+// Persist the sync outcome onto Device.scheduleSyncInfo. Terminal failures go
+// through this so the stored status can never go stale: leaving a previous
+// 'synced' in place after a failure made the retry sweep and startup backfill
+// believe the device was converged and skip it forever (invisible self-healing
+// deadlock). managedTimerIndexes is sticky ownership — preserved verbatim on
+// failures (orphan cleanup depends on it), replaced only by a verified result.
+async function persistOutcome(deviceModel, deviceId, managedTimerIndexes, status, error) {
+  if (!deviceModel || typeof deviceModel.updateOne !== 'function') return;
+  try {
+    await deviceModel.updateOne(
+      { deviceId },
+      {
+        $set: {
+          scheduleSyncInfo: {
+            managedTimerIndexes: managedTimerIndexes || [],
+            status,
+            lastSyncedAt: new Date(),
+            error: error || null,
+          },
+        },
+      },
+    );
+  } catch (_) {
+    // Persistence of the outcome must never mask the sync result itself.
+  }
+}
+
 async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = Schedule, traceId = '?', source = 'unknown', logger = console } = {}) {
   const summary = {
     status: 'pending',
@@ -485,6 +526,11 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     verification: [],
   };
 
+  // Last-known sticky ownership, hoisted so the OUTER catch can persist a
+  // failure WITHOUT wiping it. Wiping here would cascade: one unexpected
+  // throw erases managedTimerIndexes, which then deadlocks Rule2 recognition
+  // on the next run (clauses pointing at now-unmanaged slots).
+  let managedSnapshot = [];
   try {
     let device;
     if (deviceModel && typeof deviceModel.findOne === 'function') {
@@ -507,6 +553,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     // still owns orphaned onboard timers that must be cleared, not ignored.
     const managedIndexes =
       (device && device.scheduleSyncInfo && device.scheduleSyncInfo.managedTimerIndexes) || [];
+    managedSnapshot = managedIndexes;
 
     if (plan.requiredTimerCount === 0 && plan.rules.length === 0 && managedIndexes.length === 0) {
       summary.status = 'synced';
@@ -526,6 +573,7 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
       summary.conflicts = result.conflicts;
       summary.unsupportedReasons = result.unsupportedReasons;
       summary.error = result.unsupportedReasons[0] || 'Plan cannot be safely applied';
+      await persistOutcome(deviceModel, deviceId, managedIndexes, 'unsupported', summary.error);
       return summary;
     }
 
@@ -679,11 +727,13 @@ async function runSyncDevice(deviceId, { deviceModel = Device, scheduleModel = S
     summary.status = 'failed';
     summary.verificationPassed = false;
     summary.error = lastError ? lastError.message : 'Sync failed after bounded retries';
+    await persistOutcome(deviceModel, deviceId, managedSnapshot, 'failed', summary.error);
     return summary;
   } catch (err) {
     summary.status = 'failed';
     summary.verificationPassed = false;
     summary.error = err.message;
+    await persistOutcome(deviceModel, deviceId, managedSnapshot, 'failed', err.message);
     return summary;
   }
 }
