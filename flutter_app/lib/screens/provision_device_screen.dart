@@ -349,6 +349,17 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // a specific error and stay put (no Restart, no identity change).
   WifiTestResult _wifiTestResult = WifiTestResult.unknown;
 
+/// Names the exact sweep step that failed last, surfaced in the user-facing
+/// error and in logs ("failed step: ssid1-write") instead of an anonymous
+/// "did not accept all settings".
+String _lastFailedStep = '';
+
+_ConfigOutcome _configFail(String step) {
+  _lastFailedStep = step;
+  debugPrint('[PROVISION][SWEEP] FAILED at step: $step');
+  return _ConfigOutcome.configFailed;
+}
+
   // The canonical identity most recently submitted to the backend duplicate
   // gate (`GET /api/devices/check`). The gate runs at AP detection and again
   // in _provision() before the first config command; both calls are over the
@@ -1256,7 +1267,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
       onTimeout: () {
         debugPrint(
             '[PROVISION] config step exceeded ${_configStepDeadline.inMinutes}m deadline');
-        return _ConfigOutcome.configFailed;
+        return _configFail('sweep-timeout-3min');
       },
     );
     if (!mounted) return;
@@ -1278,9 +1289,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     if (outcome != _ConfigOutcome.ok) {
       setState(() {
         _provisioning = false;
-        _error = 'The device did not accept all settings. Power-cycle it (hold '
-            'its button ~10s to factory-reset if it no longer shows the '
-            'tasmota-XXXX access point), then try again.';
+        _error = 'The device did not accept all settings '
+            '(failed step: $_lastFailedStep). Power-cycle it (hold its button '
+            '~10s to factory-reset if it no longer shows the tasmota-XXXX '
+            'access point), then try again.';
       });
       return;
     }
@@ -1393,7 +1405,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   if (brokerHost.isEmpty || brokerPort.isEmpty) {
     debugPrint(
         '[PROVISION] VERIFY FAILED: broker host/port not loaded - aborting');
-    return _ConfigOutcome.configFailed;
+    return _configFail('broker-info-missing');
   }
   debugPrint('[PROVISION] configuring MQTT broker $brokerHost:$brokerPort...');
   final brokerParts = <String>[
@@ -1403,16 +1415,16 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     'MqttHost $brokerHost',
     'MqttPort $brokerPort',
   ];
-  final brokerOk = await _sendCommand('Backlog ${brokerParts.join('; ')}');
+    final brokerOk =
+        await _sendCommand('Backlog ${brokerParts.join('; ')}', requireEcho: true);
   debugPrint('[PROVISION] MQTT broker response=${brokerOk ? 'OK' : 'FAILED'}');
-  if (!brokerOk) return _ConfigOutcome.configFailed;
+    if (!brokerOk) return _configFail('broker-backlog-write');
   _trace.debugTrace(ProvisionPhase.config, label: 'BROKER_VERIFY');
 
   debugPrint('[PROVISION] configuring MQTT identity...');
   final topic = _issuedDeviceId;
   if (topic.isEmpty) {
-    debugPrint('[PROVISION] VERIFY FAILED: no deviceId (MAC not read)');
-    return _ConfigOutcome.configFailed;
+    return _configFail('topic-identity-empty');
   }
   // Pin the topic layout to the default "%prefix%/%topic%/" so the device
   // ALWAYS publishes on tele/<topic>/STATE (and stat/<topic>/...). A leftover
@@ -1429,11 +1441,11 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // identical behavior to the pre-batch code, at worst one extra read-back.
   if (!await _applyIdentityBatched(topic)) {
     if (!await _setDeviceSetting('Topic', topic)) {
-      return _ConfigOutcome.configFailed;
+      return _configFail('topic-sequential');
     }
     _trace.debugTrace(ProvisionPhase.config, label: 'TOPIC_VERIFIED');
     if (!await _setDeviceSetting('FullTopic', '%prefix%/%topic%/')) {
-      return _ConfigOutcome.configFailed;
+      return _configFail('fulltopic-sequential');
     }
     _trace.debugTrace(ProvisionPhase.config, label: 'FULLTOPIC_VERIFIED');
   }
@@ -1449,14 +1461,14 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         '[PROVISION] configuring module $module for ${_deviceType.name} '
         '(${_deviceType.channelCount} relay(s))...');
     if (!await _applyModule(module)) {
-      return _ConfigOutcome.configFailed;
+      return _configFail('module-write-verify');
     }
     _trace.debugTrace(ProvisionPhase.config, label: 'MODULE_VERIFIED');
   }
 
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
-  if (!nameOk) return _ConfigOutcome.configFailed;
+  if (!nameOk) return _configFail('device-name-write');
 
   // Pre-flight Wi-Fi credential validation. The device is still on the setup
   // AP; WifiTest3 runs locally against the network and proves the credentials
@@ -1488,11 +1500,11 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   final wifiSsid = await _sendCommand('SSId1 ${_ssidCtl.text.trim()}');
   debugPrint(
       '[PROVISION] WiFi configuration response(SSId1)=${wifiSsid ? 'OK' : 'FAILED'}');
-  if (!wifiSsid) return _ConfigOutcome.configFailed;
+  if (!wifiSsid) return _configFail('ssid1-write');
   final wifiPass = await _sendCommand('Password1 ${_wifiPassCtl.text}');
   debugPrint(
       '[PROVISION] WiFi configuration response(Password1)=${wifiPass ? 'OK' : 'FAILED'}');
-  if (!wifiPass) return _ConfigOutcome.configFailed;
+  if (!wifiPass) return _configFail('password1-write');
 
   // Read back the exact settings the device claims to have before restarting.
   debugPrint('[PROVISION] verifying persisted settings...');
@@ -1501,11 +1513,15 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     'FullTopic': '%prefix%/%topic%/',
     'MqttHost': brokerHost,
     'MqttPort': brokerPort,
+    // C1: these two were previously write-only (blind success on `{}`).
+    if (_mqttUserCtl.text.trim().isNotEmpty)
+      'MqttUser': _mqttUserCtl.text.trim(),
+    'DeviceName': _deviceNameCtl.text.trim(),
     'SSId1': _ssidCtl.text.trim(),
   };
   for (final entry in checks.entries) {
     if (!await _verifySetting(entry.key, entry.value)) {
-      return _ConfigOutcome.configFailed;
+      return _configFail('${entry.key}-read-back');
     }
   }
   debugPrint('[PROVISION] persisted settings verified');
@@ -1514,7 +1530,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   debugPrint('[PROVISION] sending restart command: Restart 1');
   final restartOk = await _sendCommand('Restart 1');
   _trace.debugTrace(ProvisionPhase.config, label: 'RESTART_SENT_TO_DEVICE');
-  return restartOk ? _ConfigOutcome.ok : _ConfigOutcome.configFailed;
+  return restartOk ? _ConfigOutcome.ok : _configFail('restart-1');
 }
 
   // Writes one setting that Tasmota may react to with a reboot (Topic,
@@ -1524,9 +1540,14 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   Future<bool> _setDeviceSetting(String key, String value) async {
     final ok = await _sendCommand('$key $value');
     debugPrint('[PROVISION] $key write response=${ok ? 'OK' : 'FAILED'}');
-    if (!ok) return false;
+    if (!ok) {
+      _lastFailedStep = '$key-write';
+      return false;
+    }
     await _waitForDeviceOnAp();
-    return _verifySetting(key, value);
+    final verified = _verifySetting(key, value);
+    if (!await verified) _lastFailedStep = '$key-read-back';
+    return verified;
   }
 
   // Writes the physical relay-layout module and verifies the device actually
@@ -1602,34 +1623,88 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   }
 
   // Sends one cmnd command (write or action). A plain HTTP 200 is NOT enough -
-  // Tasmota can wrap a rejected command in 200. Treat any {"Command":{"Error"...}}
-  // body as a hard failure and log everything for diagnostics.
-  Future<bool> _sendCommand(String command) async {
-    try {
-      final uri = Uri.parse('$_deviceUrl/cm').replace(
-        queryParameters: {'cmnd': command},
-      );
-      debugPrint('[PROVISION] HTTP GET $uri');
-      final res = await _httpGet(uri).timeout(const Duration(seconds: 4));
-      final body = res.body.trim();
-      debugPrint('[PROVISION] response status=${res.statusCode} body=$body');
-      if (res.statusCode != 200) return false;
-      if (body.isEmpty) return true;
+  // Tasmota can wrap a rejected command in 200.
+  //
+  // Ack semantics are COMMAND-SPECIFIC (live-hardware verified):
+  //  * Restart-prone single writes (`Topic`, `FullTopic`, `SSId1`,
+  //    `Password1`) answer with a bare `{}` on SUCCESS - the device applies
+  //    the setting and schedules its reboot without echoing. `{}` must be
+  //    ACCEPTED here (default); these commands are safe because each gets a
+  //    dedicated read-back verification afterwards.
+  //  * The broker `Backlog` (non-restart commands) DOES echo resulting
+  //    values; a bare `{}` there is the proven silently-dropped-write
+  //    signature. Call with requireEcho: true -> one settle-retry, then hard
+  //    fail. Rejections (`Command.Error`) always fail immediately.
+  Future<bool> _sendCommand(
+    String command, {
+    bool requireEcho = false,
+    int attempts = 2,
+  }) async {
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      bool? verdict; // null -> retry, true/false -> settled
+      var rawBody = '';
       try {
-        final decoded = jsonDecode(body);
-        if (decoded is Map) {
-          final cmd = decoded['Command'];
-          if (cmd is Map && cmd['Error'] is int && cmd['Error'] != 0) {
-            debugPrint('[PROVISION] COMMAND REJECTED: "$command" -> $body');
-            return false;
+        final uri = Uri.parse('$_deviceUrl/cm').replace(
+          queryParameters: {'cmnd': command},
+        );
+        debugPrint('[PROVISION] HTTP GET $uri');
+        final res = await _httpGet(uri).timeout(const Duration(seconds: 4));
+        rawBody = res.body.trim();
+        debugPrint('[PROVISION] response status=${res.statusCode} body=$rawBody');
+        if (res.statusCode != 200) {
+          verdict = false; // transport-level: retryable
+        } else if (rawBody.isEmpty) {
+          // Truly nothing came back.
+          verdict = requireEcho ? null : true;
+          if (requireEcho) {
+            debugPrint('[PROVISION] empty ack despite requireEcho '
+                '(attempt $attempt/$attempts)');
+          }
+        } else {
+          // Non-empty body. A multi-command Backlog answer is CONCATENATED
+          // JSON (`{"MqttUser":"u"}{"MqttHost":"h"}{"MqttPort":"p"}`) which
+          // jsonDecode cannot parse as one document — and it is a perfectly
+          // valid echoed ack. So: only a decodable single-object body with an
+          // explicit Command.Error is a rejection; EVERYTHING else (echoed
+          // values or concatenated objects) is accepted. Correctness of the
+          // written values is owned by the read-back verifications.
+          Map<dynamic, dynamic>? decoded;
+          try {
+            decoded = jsonDecode(rawBody) as Map<dynamic, dynamic>?;
+          } catch (_) {
+            decoded = null;
+          }
+          final cmdField = decoded?['Command'];
+          if (decoded != null && cmdField is Map && cmdField['Error'] is int && (cmdField['Error'] as int) != 0) {
+            debugPrint('[PROVISION] COMMAND REJECTED: "$command" -> $rawBody');
+            verdict = false;
+          } else if (!requireEcho && isEmptyJsonObject(rawBody)) {
+            debugPrint('[PROVISION] empty-object ack for "$command" - accepted (non-strict)');
+            verdict = true;
+          } else {
+            verdict = true;
           }
         }
-      } catch (_) {}
-      return true;
-    } catch (e) {
-      debugPrint('[PROVISION] exception sending "$command": $e');
-      return false;
+      } catch (e) {
+        debugPrint('[PROVISION] exception sending "$command": $e');
+        verdict = null; // exception: retryable
+      }
+      debugPrint('[PROVISION][CMD] cmd="$command" requireEcho=$requireEcho '
+          'attempt=$attempt verdict=${verdict == null ? "RETRY" : (verdict ? "ACCEPT" : "FAIL")} '
+          'body=$rawBody');
+      if (verdict != null) return verdict;
+      if (attempt < attempts) {
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
     }
+    debugPrint('[PROVISION][CMD] cmd="$command" FAILED after $attempts attempts');
+    return false;
+  }
+
+  /// Matches exactly `{}` (whitespace-tolerant).
+  bool isEmptyJsonObject(String s) {
+    final t = s.trim();
+    return t == '{}';
   }
 
   // Queries a setting (cmnd with no argument) and requires the stored value to
@@ -3087,7 +3162,15 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           subLabel: subLabel,
         ),
         const SizedBox(height: AppSpacing.xl),
-        _section(colors, 'HOME WI-FI'),
+        // U-A: while the config sweep runs, every input above the submit
+        // button is frozen — mid-sequence edits would be half-read by later
+        // commands (e.g. DeviceName written after the user retyped it).
+        IgnorePointer(
+          ignoring: _provisioning,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _section(colors, 'HOME WI-FI'),
         _buildWifiSelector(colors),
         const SizedBox(height: AppSpacing.md),
         if (_manualWifi) ...[
@@ -3153,6 +3236,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                 'Physical MAC',
                 style: GoogleFonts.inter(fontSize: 10, color: colors.mist.withValues(alpha: 0.6)),
               ),
+            ],
+          ),
+        ),
             ],
           ),
         ),

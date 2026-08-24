@@ -327,6 +327,11 @@ class _TasmotaFake {
   /// single-relay module, which the read-back verify must halt on.
   bool ignoresModuleWrite = false;
 
+  /// Values written by `DeviceName` / `MqttUser` commands, echoed back on the
+  /// corresponding read-back (C1 verification).
+  String? deviceName;
+  String? mqttUser;
+
   http.Client get client => MockClient((request) async {
         final cmnd = request.url.queryParameters['cmnd'];
         if (cmnd == null || cmnd.isEmpty) {
@@ -370,6 +375,9 @@ class _TasmotaFake {
       if (cmnd == 'MqttPort') return '{"MqttPort":"$_brokerPort"}';
     }
     if (cmnd == 'SSId1') return '{"SSId1":"TestWifi"}';
+    // C1 read-backs: the wizard now verifies these two writes pre-Restart too.
+    if (cmnd == 'DeviceName') return '{"DeviceName":"${deviceName ?? ''}"}';
+    if (cmnd == 'MqttUser') return '{"MqttUser":"${mqttUser ?? ''}"}';
     // Module read-back. Firmware 15.x answers the bare `Module` command with the
     // name map {"23":"Sonoff 4CH Pro"}. `ignoresModuleWrite` models a device
     // stuck on the stock single-relay module (the bug): the wizard wrote
@@ -379,7 +387,34 @@ class _TasmotaFake {
           ? '{"Module":{"1":"Sonoff Basic"}}'
           : '{"Module":{"23":"Sonoff 4CH Pro"}}';
     }
-    // Any write command accepted.
+    // C1 contract: restart-prone writes answer with a bare `{}` on success
+    // (real 15.5.0 behavior) — accepted because each gets a dedicated
+    // read-back. Values are still STORED so later verifications match.
+    // The broker `Backlog` is requireEcho:true and echoes its written values.
+    if (cmnd == 'Restart 1') return '{"Restart":true}';
+    if (cmnd.startsWith('Backlog')) {
+      final host = RegExp(r'MqttHost ([^;]+)').firstMatch(cmnd)?.group(1)?.trim();
+      final port = RegExp(r'MqttPort ([^;\s]+)').firstMatch(cmnd)?.group(1);
+      final user = RegExp(r'MqttUser ([^;]+)').firstMatch(cmnd)?.group(1)?.trim();
+      if (user != null && user.isNotEmpty) mqttUser = user;
+      return '{"MqttHost":"${host ?? _brokerHost}","MqttPort":"${port ?? _brokerPort}"}';
+    }
+    final spaceIdx = cmnd.indexOf(' ');
+    if (spaceIdx > 0) {
+      final key = cmnd.substring(0, spaceIdx).trim();
+      final value = cmnd.substring(spaceIdx + 1).trim();
+      switch (key) {
+        case 'DeviceName':
+          deviceName = value;
+          break;
+        case 'MqttUser':
+          mqttUser = value;
+          break;
+        default:
+          break;
+      }
+      return '{}'; // real-firmware silent ack for restart-prone writes
+    }
     return '{}';
   }
 
