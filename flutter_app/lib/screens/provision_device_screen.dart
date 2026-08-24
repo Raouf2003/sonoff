@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -663,6 +663,15 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // Single programmatic join to the user-selected SSID: request it via
   // WifiNetworkSpecifier and wait for onAvailable (bounded). Returns true once
   // bound (the 192.168.4.1 probe runs afterwards via _startApDetection).
+  // E: single busy label rendered INSIDE the primary button while joining or
+  // probing — one spinner, one live counter, no duplicate status row.
+  String get _connectBusyLabel {
+    if (_apConnectPending != null) {
+      return '${_apConnectPending!} (${_joinElapsedSec}s)';
+    }
+    return 'Checking device\u2026 (${_probeElapsedSec}s)';
+  }
+
   Future<bool> _connectToApSsid(String ssid) async {
     if (_step != _Step.connect) return false;
     if (mounted) {
@@ -1140,7 +1149,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     setState(() {
       _searching = false;
       _error =
-          "Could not find the device. Make sure you're connected to the Tasmota Wi-Fi and try again.";
+          "Could not find the device. Make sure you're connected to the "
+            "device's setup network and try again.";
     });
     debugPrint('[PROVISION] grace period exhausted, showing final error');
   }
@@ -2772,35 +2782,48 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                         '(tasmota-XXXX) in Wi-Fi Settings, then return here.'
                     : smartConnect
                         ? 'Connect your phone to the device Wi-Fi.\n\n'
-                            "Tap below and pick the device's setup network "
-                            '(tasmota-XXXX) from the list, then tap Continue.'
+                            "Tap below and pick the device's setup network from "
+                            'the list \u2014 it starts with "tasmota-" or shows '
+                            'its device ID.'
                         : 'Connect your phone to the device Wi-Fi.\n\n'
-                            "Tap below, pick the device's access point (tasmota-XXXX), "
-                            'then return here.',
+                            'Tap below, open Wi-Fi Settings and connect to the '
+                            'device\u2019s setup network \u2014 it starts with '
+                            '"tasmota-" or shows its device ID.',
                 style: GoogleFonts.inter(fontSize: 13, color: colors.mist, height: 1.5),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: AppSpacing.xl),
-              // The Connect phase is fully offline: the network-selection action
-              // and Continue are available immediately. No backend session is
-              // ever created before leaving for the offline SoftAP.
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: FilledButton.icon(
-                  onPressed: _connectToDeviceWifi,
-                  icon: Icon(
-                    smartConnect ? Icons.wifi_tethering : Icons.settings_outlined,
-                    size: 18,
+              // U1: exactly ONE filled primary per state.
+              //  a) smartConnect, nothing picked -> filled picker entry +
+              //     outlined Continue (universal advance).
+              //  b) smartConnect + picked        -> selection row (secondary) +
+              //     filled 'Join Device Network'.
+              //  c) manual path                 -> original two filled buttons
+              //     ('Open Wi-Fi Settings' then 'Continue'), unchanged.
+              if (smartConnect && selectedAp == null) ...[
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton.icon(
+                    onPressed: _connectToDeviceWifi,
+                    icon: const Icon(Icons.wifi_tethering, size: 18),
+                    label: const Text('Select Device Wi-Fi'),
+                    style: _filledStyle(colors),
                   ),
-                  label: Text(
-                    smartConnect ? 'Select Device Wi-Fi' : 'Open Wi-Fi Settings',
-                  ),
-                  style: _filledStyle(colors),
                 ),
-              ),
-              if (smartConnect && selectedAp != null) ...[
-                const SizedBox(height: AppSpacing.md),
+                if (!_searching) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: OutlinedButton(
+                      onPressed: _startSearch,
+                      style: _outlinedStyle(colors),
+                      child: Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ],
+              ] else if (smartConnect && selectedAp != null) ...[
                 InkWell(
                   onTap: _connectToApViaPicker,
                   borderRadius: BorderRadius.circular(AppRadius.lg),
@@ -2839,52 +2862,90 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
                     ),
                   ),
                 ),
-              ],
-              const SizedBox(height: AppSpacing.md),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: FilledButton(
-                  onPressed: _searching ? null : _startSearch,
-                  style: _filledStyle(colors),
-                  child: _searching
-                      ? SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
-                        )
-                      : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
-                ),
-              ),
-              if (_searching) ...[
                 const SizedBox(height: AppSpacing.md),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
-                    ),
-                    const SizedBox(width: AppSpacing.sm),
-                    Flexible(
-                      child: Text(
-                        _apConnectPending != null
-                            ? '${_apConnectPending!} (${_joinElapsedSec}s)'
-                            : 'Checking device\u2026 ${_probeElapsedSec}s',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
-                      ),
-                    ),
-                  ],
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton.icon(
+                    onPressed: _searching ? null : _startSearch,
+                    icon: _searching
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
+                        : const Icon(Icons.wifi_outlined, size: 18),
+                    label: Text(_searching ? _connectBusyLabel : 'Join Device Network'),
+                    style: _filledStyle(colors),
+                  ),
+                ),
+              ] else ...[
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton.icon(
+                    onPressed: _openWifiSettings,
+                    icon: const Icon(Icons.settings_outlined, size: 18),
+                    style: _filledStyle(colors),
+                    label: Text('Open Wi-Fi Settings'),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: FilledButton(
+                    onPressed: _searching ? null : _startSearch,
+                    style: _filledStyle(colors),
+                    child: _searching
+                        ? Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
+                              ),
+                              const SizedBox(width: 10),
+                              Flexible(
+                                child: Text(
+                                  _connectBusyLabel,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                            ],
+                          )
+                        : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                  ),
                 ),
               ],
+              // E: the busy label now lives inside the primary button itself —
+              // the old standalone spinner+text row below it is gone.
               if (!_searching && _error != null) ...[
                 const SizedBox(height: AppSpacing.md),
-                Text(
-                  _error!,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(fontSize: 12, color: colors.danger),
+                // U2: errors get the app's banner language (icon + tinted box),
+                // not a bare red paragraph.
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: colors.danger.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    border: Border.all(color: colors.danger.withValues(alpha: 0.35)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.wifi_off_outlined, size: 16, color: colors.danger),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _error!,
+                          style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.45),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 if (recovering) ...[
                   const SizedBox(height: AppSpacing.xl),
@@ -4190,14 +4251,14 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
               ),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
                 decoration: BoxDecoration(
                   color: colors.stream.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
                   'DEVICE',
-                  style: GoogleFonts.sora(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.stream),
+                  style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.stream),
                 ),
               ),
             ],
@@ -4251,7 +4312,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                           height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
                         )
-                      : const Icon(Icons.refresh, size: 20, color: Colors.white),
+                      : Icon(Icons.refresh, size: 20, color: colors.foam),
                 ),
               ],
             ),

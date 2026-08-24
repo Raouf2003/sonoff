@@ -1,4 +1,4 @@
-import 'dart:io';
+﻿import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -495,7 +495,10 @@ DeviceRepositoryService _offlineRepo() => DeviceRepositoryService(
 /// Drives the Connect step: Continue -> AP detection (stabilize delay + probe)
 /// -> identity read -> pre-flight duplicate gate.
 Future<void> _tapContinue(WidgetTester tester) async {
-  await tester.tap(find.text('Continue'));
+  // Taps whichever advance action the current selection state renders:
+  // 'Join Device Network' post-selection, 'Continue' otherwise.
+  final join = find.text('Join Device Network');
+  await tester.tap(join.evaluate().isNotEmpty ? join : find.text('Continue'));
   // Stabilization delay (1.2s) then the async probe + identity + pre-flight.
   await tester.pump(const Duration(milliseconds: 1400));
   await tester.pumpAndSettle();
