@@ -376,6 +376,10 @@ int _sweepStepIndex = -1; // -1 = pre-sweep (reachability/identity/gates)
 int _sweepElapsedSec = 0;
 Timer? _sweepTicker;
 bool _configRetryable = false;
+// C4/P1: true when a WifiTest localError was traced to the PHONE leaving the
+// device setup AP — routes the message to the neutral banner instead of the
+// credential-failure card.
+bool _wifiTestOffline = false;
 
 void _startSweepFeedback() {
   // Widget tests inject a fake HTTP client; their pumpAndSettle can never
@@ -383,6 +387,8 @@ void _startSweepFeedback() {
   if (widget.testHttpClient != null) return;
   _sweepStepIndex = -1;
   _sweepElapsedSec = 0;
+  _configRetryable = false;
+  _wifiTestOffline = false;
   _sweepTicker?.cancel();
   _sweepTicker = Timer.periodic(const Duration(seconds: 1), (_) {
     if (!mounted || !_provisioning) {
@@ -1345,6 +1351,7 @@ String get _sweepProgressLabel {
       }
       setState(() {
         _provisioning = false;
+        _wifiTestOffline = offlineCause;
         _error = offlineCause
             ? 'You\u2019re no longer connected to the device setup network \u2014 '
                 'reconnect to it and continue.'
@@ -3232,9 +3239,12 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         ? (_sweepStepIndex >= 0
             ? 'Step ${_sweepStepIndex + 1}/${_sweepSteps.length} \u2014 ${_sweepSteps[_sweepStepIndex]}'
             : provisionUserLabel(_state))
-        : (_state == ProvisionState.wifiTestFailed && !isWrongPassword
-            ? provisionUserLabel(ProvisionState.wifiTestFailed)
-            : null);
+        : null;
+    // P1: a WifiTest localError traced to the PHONE leaving the AP routes to
+    // the neutral danger banner — the big credential-failure card would lie.
+    final showWifiTestCard = _state == ProvisionState.wifiTestFailed &&
+        !isWrongPassword &&
+        !_wifiTestOffline;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -3245,12 +3255,17 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           subLabel: subLabel,
         ),
         const SizedBox(height: AppSpacing.xl),
-        // U-A: while the config sweep runs, every input above the submit
+        // U-A/P3: while the config sweep runs, every input above the submit
         // button is frozen — mid-sequence edits would be half-read by later
         // commands (e.g. DeviceName written after the user retyped it).
-        IgnorePointer(
-          ignoring: _provisioning,
-          child: Column(
+        // P3: the freeze is also VISIBLE (dimmed) so a tap that does nothing
+        // reads as "locked", not "ignored".
+        AnimatedOpacity(
+          opacity: _provisioning ? 0.55 : 1.0,
+          duration: const Duration(milliseconds: 200),
+          child: IgnorePointer(
+            ignoring: _provisioning,
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _section(colors, 'HOME WI-FI'),
@@ -3325,8 +3340,9 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             ],
           ),
         ),
+      ),
         const SizedBox(height: AppSpacing.xxl),
-        if (_state == ProvisionState.wifiTestFailed && !isWrongPassword) ...[
+        if (showWifiTestCard) ...[
           Container(
             padding: const EdgeInsets.all(AppSpacing.lg),
             decoration: BoxDecoration(
@@ -3396,8 +3412,6 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             ],
           ),
         ] else if (_error != null && !isWrongPassword) ...[
-          // C3: retryable failures get a prominent Try Again; the copy already
-          // explains reachability.
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
@@ -3436,36 +3450,39 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           ],
           const SizedBox(height: AppSpacing.md),
         ],
-        SizedBox(
-          width: double.infinity,
-          height: 50,
-          child: FilledButton(
-            onPressed: _provisioning ? null : _provision,
-            style: _filledStyle(colors),
-            // U-B: in-button live progress (mirrors the header subLabel).
-            child: _provisioning
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
-                      ),
-                      const SizedBox(width: 10),
-                      Flexible(
-                        child: Text(
-                          _sweepProgressLabel,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
+        // P2: when a retry is offered, Try Again IS the resubmit — hide the
+        // standard submit so two filled CTAs never compete.
+        if (!_configRetryable)
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton(
+              onPressed: _provisioning ? null : _provision,
+              style: _filledStyle(colors),
+              // U-B: in-button live progress (mirrors the header subLabel).
+              child: _provisioning
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
                         ),
-                      ),
-                    ],
-                  )
-                : Text('Test Wi-Fi & Continue',
-                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Text(
+                            _sweepProgressLabel,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ],
+                    )
+                  : Text('Test Wi-Fi & Continue',
+                      style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+            ),
           ),
-        ),
         if (_provisioning && _state == ProvisionState.configuringWifiTest) ...[
           const SizedBox(height: AppSpacing.md),
           Text(
