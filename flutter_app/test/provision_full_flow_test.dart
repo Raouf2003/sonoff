@@ -878,7 +878,7 @@ void main() {
               'certified as one');
       expect(api.provisionCalls, 0,
           reason: 'the wrong-module device is never claimed');
-      expect(find.textContaining('did not accept all settings'), findsWidgets,
+      expect(find.textContaining('didn\u2019t accept a setting'), findsWidgets,
           reason: 'the Module read-back mismatch surfaces the errored step');
       expect(tasmota.commands.any((c) => c == 'Restart 1'), isFalse,
           reason: 'the Module verify halt happens BEFORE the final Restart 1');
@@ -1889,7 +1889,7 @@ void main() {
       expect(read(), isNot(true), reason: 'must never pop success');
       expect(api.provisionCalls, 0,
           reason: 'a device on the wrong broker must never be claimed');
-      expect(find.textContaining('did not accept all settings'),
+      expect(find.textContaining('didn\u2019t accept a setting'),
           findsWidgets,
           reason: 'the read-back (MqttHost/MqttPort) failure is surfaced');
       expect(tasmota.commands.any((c) => c == 'Restart 1'), isFalse,

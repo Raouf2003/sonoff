@@ -360,6 +360,50 @@ _ConfigOutcome _configFail(String step) {
   return _ConfigOutcome.configFailed;
 }
 
+// C5/U-B: ordered Configure-sweep steps exposed as "step k/n" progress.
+static const List<String> _sweepSteps = [
+  // C5 fail-fast: the credential gate runs before ANY device mutation.
+  'wifi-test',
+  'broker',
+  'topic',
+  'module',
+  'name',
+  'ssid',
+  'verify',
+  'restart',
+];
+int _sweepStepIndex = -1; // -1 = pre-sweep (reachability/identity/gates)
+int _sweepElapsedSec = 0;
+Timer? _sweepTicker;
+bool _configRetryable = false;
+
+void _startSweepFeedback() {
+  // Widget tests inject a fake HTTP client; their pumpAndSettle can never
+  // settle past a periodic timer, so the live ticker is real-device only.
+  if (widget.testHttpClient != null) return;
+  _sweepStepIndex = -1;
+  _sweepElapsedSec = 0;
+  _sweepTicker?.cancel();
+  _sweepTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+    if (!mounted || !_provisioning) {
+      _sweepTicker?.cancel();
+      return;
+    }
+    setState(() => _sweepElapsedSec += 1);
+  });
+}
+
+void _setSweepStep(int index) => _sweepStepIndex = index;
+
+String get _sweepProgressLabel {
+  if (_sweepStepIndex < 0) {
+    return '${provisionUserLabel(_state)}\u2026 ${_sweepElapsedSec}s';
+  }
+  final i = _sweepStepIndex.clamp(0, _sweepSteps.length - 1);
+  return 'Configuring device \u2014 step ${i + 1}/${_sweepSteps.length} '
+      '(${_sweepSteps[i]}) \u00b7 ${_sweepElapsedSec}s';
+}
+
   // The canonical identity most recently submitted to the backend duplicate
   // gate (`GET /api/devices/check`). The gate runs at AP detection and again
   // in _provision() before the first config command; both calls are over the
@@ -1179,6 +1223,17 @@ _ConfigOutcome _configFail(String step) {
   // ──────────────────────────────────────────────────────────
 
   Future<void> _provision() async {
+    _startSweepFeedback();
+    try {
+      await _provisionInner();
+    } finally {
+      // U-B: the in-button progress ticker belongs to this sweep only; the
+      // Wait step runs its own timers.
+      _sweepTicker?.cancel();
+    }
+  }
+
+  Future<void> _provisionInner() async {
     final name = _deviceNameCtl.text.trim();
     final ssid = _ssidCtl.text.trim();
     if (name.isEmpty) {
@@ -1280,19 +1335,38 @@ _ConfigOutcome _configFail(String step) {
       debugPrint('[PROVISION] Wi-Fi validation failed, staying on Configure');
       traceLog('WIFI_TEST',
           'STAY_ON_CONFIGURE result=${_wifiTestResult.name}');
+      // C4: a WifiTest localError can mean the PHONE left the device AP
+      // mid-test (not bad credentials). Distinguish before messaging.
+      var offlineCause = false;
+      if (_wifiTestResult == WifiTestResult.localError) {
+        final onAp = await _isReachable();
+        if (!mounted) return;
+        offlineCause = !onAp;
+      }
       setState(() {
         _provisioning = false;
-        _error = wifiTestMessage(_wifiTestResult);
+        _error = offlineCause
+            ? 'You\u2019re no longer connected to the device setup network \u2014 '
+                'reconnect to it and continue.'
+            : wifiTestMessage(_wifiTestResult);
       });
       return;
     }
     if (outcome != _ConfigOutcome.ok) {
+      // C3: distinguish "device still reachable → retryable" from "gone →
+      // factory-reset advice" instead of always recommending the reset.
+      final stillOnAp = await _isReachable();
+      if (!mounted) return;
       setState(() {
         _provisioning = false;
-        _error = 'The device did not accept all settings '
-            '(failed step: $_lastFailedStep). Power-cycle it (hold its button '
-            '~10s to factory-reset if it no longer shows the tasmota-XXXX '
-            'access point), then try again.';
+        _configRetryable = stillOnAp;
+        _error = stillOnAp
+            ? 'The device didn\u2019t accept a setting (failed step: '
+                '$_lastFailedStep). It\u2019s still reachable \u2014 try again.'
+            : 'The device did not accept all settings '
+                '(failed step: $_lastFailedStep). Power-cycle it (hold its '
+                'button ~10s to factory-reset if it no longer shows the '
+                'tasmota-XXXX access point), then try again.';
       });
       return;
     }
@@ -1378,15 +1452,15 @@ _ConfigOutcome _configFail(String step) {
 //    and persist reliably, so they stay together in one Backlog.
 //
 //  Strategy:
-//  1) Broker + credentials in ONE Backlog (no restart) -> read-back verify.
-//  2) `Topic` and `FullTopic` EACH standalone; a standalone write persists
+//  1) FAIL-FAST Wi-Fi gate: `WifiTest3 <ssid>+<password>` runs FIRST (AP
+//     mode, non-persisting, non-restarting, no dependency on other writes).
+//     A wrong password costs ~10-20 s and nothing is mutated. On failure the
+//     wizard STAYS on Configure with the same deviceId.
+//  2) Broker + credentials in ONE Backlog (no restart) -> read-back verify.
+//  3) `Topic` and `FullTopic` EACH standalone; a standalone write persists
 //     (proven), but may reboot the device, so after each write we wait for the
 //     device to return on the setup AP and then read the value back.
-//  3) `DeviceName` standalone (no restart).
-//  4) PRE-FLIGHT Wi-Fi validation: `WifiTest3 <ssid>+<password>` (AP mode,
-//     non-persisting, non-restarting) proves the entered home credentials work
-//     BEFORE they are persisted. On failure the wizard STAYS on Configure,
-//     keeps the same deviceId, and never writes SSID/password or sends Restart.
+//  4) `DeviceName` standalone (no restart).
 //  5) Home Wi-Fi credentials LAST (SSId1/Password1) so the device stays on the
 //     setup AP during identity configuration and only leaves it on the final
 //     `Restart 1`, i.e. once it can reach the home router + broker.
@@ -1395,9 +1469,36 @@ _ConfigOutcome _configFail(String step) {
 //     comes online under the expected topic.
 Future<_ConfigOutcome> _sendTasmotaConfig() async {
   await _ensureBoundToWifi();
-  _trace.enter(ProvisionPhase.config, 'BROKER_BACKLOG');
+  _trace.enter(ProvisionPhase.config, 'WIFI_TEST_GATE');
 
-  // Defense in depth: the Connect step already blocks without broker info, but
+  // ── STEP 1/8: Wi-Fi credential gate (fail-fast) ─────────────────────────
+  // Runs BEFORE any device mutation: a wrong password costs ~10-20 s and
+  // nothing else. WifiTest3 has no dependency on Topic/Module/broker writes
+  // (it only tests association+DHCP against the target network while in AP
+  // mode), so first position is both safe and optimal.
+  _setSweepStep(0); // wifi-test
+  debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
+  if (mounted) {
+    setState(() => _state = ProvisionState.configuringWifiTest);
+  }
+  _wifiTestResult = await _runWifiTest(_ssidCtl.text.trim(), _wifiPassCtl.text);
+  if (_wifiTestResult != WifiTestResult.success) {
+    debugPrint('[PROVISION][WIFI_TEST] FAILED result=${_wifiTestResult.name}');
+    _trace.debugTrace(ProvisionPhase.wifi,
+        label: 'WIFI_TEST_FAILED_${_wifiTestResult.name}');
+    if (mounted) {
+      setState(() => _state = ProvisionState.wifiTestFailed);
+    }
+    return _ConfigOutcome.wifiTestFailed;
+  }
+  debugPrint('[PROVISION][WIFI_TEST] SUCCESS - persisting credentials');
+  _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_OK');
+  if (mounted) {
+    setState(() => _state = ProvisionState.wifiTestSucceeded);
+  }
+
+  // ── STEP 2/8: broker + credentials ───────────────────────────────────────
+  _setSweepStep(1); // broker
   // never write an empty/default host if this is somehow reached - a device on
   // Tasmota's factory broker is exactly the bug this guard exists to prevent.
   final brokerHost = _mqttBrokerCtl.text.trim();
@@ -1421,6 +1522,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     if (!brokerOk) return _configFail('broker-backlog-write');
   _trace.debugTrace(ProvisionPhase.config, label: 'BROKER_VERIFY');
 
+  _setSweepStep(2); // topic
   debugPrint('[PROVISION] configuring MQTT identity...');
   final topic = _issuedDeviceId;
   if (topic.isEmpty) {
@@ -1455,6 +1557,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // so picking "4 Relays" but never writing the module leaves a 4-channel
   // device reporting only POWER1 — exactly the bug this fixes. oneRelay writes
   // nothing (a stock Tasmota already exposes one relay).
+  _setSweepStep(3); // module
   final module = _deviceType.tasmotaModule;
   if (module != null) {
     debugPrint(
@@ -1466,37 +1569,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     _trace.debugTrace(ProvisionPhase.config, label: 'MODULE_VERIFIED');
   }
 
+  _setSweepStep(4); // name
   final nameOk = await _sendCommand('DeviceName ${_deviceNameCtl.text.trim()}');
   debugPrint('[PROVISION] DeviceName response=${nameOk ? 'OK' : 'FAILED'}');
   if (!nameOk) return _configFail('device-name-write');
 
-  // Pre-flight Wi-Fi credential validation. The device is still on the setup
-  // AP; WifiTest3 runs locally against the network and proves the credentials
-  // BEFORE SSID1/Password1 are written. A failure stays on Configure with a
-  // Wi-Fi-specific message - no persist, no Restart, same identity.
-debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
-    if (mounted) {
-      setState(() => _state = ProvisionState.configuringWifiTest);
-    }
-    _wifiTestResult = await _runWifiTest(_ssidCtl.text.trim(),
-        _wifiPassCtl.text);
-    if (_wifiTestResult != WifiTestResult.success) {
-      debugPrint('[PROVISION][WIFI_TEST] FAILED '
-          'result=${_wifiTestResult.name}');
-      _trace.debugTrace(ProvisionPhase.wifi,
-          label: 'WIFI_TEST_FAILED_${_wifiTestResult.name}');
-      if (mounted) {
-        setState(() => _state = ProvisionState.wifiTestFailed);
-      }
-      return _ConfigOutcome.wifiTestFailed;
-    }
-    debugPrint('[PROVISION][WIFI_TEST] SUCCESS - persisting credentials');
-    _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_OK');
-    if (mounted) {
-      setState(() => _state = ProvisionState.wifiTestSucceeded);
-    }
-
-    debugPrint('[PROVISION] configuring WiFi...');
+  debugPrint('[PROVISION] configuring WiFi...');
+  _setSweepStep(5); // ssid+password writes
   final wifiSsid = await _sendCommand('SSId1 ${_ssidCtl.text.trim()}');
   debugPrint(
       '[PROVISION] WiFi configuration response(SSId1)=${wifiSsid ? 'OK' : 'FAILED'}');
@@ -1507,6 +1586,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   if (!wifiPass) return _configFail('password1-write');
 
   // Read back the exact settings the device claims to have before restarting.
+  _setSweepStep(6); // verify
   debugPrint('[PROVISION] verifying persisted settings...');
   final checks = <String, String>{
     'Topic': topic,
@@ -1527,6 +1607,7 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
   debugPrint('[PROVISION] persisted settings verified');
   _trace.debugTrace(ProvisionPhase.config, label: 'ALL_VERIFIED');
 
+  _setSweepStep(7); // restart
   debugPrint('[PROVISION] sending restart command: Restart 1');
   final restartOk = await _sendCommand('Restart 1');
   _trace.debugTrace(ProvisionPhase.config, label: 'RESTART_SENT_TO_DEVICE');
@@ -3148,7 +3229,9 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
     final bool isWrongPassword = _state == ProvisionState.wifiTestFailed &&
         _wifiTestResult == WifiTestResult.wrongPassword;
     final subLabel = _provisioning
-        ? provisionUserLabel(_state)
+        ? (_sweepStepIndex >= 0
+            ? 'Step ${_sweepStepIndex + 1}/${_sweepSteps.length} \u2014 ${_sweepSteps[_sweepStepIndex]}'
+            : provisionUserLabel(_state))
         : (_state == ProvisionState.wifiTestFailed && !isWrongPassword
             ? provisionUserLabel(ProvisionState.wifiTestFailed)
             : null);
@@ -3313,11 +3396,44 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
             ],
           ),
         ] else if (_error != null && !isWrongPassword) ...[
-          Text(
-            _error!,
-            textAlign: TextAlign.center,
-            style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.4),
+          // C3: retryable failures get a prominent Try Again; the copy already
+          // explains reachability.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: colors.danger.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              border: Border.all(color: colors.danger.withValues(alpha: 0.35)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, size: 16, color: colors.danger),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _error!,
+                    style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.45),
+                  ),
+                ),
+              ],
+            ),
           ),
+          if (_configRetryable && !_provisioning) ...[
+            const SizedBox(height: AppSpacing.md),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: FilledButton.icon(
+                onPressed: _provisioning ? null : _provision,
+                icon: const Icon(Icons.refresh, size: 18),
+                style: _filledStyle(colors),
+                label: Text('Try Again',
+                    style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+              ),
+            ),
+          ],
           const SizedBox(height: AppSpacing.md),
         ],
         SizedBox(
@@ -3326,11 +3442,25 @@ debugPrint('[PROVISION] running WifiTest3 pre-flight validation...');
           child: FilledButton(
             onPressed: _provisioning ? null : _provision,
             style: _filledStyle(colors),
+            // U-B: in-button live progress (mirrors the header subLabel).
             child: _provisioning
-                ? SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well),
+                      ),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: Text(
+                          _sweepProgressLabel,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
                   )
                 : Text('Test Wi-Fi & Continue',
                     style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
