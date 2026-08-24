@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import 'provision_device_screen.dart';
@@ -13,7 +14,68 @@ class AddDeviceScreen extends StatefulWidget {
 }
 
 class _AddDeviceScreenState extends State<AddDeviceScreen> {
+  static const _wifiChannel = MethodChannel('stees/wifi_settings');
+
   Future<void> _openWizard() async {
+    var wifiOff = false;
+    try {
+      final pre = await _wifiChannel
+          .invokeMethod<Map<dynamic, dynamic>>('wifiPreflight');
+      if (pre != null &&
+          pre.containsKey('wifiEnabled') &&
+          pre['wifiEnabled'] == false) {
+        wifiOff = true;
+      }
+    } catch (_) {
+      // Preflight unavailable (iOS / tests): proceed to wizard.
+    }
+    if (!mounted) return;
+
+    if (wifiOff) {
+      final colors = context.steesColors;
+      final open = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: colors.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text('Wi-Fi is off',
+              style: GoogleFonts.sora(
+                  fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+          content: Text(
+            'Your phone needs Wi-Fi turned on to find and join the device\u2019s '
+            'setup network.',
+            style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('Cancel',
+                  style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text('Turn on Wi-Fi',
+                  style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: colors.stream)),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (open == true) {
+        try {
+          await _wifiChannel.invokeMethod<void>('openInternetPanel');
+        } catch (_) {
+          try {
+            await _wifiChannel.invokeMethod<void>('openWifiSettings');
+          } catch (_) {}
+        }
+      }
+      return;
+    }
+
     final done = await Navigator.of(
       context,
     ).push<bool>(MaterialPageRoute(builder: (_) => const ProvisionDeviceScreen()));

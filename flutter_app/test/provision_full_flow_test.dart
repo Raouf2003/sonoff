@@ -1839,11 +1839,15 @@ void main() {
       // the broker address can NEVER be learned. Provisioning to Tasmota's
       // factory broker is the bug this regression guards against — the wizard
       // must hard-stop BEFORE the user is sent to the offline setup AP.
+      SharedPreferences.setMockInitialValues({});
       final api = _FlowApi()..brokerInfoDown = true;
       final tasmota = _TasmotaFake();
       final read = await _launcher(tester, api, tasmota);
+      // The new cache-seed adds one async hop; settle it before asserting the
+      // blocker banner, which the old wizard rendered synchronously after initState.
+      await tester.pumpAndSettle();
 
-      expect(find.textContaining('Could not load the MQTT broker'),
+      expect(find.textContaining('Could not load the MQTT broker address'),
           findsOneWidget,
           reason: 'the blocking broker error renders on the Connect step');
 
@@ -1851,7 +1855,7 @@ void main() {
 
       expect(find.text('Test Wi-Fi & Continue'), findsNothing,
           reason: 'broker-down must never reach the Configure form');
-      expect(find.textContaining('Could not load the MQTT broker'),
+      expect(find.textContaining('Could not load the MQTT broker address'),
           findsOneWidget,
           reason: 'the blocking error survives the Continue attempt');
       expect(api.provisionCalls, 0, reason: 'nothing is ever claimed');

@@ -17,6 +17,8 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -50,6 +52,10 @@ class MainActivity : FlutterActivity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanRequestCode = 4711
+    // Location-permission request that ONLY answers a preflight check (no
+    // scan side effect).
+    private val preflightPermRequestCode = 4713
+    private var pendingPreflightPermResult: MethodChannel.Result? = null
 
     private val connectivityManager: ConnectivityManager
         get() = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -70,6 +76,20 @@ class MainActivity : FlutterActivity() {
                     "openLocationSettings" -> openLocationSettings(result)
                     "openAppSettings" -> openAppSettings(result)
                     "scanWifi" -> scanWifi(result)
+                    "wifiPreflight" -> result.success(wifiPreflightState())
+                    "ensureScanPermission" -> ensureScanPermission(result)
+                    // In-app system panel (API 29+): bottom-sheet overlay for
+                    // toggling Wi-Fi without leaving the app; pre-API 29 falls
+                    // back to the full Wi-Fi settings screen.
+                    "openInternetPanel" -> {
+                        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY)
+                        } else {
+                            Intent(Settings.ACTION_WIFI_SETTINGS)
+                        }
+                        startActivity(intent)
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -118,6 +138,8 @@ class MainActivity : FlutterActivity() {
         apConnectDisconnect()
         pendingScanResult?.error("ABORTED", "Activity destroyed before Wi-Fi scan finished.", null)
         pendingScanResult = null
+        pendingPreflightPermResult?.error("ABORTED", "Activity destroyed before permission check finished.", null)
+        pendingPreflightPermResult = null
         super.onDestroy()
     }
 
@@ -160,6 +182,14 @@ class MainActivity : FlutterActivity() {
             }
             return
         }
+        if (requestCode == preflightPermRequestCode) {
+            val granted =
+                grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            val result = pendingPreflightPermResult
+            pendingPreflightPermResult = null
+            result?.success(granted)
+            return
+        }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
@@ -197,6 +227,42 @@ class MainActivity : FlutterActivity() {
         )
         startActivity(intent)
         result.success(null)
+    }
+
+    /**
+     * Connect-step preflight: can this phone actually produce a Wi-Fi scan
+     * right now? Reports radio state + location grant WITHOUT side effects so
+     * Dart can explain what's missing before showing an empty scan list.
+     */
+    private fun wifiPreflightState(): Map<String, Any?> {
+        val wifiEnabled = runCatching { wifiManager?.isWifiEnabled }.getOrDefault(false) == true
+        val permission = requiredScanPermission()
+        val granted = permission == null || ContextCompat.checkSelfPermission(
+            this,
+            permission,
+        ) == PackageManager.PERMISSION_GRANTED
+        Log.d("SteesProvision", "[preflight] wifiEnabled=$wifiEnabled locationGranted=$granted")
+        return mapOf(
+            "wifiEnabled" to wifiEnabled,
+            "locationGranted" to granted,
+            "permission" to permission,
+        )
+    }
+
+    /**
+     * Requests ONLY the location permission (no automatic scan afterwards) and
+     * answers `true`/`false`.
+     */
+    private fun ensureScanPermission(result: MethodChannel.Result) {
+        val permission = requiredScanPermission()
+        if (permission == null ||
+            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        ) {
+            result.success(true)
+            return
+        }
+        pendingPreflightPermResult = result
+        ActivityCompat.requestPermissions(this, arrayOf(permission), preflightPermRequestCode)
     }
 
     private fun scanWifi(result: MethodChannel.Result) {
