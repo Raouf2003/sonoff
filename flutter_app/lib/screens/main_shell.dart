@@ -8,6 +8,7 @@ import 'sensors_page.dart';
 import 'schedules_page.dart';
 import 'rules_page.dart';
 import 'login_screen.dart';
+import '../widgets/stees_nav_bar.dart';
 
 
 class MainShell extends StatefulWidget {
@@ -107,14 +108,30 @@ class _MainShellState extends State<MainShell> {
           ),
         ),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.water_drop_outlined), selectedIcon: Icon(Icons.water_drop), label: 'Devices'),
-          NavigationDestination(icon: Icon(Icons.sensors), label: 'Sensors'),
-          NavigationDestination(icon: Icon(Icons.schedule_outlined), selectedIcon: Icon(Icons.schedule), label: 'Schedules'),
-          NavigationDestination(icon: Icon(Icons.rule_outlined), selectedIcon: Icon(Icons.rule), label: 'Rules'),
+      bottomNavigationBar: SteesNavBar(
+        currentIndex: _currentIndex,
+        onTap: (i) => setState(() => _currentIndex = i),
+        items: const [
+          SteesNavItem(
+            icon: Icons.developer_board_outlined,
+            activeIcon: Icons.developer_board,
+            label: 'Devices',
+          ),
+          SteesNavItem(
+            icon: Icons.speed_outlined,
+            activeIcon: Icons.speed,
+            label: 'Sensors',
+          ),
+          SteesNavItem(
+            icon: Icons.update_outlined,
+            activeIcon: Icons.update,
+            label: 'Schedules',
+          ),
+          SteesNavItem(
+            icon: Icons.schema_outlined,
+            activeIcon: Icons.schema,
+            label: 'Rules',
+          ),
         ],
       ),
     );

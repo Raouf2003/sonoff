@@ -561,14 +561,6 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 
-  int get _activeCount {
-    var n = 0;
-    for (int i = 0; i < _deviceChannels; i++) {
-      if (_channelStates[i].reported == 'ON') n++;
-    }
-    return n;
-  }
-
   void _connectSocket() {
     _connectSocketAsync();
   }
@@ -1369,7 +1361,7 @@ class _DevicesPageState extends State<DevicesPage>
   Widget _buildSelectorList(SteesColors colors) {
     if (_devices.length <= 1) return const SizedBox.shrink();
     return SizedBox(
-      height: 38,
+      height: 40,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: _devices.length,
@@ -1381,27 +1373,27 @@ class _DevicesPageState extends State<DevicesPage>
           final ch = d['channels'] as int? ?? 4;
           final selected = id == _selectedDeviceId;
           return GestureDetector(
+            behavior: HitTestBehavior.opaque,
             onTap: () => _selectDevice(id),
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeOut,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOutCubic,
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppRadius.xl),
-                color: colors.submerged,
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                color: selected
+                    ? colors.stream.withValues(alpha: 0.07)
+                    : colors.submerged,
                 border: Border.all(
-                  color: selected
-                      ? colors.stream.withValues(alpha: 0.6)
-                      : colors.border,
-                  width: selected ? 1.5 : 1,
+                  color: selected ? colors.borderActive : colors.border,
+                  width: selected ? 1.4 : 1,
                 ),
-                boxShadow: [AppShadows.cardShadow(colors.border)],
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    Icons.memory,
+                    Icons.developer_board,
                     size: 14,
                     color: selected ? colors.stream : colors.mist,
                   ),
@@ -1425,14 +1417,15 @@ class _DevicesPageState extends State<DevicesPage>
 
   Widget _buildAddButton(SteesColors colors) {
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: _openAddDevice,
       child: Container(
-        width: 38,
-        height: 38,
+        width: 40,
+        height: 40,
         decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: colors.stream.withValues(alpha: 0.1),
-          border: Border.all(color: colors.stream.withValues(alpha: 0.4)),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          color: colors.stream.withValues(alpha: 0.08),
+          border: Border.all(color: colors.stream.withValues(alpha: 0.35)),
         ),
         child: Icon(Icons.add, size: 18, color: colors.stream),
       ),
@@ -1444,86 +1437,124 @@ class _DevicesPageState extends State<DevicesPage>
       _selectedDeviceId ?? _devices.first['deviceId'] as String,
     );
     final name = device['name'] as String? ?? _selectedDeviceId ?? '';
-    final channelsCount = device['channels'] as int? ?? _deviceChannels;
+    final deviceId = device['deviceId'] as String? ?? '';
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
-      padding: const EdgeInsets.all(AppSpacing.lg),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(AppRadius.xxl),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [colors.submerged, colors.surface],
-        ),
-        border: Border.all(
-          color: _isOnline
-              ? colors.stream.withValues(alpha: 0.25)
-              : colors.border,
-        ),
-        boxShadow: [AppShadows.cardShadow(colors.border)],
+        color: colors.submerged,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(color: colors.border),
+        boxShadow: [AppShadows.softShadow(scheme.shadow)],
       ),
-      child: Row(
-        children: [
-          _HeroIcon(connected: _isOnline),
-          const SizedBox(width: AppSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: colors.foam,
+                _HeroIcon(connected: _isOnline),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.sora(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: colors.foam,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        deviceId.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 0.6,
+                          color: colors.mist.withValues(alpha: 0.55),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: AppSpacing.xs),
-                Text(
-                  // When the device is unreachable the flowing count is not
-                  // live truth (it is only the last-known relay states), so the
-                  // summary stops implying current flow and shows zones alone.
-                  _isOnline
-                      ? '$channelsCount zones · $_activeCount flowing'
-                      : '$channelsCount zones',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: colors.mist,
-                  ),
+                _StatusPill(
+                  online: _deviceState.connectivity == Connectivity.online,
+                  offline: _deviceState.connectivity == Connectivity.offline,
+                  lan: showLanBadge(_deviceState, _config, DateTime.now()) ||
+                      // The badge reflects the ACTUAL transport routingPolicy
+                      // will use for a tap (see _toggle:757-763): same-WiFi →
+                      // local control → LAN, regardless of the cloud socket.
+                      // Routing and badge always agree — a stable same-WiFi
+                      // session with the cloud up is controlled locally and
+                      // shows LAN, never ONLINE.
+                      (_monitor.deviceId == _selectedDeviceId &&
+                          _monitor.state.value.sameWifi),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                IconButton(
+                  onPressed: _deleting ? null : _confirmDeleteDevice,
+                  tooltip: 'Delete Device',
+                  icon: _deleting
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2.5, color: colors.danger),
+                        )
+                      : Icon(Icons.delete_outline,
+                          size: 20, color: colors.mist),
                 ),
               ],
             ),
-          ),
-          _StatusPill(
-            online: _deviceState.connectivity == Connectivity.online,
-            offline: _deviceState.connectivity == Connectivity.offline,
-            lan: showLanBadge(_deviceState, _config, DateTime.now()) ||
-                // The badge reflects the ACTUAL transport routingPolicy will
-                // use for a tap (see _toggle:757-763): same-WiFi → local
-                // control → LAN, regardless of the cloud socket. Routing and
-                // badge always agree — a stable same-WiFi session with the
-                // cloud up is controlled locally and shows LAN, never ONLINE.
-                (_monitor.deviceId == _selectedDeviceId &&
-                    _monitor.state.value.sameWifi),
-          ),
-          const SizedBox(width: AppSpacing.xs),
-          IconButton(
-            onPressed: _deleting ? null : _confirmDeleteDevice,
-            tooltip: 'Delete Device',
-            icon: _deleting
-                ? SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2.5, color: colors.danger),
-                  )
-                : Icon(Icons.delete_outline,
-                    size: 20, color: colors.mist),
-          ),
-        ],
+            const SizedBox(height: AppSpacing.sm + 2),
+            Container(height: 1, color: colors.border),
+            const SizedBox(height: AppSpacing.sm),
+            // Channel bus: one LED per relay, mirroring the live grid state.
+            Row(
+              children: [
+                for (int i = 0; i < _deviceChannels; i++) ...[
+                  if (i > 0) const SizedBox(width: AppSpacing.xs),
+                  Expanded(child: _channelLed(colors, i)),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// One LED segment of the hero channel bus, colored from the live channel
+  /// state machine: pending → stream, ON → leaf, OFF → surfaceLight,
+  /// unknown → surface. Pure readout; never fabricated.
+  Widget _channelLed(SteesColors colors, int index) {
+    final s = _channelStates[index];
+    final Color color;
+    if (s.pending) {
+      color = colors.stream;
+    } else if (s.reported == 'ON') {
+      color = colors.leaf;
+    } else if (s.reported == 'OFF') {
+      color = colors.surfaceLight;
+    } else {
+      color = colors.surface;
+    }
+    return Container(
+      height: 5,
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(3),
       ),
     );
   }
@@ -1604,17 +1635,17 @@ class _DevicesPageState extends State<DevicesPage>
       ),
       child: SizedBox(
         width: double.infinity,
-        height: 44,
+        height: 48,
         child: OutlinedButton.icon(
           onPressed: _openSchedules,
-          icon: const Icon(Icons.schedule, size: 16),
+          icon: const Icon(Icons.update, size: 16),
           label: Text(
             'Schedules',
-            style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
+            style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600),
           ),
           style: OutlinedButton.styleFrom(
             foregroundColor: colors.foam,
-            side: BorderSide(color: colors.stream.withValues(alpha: 0.35)),
+            side: BorderSide(color: colors.border),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AppRadius.lg),
             ),
@@ -1633,29 +1664,18 @@ class _HeroIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     return Container(
-      width: 46,
-      height: 46,
+      width: 40,
+      height: 40,
       decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: connected
-              ? [
-                  colors.stream.withValues(alpha: 0.25),
-                  colors.leaf.withValues(alpha: 0.05),
-                ]
-              : [colors.submerged, colors.surface],
-        ),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        color: connected ? colors.stream.withValues(alpha: 0.12) : colors.well,
         border: Border.all(
-          color: connected
-              ? colors.stream.withValues(alpha: 0.35)
-              : colors.border,
+          color: connected ? colors.borderActive : colors.border,
         ),
       ),
       child: Icon(
         connected ? Icons.water_drop : Icons.water_drop_outlined,
-        size: 22,
+        size: 20,
         color: connected ? colors.stream : colors.mist,
       ),
     );
@@ -1697,8 +1717,9 @@ class _StatusPill extends StatelessWidget {
         vertical: 5,
       ),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(20),
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1722,9 +1743,10 @@ class _StatusPill extends StatelessWidget {
           const SizedBox(width: 5),
           Text(
             label,
-            style: GoogleFonts.sora(
-              fontSize: 10,
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 9.5,
               fontWeight: FontWeight.w600,
+              letterSpacing: 0.6,
               color: color,
             ),
           ),
@@ -1769,7 +1791,10 @@ class _WaterCard extends AnimatedWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scale = Curves.easeOutBack.transform(entrance.value);
+    // Reduced motion: skip the entrance pop entirely.
+    final scale = MediaQuery.disableAnimationsOf(context)
+        ? 1.0
+        : Curves.easeOutBack.transform(entrance.value);
     return Transform.scale(
       scale: scale,
       child: _WaterCardBody(
@@ -1872,20 +1897,26 @@ class _WaterCardBodyState extends State<_WaterCardBody>
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 350),
             curve: Curves.easeInOut,
+            // Border-first module: a hairline defines the idle card; a flowing
+            // zone earns the leaf border and a soft glow, nothing else.
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(AppRadius.lg),
               color: widget.offline
                   ? colors.submerged.withValues(alpha: 0.5)
-                  : colors.submerged,
+                  : isOn
+                      ? colors.leaf.withValues(alpha: 0.04)
+                      : colors.submerged,
               border: Border.all(
                 color: widget.offline
                     ? colors.mist.withValues(alpha: 0.5)
                     : isOn
                         ? colors.leaf
                         : colors.border,
-                width: widget.offline ? 1 : (isOn ? 1.2 : 1),
+                width: widget.offline ? 1 : (isOn ? 1.4 : 1),
               ),
-              boxShadow: [AppShadows.cardShadow(colors.border)],
+              boxShadow: isOn && !widget.offline
+                  ? [AppShadows.glow(colors.leaf)]
+                  : const [],
             ),
             padding: const EdgeInsets.fromLTRB(
               AppSpacing.md,
@@ -1899,18 +1930,41 @@ class _WaterCardBodyState extends State<_WaterCardBody>
               children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      c.subtitle,
-                      style: GoogleFonts.inter(
-                        fontSize: 8.5,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.1,
-                        color: widget.offline
-                            ? colors.mist.withValues(alpha: 0.6)
-                            : colors.mist,
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            c.subtitle,
+                            style: GoogleFonts.jetBrainsMono(
+                              fontSize: 8.5,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 1.1,
+                              color: widget.offline
+                                  ? colors.mist.withValues(alpha: 0.6)
+                                  : colors.mist,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            c.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.sora(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: widget.offline
+                                  ? colors.mist
+                                  : colors.foam,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
+                    const SizedBox(width: AppSpacing.xs),
                     _DropletToggle(
                       isOn: isOn,
                       loading: showLoading,
@@ -1920,32 +1974,26 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                     ),
                   ],
                 ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      height: 34,
-                      child: Center(
-                        child: widget.offline
-                            ? Icon(
-                                c.icon,
-                                size: 30,
-                                color: isOn
-                                    ? colors.leaf.withValues(alpha: 0.6)
-                                    : colors.mist.withValues(alpha: 0.35),
-                              )
-                            : _RippleIcon(
-                                icon: c.icon,
-                                size: 30,
-                                color: isOn
-                                    ? colors.leaf
-                                    : colors.mist.withValues(alpha: 0.45),
-                                ripple: widget.ripple,
-                              ),
-                      ),
-                    ),
-                  ],
+                SizedBox(
+                  height: 32,
+                  child: Center(
+                    child: widget.offline
+                        ? Icon(
+                            c.icon,
+                            size: 28,
+                            color: isOn
+                                ? colors.leaf.withValues(alpha: 0.6)
+                                : colors.mist.withValues(alpha: 0.35),
+                          )
+                        : _RippleIcon(
+                            icon: c.icon,
+                            size: 28,
+                            color: isOn
+                                ? colors.leaf
+                                : colors.mist.withValues(alpha: 0.45),
+                            ripple: widget.ripple,
+                          ),
+                  ),
                 ),
                 _buildStatusPill(colors, isOn, isUnknown, widget.pending, widget.desired),
               ],
@@ -2064,6 +2112,9 @@ class _DropletToggle extends StatelessWidget {
               : isOn
                   ? activeColor
                   : colors.surfaceLight,
+          border: isOn
+              ? null
+              : Border.all(color: colors.border),
         ),
         padding: const EdgeInsets.all(2.5),
         child: AnimatedAlign(
@@ -2117,8 +2168,9 @@ class _OfflineBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: colors.mist.withValues(alpha: 0.14),
+        color: colors.mist.withValues(alpha: 0.10),
         borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: colors.mist.withValues(alpha: 0.30)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2127,7 +2179,7 @@ class _OfflineBadge extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             'OFFLINE',
-            style: GoogleFonts.sora(
+            style: GoogleFonts.jetBrainsMono(
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.8,
@@ -2150,8 +2202,9 @@ class _SyncPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
+        color: color.withValues(alpha: 0.10),
         borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2160,7 +2213,7 @@ class _SyncPill extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             label,
-            style: GoogleFonts.sora(
+            style: GoogleFonts.jetBrainsMono(
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.8,
@@ -2181,13 +2234,14 @@ class _FlowPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
-    final bg = isOn ? color.withValues(alpha: 0.14) : colors.surfaceLight;
+    final bg = isOn ? color.withValues(alpha: 0.10) : colors.surfaceLight.withValues(alpha: 0.5);
     final fg = isOn ? color : colors.mist.withValues(alpha: 0.7);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: fg.withValues(alpha: 0.30)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2200,7 +2254,7 @@ class _FlowPill extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             isOn ? 'FLOWING' : 'DRY',
-            style: GoogleFonts.sora(
+            style: GoogleFonts.jetBrainsMono(
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.8,

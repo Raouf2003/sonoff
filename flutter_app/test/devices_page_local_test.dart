@@ -934,6 +934,10 @@ void main() {
 
     // The monitor confirms a different network → cloud-only again.
     monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
+    // The hero panel's channel bus made the page taller; bring the second
+    // grid row into the test viewport before tapping.
+    await tester.ensureVisible(find.text('CHANNEL 3'));
+    await tester.pump();
     await tester.tap(find.text('CHANNEL 3'));
     await tester.pump();
     expect(repo.lastRoute, ControlRoute.cloudOnly);
