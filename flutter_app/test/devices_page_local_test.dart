@@ -756,7 +756,7 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('standalone timeout shows original message, not busy',
+  testWidgets('standalone timeout shows timeout message, not busy',
       (tester) async {
     final repo = _BusyTimeoutRepo(gateControl: false);
     repo.failNextAsBusy = true;
@@ -764,10 +764,14 @@ void main() {
 
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
+    // The error coordinator collects for 700ms before surfacing one toast.
+    await tester.pump(const Duration(milliseconds: 800));
 
+    // Raw backend text never reaches the UI: the approved timeout message
+    // names the channel; the busy message is reserved for rapid-tap bursts.
+    expect(find.text('CH1 did not respond'), findsOneWidget);
     expect(find.text('The device did not confirm the command before timing out.'),
-        findsOneWidget);
+        findsNothing);
     expect(find.text('Device is busy, try again'), findsNothing);
 
     await _unmount(tester);
@@ -824,13 +828,16 @@ void main() {
 
     // A failure clears the intent and degrades to UNKNOWN, never a fake OFF.
     repo.releaseControl.completeError(Exception('nope'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    // The error coordinator collects for 700ms, then surfaces the approved
+    // message — raw backend/exception text never reaches the UI.
+    await tester.pump(const Duration(milliseconds: 800));
 
     expect(find.text('TURNING ON…'), findsNothing);
     expect(
-      find.textContaining('nope'),
-      findsWidgets,
-      reason: 'the failure is surfaced to the user',
+      find.text('CH2 did not respond'),
+      findsOneWidget,
+      reason: 'the failure is surfaced with the approved channel message',
     );
     await _unmount(tester);
   });

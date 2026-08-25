@@ -18,6 +18,10 @@ import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
 
+/// Failure kinds for relay toggle errors. kind + channel form the suppression
+/// signature; only three approved messages ever reach the UI.
+enum _RelayErrorKind { timeout, network, busy }
+
 /// Device-level connectivity, kept SEPARATE from Socket.IO transport state.
 /// `online` requires recent confirmed device evidence; `offline` requires
 /// authoritative LWT Offline or repeated failure evidence; everything else is
@@ -194,6 +198,148 @@ class _DevicesPageState extends State<DevicesPage>
 
   bool get _isOnline => _deviceState.connectivity == Connectivity.online;
   bool get _isOffline => _deviceState.connectivity == Connectivity.offline;
+
+  // ──────────────────────────────────────────────────────────────
+  // Relay error coordinator (view-layer only)
+  //
+  // Rapid relay control must feel quiet: identical failures per channel+kind
+  // are suppressed for a short window, same-burst failures aggregate into ONE
+  // snackbar per kind, snackbars never queue, and raw backend text never
+  // reaches the UI. Card state (TURNING/SYNCING/UNKNOWN/OFFLINE) carries the
+  // live truth; recovery is communicated by state alone, never a toast.
+  // ──────────────────────────────────────────────────────────────
+
+  static const Duration _relayErrorSuppressWindow = Duration(seconds: 5);
+
+  /// Brief collection beat so same-burst failures merge into one toast. Kept
+  /// tight (300ms — the coalesced follow-up gap) so feedback feels instant.
+  static const Duration _relayErrorCollectDelay = Duration(milliseconds: 300);
+
+  /// Minimum spacing between toasts of DIFFERENT kinds (never queue/replace).
+  static const Duration _relayToastSpacing = Duration(seconds: 3);
+
+  final Map<String, DateTime> _relayErrorShownAt = {};
+  final Map<String, Set<int>> _relayErrorPending = {};
+  Timer? _relayErrorToastTimer;
+  DateTime? _relayErrorLastShownAt;
+
+  void _reportRelayFailure(
+    int channel, {
+    required String rawMsg,
+    required bool isBusy,
+  }) {
+    final kind = _classifyRelayFailure(rawMsg: rawMsg, isBusy: isBusy);
+    final now = DateTime.now();
+    final signature = kind == _RelayErrorKind.busy
+        ? _RelayErrorKind.busy.name
+        : '${kind.name}:$channel';
+    final last = _relayErrorShownAt[signature];
+    if (last != null && now.difference(last) < _relayErrorSuppressWindow) {
+      // Identical failure recently surfaced: the card state speaks instead.
+      return;
+    }
+    if (kind == _RelayErrorKind.busy) {
+      // Busy is a device-level condition: throttle only, no aggregation.
+      _relayErrorShownAt[signature] = now;
+      _relayErrorLastShownAt = now;
+      _showRelayFailureSnackBar(kind, const {});
+      return;
+    }
+    (_relayErrorPending[kind.name] ??= <int>{}).add(channel);
+    _relayErrorToastTimer ??=
+        Timer(_relayErrorCollectDelay, _flushRelayErrors);
+  }
+
+  /// Drains one pending kind per slot: same-burst channels aggregate into a
+  /// single message; other kinds wait their turn instead of queueing.
+  void _flushRelayErrors() {
+    _relayErrorToastTimer = null;
+    if (!mounted) return;
+    final now = DateTime.now();
+    if (_relayErrorLastShownAt != null &&
+        now.difference(_relayErrorLastShownAt!) < _relayToastSpacing) {
+      final remaining = _relayToastSpacing - now.difference(_relayErrorLastShownAt!);
+      _relayErrorToastTimer = Timer(remaining, _flushRelayErrors);
+      return;
+    }
+    for (final name in [_RelayErrorKind.timeout.name, _RelayErrorKind.network.name]) {
+      final channels = _relayErrorPending.remove(name);
+      if (channels == null || channels.isEmpty) continue;
+      final kind = name == _RelayErrorKind.timeout.name
+          ? _RelayErrorKind.timeout
+          : _RelayErrorKind.network;
+      final shownAt = DateTime.now();
+      for (final c in channels) {
+        _relayErrorShownAt['${kind.name}:$c'] = shownAt;
+      }
+      _relayErrorLastShownAt = shownAt;
+      _showRelayFailureSnackBar(kind, channels);
+      break;
+    }
+    if (_relayErrorPending.values.any((s) => s.isNotEmpty)) {
+      _relayErrorToastTimer ??= Timer(_relayErrorCollectDelay, _flushRelayErrors);
+    }
+  }
+
+  void _showRelayFailureSnackBar(_RelayErrorKind kind, Set<int> channels) {
+    if (!mounted) return;
+    final colors = context.steesColors;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            _relayErrorText(kind, channels),
+            style: const TextStyle(fontSize: 13),
+          ),
+          backgroundColor: colors.danger,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.md),
+          ),
+          margin: const EdgeInsets.all(AppSpacing.lg),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
+  String _relayErrorText(_RelayErrorKind kind, Set<int> channels) {
+    switch (kind) {
+      case _RelayErrorKind.busy:
+        return 'Device is busy, try again';
+      case _RelayErrorKind.network:
+        return 'Could not reach the device';
+      case _RelayErrorKind.timeout:
+        final sorted = channels.toList()..sort();
+        final who = sorted.isEmpty
+            ? 'Channel'
+            : sorted.map((c) => 'CH$c').join(', ');
+        return '$who did not respond';
+    }
+  }
+
+  /// Maps a raw failure to one of the three approved kinds. Raw text never
+  /// reaches the UI; unclassified errors fall to the timeout message, which
+  /// is always truthful from the operator's chair (the relay did not change).
+  _RelayErrorKind _classifyRelayFailure({
+    required String rawMsg,
+    required bool isBusy,
+  }) {
+    final lower = rawMsg.toLowerCase();
+    final ackLike = lower.contains('did not acknowledge') ||
+        lower.contains('did not confirm') ||
+        lower.contains('unconfirmed');
+    if (isBusy && ackLike) return _RelayErrorKind.busy;
+    if (lower.contains('network') ||
+        lower.contains('could not reach') ||
+        lower.contains('socket') ||
+        lower.contains('connection') ||
+        lower.contains('unavailable') ||
+        lower.contains('failed host lookup')) {
+      return _RelayErrorKind.network;
+    }
+    return _RelayErrorKind.timeout;
+  }
 
   /// The single controlled writer for CHANNEL state: runs the pure reducer and
   /// applies its [FollowUp] hints (pending-indicator timers, ripples, reconcile
@@ -383,6 +529,8 @@ class _DevicesPageState extends State<DevicesPage>
     _badgeSettleTimer?.cancel();
     _cloudHealthTimer?.cancel();
     _cloudHealthTimer = null;
+    _relayErrorToastTimer?.cancel();
+    _relayErrorToastTimer = null;
     _monitor.state.removeListener(_onReachabilityChanged);
     _monitor.dispose();
     // Cancel all pending indicator timers.
@@ -961,17 +1109,10 @@ class _DevicesPageState extends State<DevicesPage>
         // Detect busy-from-rapid-tapping: this timeout follows a coalesced
         // burst (either this op was itself a coalesced follow-up, or a
         // follow-up was queued for this channel, or a follow-up timer is
-        // pending). In that case the generic 5s ACK message is misleading —
-        // show "Device is busy" instead.
+        // pending). The coordinator maps it to the approved busy message.
         final isBusy = _coalescedFollowUpKeys.contains(key) ||
             _coalescedTarget.containsKey(key) ||
             _followUpTimers.containsKey(key);
-        final msg = isBusy &&
-                (rawMsg.contains('did not acknowledge') ||
-                    rawMsg.contains('did not confirm') ||
-                    rawMsg.contains('UNCONFIRMED'))
-            ? 'Device is busy, try again'
-            : rawMsg;
         _dispatchChannel(index, Timeout(channel), DateTime.now());
         if (socketConfirmed) {
           // The device already confirmed a newer state (e.g. via tele/STATE)
@@ -980,10 +1121,9 @@ class _DevicesPageState extends State<DevicesPage>
           ControlTimeline.mark(opId, _selectedDeviceId!, channel,
               'REST failed but socket confirmed');
         } else {
-          // Connectivity is NOT decided here: a single command failure is weak
-          // evidence and the reconcile poll below re-establishes truth from the
-          // device report (or the repeated-failure threshold).
-          _showError(msg);
+          // Coordinator decides: suppress, aggregate, or show one of the
+          // three approved messages. Raw text never reaches the UI.
+          _reportRelayFailure(channel, rawMsg: rawMsg, isBusy: isBusy);
         }
         _fetchStatus(silent: true); // reconcile
       }
@@ -1087,18 +1227,21 @@ class _DevicesPageState extends State<DevicesPage>
   void _showError(String msg) {
     if (!mounted) return;
     final colors = context.steesColors;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg, style: const TextStyle(fontSize: 13)),
-        backgroundColor: colors.danger,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
+    // One-off action errors (device delete etc.): never queue — latest wins.
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg, style: const TextStyle(fontSize: 13)),
+          backgroundColor: colors.danger,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.md),
+          ),
+          margin: const EdgeInsets.all(AppSpacing.lg),
+          duration: const Duration(seconds: 3),
         ),
-        margin: const EdgeInsets.all(AppSpacing.lg),
-        duration: const Duration(seconds: 3),
-      ),
-    );
+      );
   }
 
   Future<void> _openAddDevice() async {
