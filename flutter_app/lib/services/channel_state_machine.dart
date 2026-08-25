@@ -842,6 +842,48 @@ bool showLanBadge(
       freshLocal;
 }
 
+/// Display-only badge resolution. Pure mapping from the existing verdict
+/// state onto the five approved labels — the reducer, LWT handling, routing
+/// and anti-flap stickiness are never consulted or changed here.
+///
+/// Contract:
+/// - [StatusBadgeKind.online]  — cloud confirmed up + device reachable
+/// - [StatusBadgeKind.lan]     — local path active (cloud up or down)
+/// - [StatusBadgeKind.lanOnly] — device marked offline but local path verified
+/// - [StatusBadgeKind.syncing] — unknown, or cloud down with no local evidence
+/// - [StatusBadgeKind.offline] — offline verdict, no local path
+///
+/// Green "Online" is therefore impossible while the cloud is confirmed down
+/// without fresh local evidence.
+enum StatusBadgeKind { online, lan, lanOnly, syncing, offline }
+
+StatusBadgeKind resolveStatusBadge(
+  DeviceConnectivityState state,
+  ChannelReducerConfig config,
+  DateTime now, {
+  required bool localVerified,
+}) {
+  final freshLocal = state.lastLocalEvidenceAt != null &&
+      now.difference(state.lastLocalEvidenceAt!) < config.localHold;
+  // "Local path active" = the monitor's verified same-WiFi session, or fresh
+  // local evidence while the cloud is confirmed down (the established
+  // showLanBadge semantics). Fresh local evidence alone never relabels a
+  // cloud-up state.
+  final local = localVerified ||
+      (state.cloud == CloudReachability.down && freshLocal);
+  switch (state.connectivity) {
+    case Connectivity.offline:
+      return local ? StatusBadgeKind.lanOnly : StatusBadgeKind.offline;
+    case Connectivity.online:
+      if (state.cloud == CloudReachability.down) {
+        return local ? StatusBadgeKind.lan : StatusBadgeKind.syncing;
+      }
+      return local ? StatusBadgeKind.lan : StatusBadgeKind.online;
+    case Connectivity.syncing:
+      return StatusBadgeKind.syncing;
+  }
+}
+
 /// Evaluates cloud reachability from the socket's live signal. The socket
 /// connects when the backend is reachable and disconnects on a confirmed
 /// outage, so the badge and the local-evidence holder can derive from it

@@ -38,8 +38,11 @@ void main() {
         (tester) async {
       await pumpWizard(tester);
 
+      // The instructions render as a numbered checklist under the phase
+      // header; the manual path names Wi-Fi Settings in step 2.
+      expect(find.text('Join the device network'), findsOneWidget);
       expect(
-          find.textContaining('Connect your phone to the device Wi-Fi.'),
+          find.textContaining('Open Wi-Fi Settings and join that network.'),
           findsOneWidget);
       expect(find.text('Open Wi-Fi Settings'), findsOneWidget);
       expect(find.text('Continue'), findsOneWidget);

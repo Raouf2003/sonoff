@@ -106,22 +106,64 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
               children: [
                 const SizedBox(height: 20),
                 Container(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.all(AppSpacing.lg),
                   decoration: BoxDecoration(
                     color: colors.submerged,
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                    border: Border.all(color: colors.border),
                   ),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.water_drop_outlined, size: 40, color: colors.stream.withValues(alpha: 0.5)),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Use the guided wizard to configure a new device. '
-                        'The device ID is generated automatically — no manual entry needed.',
-                        style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
-                        textAlign: TextAlign.center,
+                      Row(
+                        children: [
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                              color: colors.well,
+                              border: Border.all(color: colors.border),
+                            ),
+                            child: Icon(Icons.water_drop_outlined,
+                                size: 20, color: colors.stream),
+                          ),
+                          const SizedBox(width: AppSpacing.md),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Add a device',
+                                  style: GoogleFonts.sora(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                      color: colors.foam),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'GUIDED SETUP',
+                                  style: GoogleFonts.jetBrainsMono(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w500,
+                                    letterSpacing: 0.6,
+                                    color: colors.mist.withValues(alpha: 0.55),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.md),
+                      Text(
+                        'Wi-Fi must be turned on on your phone \u2014 the '
+                        'wizard needs it to find and join the device\u2019s '
+                        'setup network.',
+                        style: GoogleFonts.inter(
+                            fontSize: 12.5, height: 1.5, color: colors.mist),
+                      ),
+                      const SizedBox(height: AppSpacing.lg),
                       SizedBox(
                         width: double.infinity, height: 50,
                         child: FilledButton.icon(
@@ -131,7 +173,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                           style: FilledButton.styleFrom(
                             backgroundColor: colors.stream,
                             foregroundColor: colors.well,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
                           ),
                         ),
                       ),

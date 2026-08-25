@@ -552,14 +552,21 @@ String get _sweepProgressLabel {
     if (!mounted) return;
     switch (_step) {
       case _Step.connect:
-        // Returning from Wi-Fi Settings (or the foreground) restarts AP
-        // detection from a clean slate. No session exists to recreate - the
-        // Connect phase is offline by design.
+        // Toggling Wi-Fi off/on no longer auto-starts checking. The user must
+        // explicitly tap Continue — this keeps the button visible, lets the
+        // permission / Wi-Fi enable prompt appear first, and avoids the
+        // "checking auto without permission" failure.
         debugPrint(
-            '[PROVISION] phase=$_phaseLabel lifecycle resumed - rechecking Tasmota AP');
-        _startApDetection();
+            '[PROVISION] phase=$_phaseLabel lifecycle resumed - waiting for explicit Continue');
+        if (mounted) {
+          setState(() {
+            _searching = false;
+          });
+        }
+        break;
       case _Step.provision:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped (configuring)');
+        break;
       case _Step.waiting:
         debugPrint('[PROVISION] phase=$_phaseLabel lifecycle resumed - AP probe skipped: provisioning already completed');
         if (_isTerminal) {
@@ -570,6 +577,7 @@ String get _sweepProgressLabel {
         }
         _waitTimer?.cancel();
         _pollDeviceSeen();
+        break;
       case _Step.localControl:
         debugPrint(
             '[PROVISION] phase=$_phaseLabel lifecycle resumed - local setup persists');
@@ -2922,40 +2930,87 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         const SizedBox(height: AppSpacing.xl),
         _PhaseProgress(active: 0, colors: colors),
         const SizedBox(height: AppSpacing.xl),
+        // Border-first panel: a header names the phase, the instructions read
+        // as a numbered checklist, actions live at the bottom.
         Container(
-          padding: const EdgeInsets.all(AppSpacing.xxl),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           decoration: BoxDecoration(
             color: colors.submerged,
-            borderRadius: BorderRadius.circular(AppRadius.xl),
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(color: colors.border),
           ),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                recovering ? Icons.wifi_tethering : Icons.wifi_outlined,
-                size: 40,
-                color: colors.stream.withValues(alpha: 0.5),
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      color: colors.well,
+                      border: Border.all(color: colors.border),
+                    ),
+                    child: Icon(
+                      recovering ? Icons.wifi_tethering : Icons.wifi_outlined,
+                      size: 20,
+                      color: colors.stream,
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          recovering
+                              ? 'Reconnect device Wi-Fi'
+                              : 'Join the device network',
+                          style: GoogleFonts.sora(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: colors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'STEP 1 OF 3',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.6,
+                            color: colors.mist.withValues(alpha: 0.55),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: AppSpacing.md),
-              Text(
-                recovering
-                    ? 'Reconnect to your device Wi-Fi.\n\n'
-                        'Your device ID is kept - this is a Wi-Fi correction, not a '
-                        'new registration.\n\n'
-                        'Power-cycle the device, pick its access point '
-                        '(tasmota-XXXX) in Wi-Fi Settings, then return here.'
+              const SizedBox(height: AppSpacing.lg),
+              _ConnectStepLine(
+                index: 1,
+                text: 'Power on the device \u2014 its setup network starts '
+                    'with "tasmota-" or shows its device ID.',
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              _ConnectStepLine(
+                index: 2,
+                text: recovering
+                    ? 'Join tasmota-XXXX in Wi-Fi Settings.'
                     : smartConnect
-                        ? 'Connect your phone to the device Wi-Fi.\n\n'
-                            "Tap below and pick the device's setup network from "
-                            'the list \u2014 it starts with "tasmota-" or shows '
-                            'its device ID.'
-                        : 'Connect your phone to the device Wi-Fi.\n\n'
-                            'Tap below, open Wi-Fi Settings and connect to the '
-                            'device\u2019s setup network \u2014 it starts with '
-                            '"tasmota-" or shows its device ID.',
-                style: GoogleFonts.inter(fontSize: 13, color: colors.mist, height: 1.5),
-                textAlign: TextAlign.center,
+                        ? 'Pick that network from the list below.'
+                        : 'Open Wi-Fi Settings and join that network.',
               ),
-              const SizedBox(height: AppSpacing.xl),
+              const SizedBox(height: AppSpacing.sm),
+              _ConnectStepLine(
+                index: 3,
+                text: recovering
+                    ? 'Return here \u2014 your device ID is kept; this is a '
+                        'Wi-Fi correction, not a new registration.'
+                    : 'Return here and continue.',
+              ),
+              const SizedBox(height: AppSpacing.lg),
               // U1: exactly ONE filled primary per state.
               //  a) smartConnect, nothing picked -> filled picker entry +
               //     outlined Continue (universal advance).
@@ -2964,38 +3019,56 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
               //  c) manual path                 -> original two filled buttons
               //     ('Open Wi-Fi Settings' then 'Continue'), unchanged.
               if (smartConnect && selectedAp == null) ...[
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: FilledButton.icon(
-                    onPressed: _connectToDeviceWifi,
-                    icon: const Icon(Icons.wifi_tethering, size: 18),
-                    label: const Text('Select Device Wi-Fi'),
-                    style: _filledStyle(colors),
-                  ),
-                ),
-                if (!_searching) ...[
-                  const SizedBox(height: AppSpacing.sm),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: OutlinedButton(
-                      onPressed: _startSearch,
-                      style: _outlinedStyle(colors),
-                      child: Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: FilledButton.icon(
+                        onPressed: _connectToDeviceWifi,
+                        icon: const Icon(Icons.wifi_tethering, size: 18),
+                        label: const Text('Select Device Wi-Fi'),
+                        style: _filledStyle(colors),
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: AppSpacing.sm),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: OutlinedButton(
+                        onPressed: _searching ? null : _startSearch,
+                        style: _outlinedStyle(colors),
+                        child: _searching
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: colors.mist),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      _connectBusyLabel,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: colors.mist),
+                                    ),
+                                  ),
+                                ],
+                              )
+                            : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                      ),
+                    ),
               ] else if (smartConnect && selectedAp != null) ...[
                 InkWell(
                   onTap: _connectToApViaPicker,
-                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: AppSpacing.lg, vertical: AppSpacing.md),
                     decoration: BoxDecoration(
                       color: colors.well,
-                      borderRadius: BorderRadius.circular(AppRadius.lg),
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      border: Border.all(color: colors.borderActive),
                     ),
                     child: Row(
                       children: [
@@ -3013,8 +3086,10 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                               const SizedBox(height: 2),
                               Text(
                                 selectedAp,
-                                style: GoogleFonts.inter(
-                                    fontSize: 14, color: colors.foam),
+                                style: GoogleFonts.jetBrainsMono(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: colors.foam),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ],
@@ -3082,6 +3157,30 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   ),
                 ),
               ],
+              const SizedBox(height: AppSpacing.md),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: colors.stream.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  border: Border.all(color: colors.stream.withValues(alpha: 0.20)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.lightbulb_outline, size: 16, color: colors.stream),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'If you do not find the device, turn Wi-Fi off and back on, then try again. '
+                        'If you still do not find it, turn the device\u2019s power off and on rapidly 6 to 7 times to reset it.',
+                        style: GoogleFonts.inter(fontSize: 12, color: colors.mist, height: 1.45),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               // E: the busy label now lives inside the primary button itself —
               // the old standalone spinner+text row below it is gone.
               if (!_searching && _error != null) ...[
@@ -3255,21 +3354,69 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           subLabel: subLabel,
         ),
         const SizedBox(height: AppSpacing.xl),
-        // U-A/P3: while the config sweep runs, every input above the submit
-        // button is frozen — mid-sequence edits would be half-read by later
-        // commands (e.g. DeviceName written after the user retyped it).
-        // P3: the freeze is also VISIBLE (dimmed) so a tap that does nothing
-        // reads as "locked", not "ignored".
-        AnimatedOpacity(
-          opacity: _provisioning ? 0.55 : 1.0,
-          duration: const Duration(milliseconds: 200),
-          child: IgnorePointer(
-            ignoring: _provisioning,
-            child: Column(
+        Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: colors.submerged,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(color: colors.border),
+          ),
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _section(colors, 'HOME WI-FI'),
-        _buildWifiSelector(colors),
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      color: colors.well,
+                      border: Border.all(color: colors.border),
+                    ),
+                    child: Icon(Icons.settings_outlined, size: 20, color: colors.stream),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Configure the device',
+                          style: GoogleFonts.sora(
+                              fontSize: 16, fontWeight: FontWeight.w700, color: colors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'STEP 2 OF 3',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.6,
+                            color: colors.mist.withValues(alpha: 0.55),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              // U-A/P3: while the config sweep runs, every input above the submit
+              // button is frozen — mid-sequence edits would be half-read by later
+              // commands (e.g. DeviceName written after the user retyped it).
+              // P3: the freeze is also VISIBLE (dimmed) so a tap that does nothing
+              // reads as "locked", not "ignored".
+              AnimatedOpacity(
+                opacity: _provisioning ? 0.55 : 1.0,
+                duration: const Duration(milliseconds: 200),
+                child: IgnorePointer(
+                  ignoring: _provisioning,
+                  child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _section(colors, 'HOME WI-FI'),
+              _buildWifiSelector(colors),
         const SizedBox(height: AppSpacing.md),
         if (_manualWifi) ...[
           _Field(
@@ -3305,7 +3452,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
           decoration: BoxDecoration(
             color: colors.well,
-            borderRadius: BorderRadius.circular(AppRadius.lg),
+            borderRadius: BorderRadius.circular(AppRadius.md),
+            border: Border.all(color: colors.border),
           ),
           child: Row(
             children: [
@@ -3324,15 +3472,28 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       _issuedDeviceId.isEmpty
                           ? 'read from the device when it connects'
                           : _issuedDeviceId,
-                      style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
+                      style: GoogleFonts.jetBrainsMono(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
+                          color: colors.foam),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
-              Text(
-                'Physical MAC',
-                style: GoogleFonts.inter(fontSize: 10, color: colors.mist.withValues(alpha: 0.6)),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: colors.surfaceLight,
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                ),
+                child: Text(
+                  'MAC',
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: colors.mist),
+                ),
               ),
             ],
           ),
@@ -3341,6 +3502,9 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           ),
         ),
       ),
+            ],
+          ),
+        ),
         const SizedBox(height: AppSpacing.xxl),
         if (showWifiTestCard) ...[
           Container(
@@ -3509,18 +3673,31 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // manual entry fallback for hidden/unlisted networks.
   Widget _buildWifiSelector(SteesColors colors) {
     final selected = _ssidCtl.text.trim();
+    final hasSelection = selected.isNotEmpty;
     return InkWell(
       onTap: _openWifiPicker,
-      borderRadius: BorderRadius.circular(AppRadius.lg),
+      borderRadius: BorderRadius.circular(AppRadius.md),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
         decoration: BoxDecoration(
           color: colors.well,
-          borderRadius: BorderRadius.circular(AppRadius.lg),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(
+            color: hasSelection ? colors.borderActive : colors.border,
+          ),
         ),
         child: Row(
           children: [
-            Icon(Icons.wifi, size: 18, color: colors.mist),
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+                color: colors.submerged,
+                border: Border.all(color: colors.border),
+              ),
+              child: Icon(Icons.wifi, size: 16, color: hasSelection ? colors.stream : colors.mist),
+            ),
             const SizedBox(width: AppSpacing.md),
             Expanded(
               child: Column(
@@ -3532,8 +3709,16 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    selected.isEmpty ? 'Select Wi-Fi network' : selected,
-                    style: GoogleFonts.inter(fontSize: 14, color: selected.isEmpty ? colors.mist : colors.foam),
+                    hasSelection ? selected : 'Select Wi-Fi network',
+                    overflow: TextOverflow.ellipsis,
+                    style: hasSelection
+                        ? GoogleFonts.jetBrainsMono(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.2,
+                            color: colors.foam,
+                          )
+                        : GoogleFonts.inter(fontSize: 13, color: colors.mist.withValues(alpha: 0.6)),
                   ),
                 ],
               ),
@@ -3940,15 +4125,62 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     return FilledButton.styleFrom(
       backgroundColor: colors.stream,
       foregroundColor: colors.well,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
     );
   }
 
   ButtonStyle _outlinedStyle(SteesColors colors) {
     return OutlinedButton.styleFrom(
       foregroundColor: colors.foam,
-      side: BorderSide(color: colors.stream.withValues(alpha: 0.4)),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
+      side: BorderSide(color: colors.border),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+    );
+  }
+}
+
+/// One numbered instruction line of the Connect checklist.
+class _ConnectStepLine extends StatelessWidget {
+  final int index;
+  final String text;
+
+  const _ConnectStepLine({required this.index, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 18,
+          height: 18,
+          margin: const EdgeInsets.only(top: 1),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: colors.mist.withValues(alpha: 0.35)),
+          ),
+          child: Text(
+            '$index',
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+              color: colors.mist,
+            ),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        Expanded(
+          child: Text(
+            text,
+            style: GoogleFonts.inter(
+              fontSize: 12.5,
+              height: 1.45,
+              color: colors.mist,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -3968,28 +4200,102 @@ class _PhaseProgress extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const labels = ['Connect', 'Configure', 'Wait'];
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final baseDur = reduceMotion ? Duration.zero : const Duration(milliseconds: 620);
+    const curve = Curves.easeInOutCubic;
+    final progress = active / (labels.length - 1);
     return Column(
       children: [
-        Row(
-          children: List.generate(labels.length, (i) {
-            final state = i < active
-                ? _PhaseDone.done
-                : (i == active ? _PhaseDone.current : _PhaseDone.todo);
-            return Expanded(
-              child: _PhaseItem(
-                label: labels[i],
-                step: i + 1,
-                state: state,
-                colors: colors,
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Continuous professional track — background + animated foreground that glides.
+            Positioned(
+              top: 15,
+              left: 36,
+              right: 36,
+              child: Stack(
+                children: [
+                  Container(
+                    height: 2,
+                    decoration: BoxDecoration(
+                      color: colors.border,
+                      borderRadius: BorderRadius.circular(1),
+                    ),
+                  ),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween<double>(end: progress.clamp(0, 1)),
+                    duration: baseDur,
+                    curve: curve,
+                    builder: (context, t, _) => FractionallySizedBox(
+                      widthFactor: t,
+                      alignment: Alignment.centerLeft,
+                      child: Container(
+                        height: 2,
+                        decoration: BoxDecoration(
+                          color: colors.stream,
+                          borderRadius: BorderRadius.circular(1),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            );
-          }),
+            ),
+            Row(
+              children: List.generate(labels.length, (i) {
+                final state = i < active
+                    ? _PhaseDone.done
+                    : (i == active ? _PhaseDone.current : _PhaseDone.todo);
+                return Expanded(
+                  child: _PhaseItem(
+                    label: labels[i],
+                    step: i + 1,
+                    state: state,
+                    colors: colors,
+                    reduceMotion: reduceMotion,
+                  ),
+                );
+              }),
+            ),
+          ],
         ),
         if (subLabel != null) ...[
           const SizedBox(height: AppSpacing.sm),
-          Text(
-            subLabel!,
-            style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
+          AnimatedSwitcher(
+            duration: baseDur,
+            switchInCurve: curve,
+            switchOutCurve: curve,
+            child: Container(
+              key: ValueKey(subLabel),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: colors.stream.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+                border: Border.all(color: colors.stream.withValues(alpha: 0.18)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.8, color: colors.stream),
+                  ),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      subLabel!,
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: colors.stream,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ],
@@ -4004,55 +4310,102 @@ class _PhaseItem extends StatelessWidget {
   final int step;
   final _PhaseDone state;
   final SteesColors colors;
+  final bool reduceMotion;
 
   const _PhaseItem({
     required this.label,
     required this.step,
     required this.state,
     required this.colors,
+    this.reduceMotion = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final activeColor =
-        state == _PhaseDone.done ? colors.stream : colors.mist.withValues(alpha: 0.55);
-    final activeFont =
-        state == _PhaseDone.todo ? colors.mist.withValues(alpha: 0.45) : colors.foam;
+    final isCurrent = state == _PhaseDone.current;
+    final isDone = state == _PhaseDone.done;
+    final activeFont = state == _PhaseDone.todo
+        ? colors.mist.withValues(alpha: 0.5)
+        : isCurrent
+            ? colors.stream
+            : colors.foam;
+    final dur = reduceMotion ? Duration.zero : const Duration(milliseconds: 480);
     return Column(
       children: [
-        Container(
-          width: 26,
-          height: 26,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: state == _PhaseDone.done
-                ? colors.stream.withValues(alpha: 0.15)
-                : colors.well,
-            border: Border.all(
-              color: state == _PhaseDone.todo
-                  ? colors.mist.withValues(alpha: 0.25)
-                  : activeColor,
-              width: state == _PhaseDone.current ? 2 : 1,
+        TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: isCurrent ? 0.88 : 1, end: 1),
+          duration: dur,
+          curve: Curves.easeOutBack,
+          builder: (context, scale, child) => Transform.scale(scale: scale, child: child),
+          child: AnimatedContainer(
+            duration: dur,
+            curve: Curves.easeInOutCubic,
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isDone
+                  ? colors.stream
+                  : isCurrent
+                      ? colors.stream
+                      : colors.submerged,
+              border: Border.all(
+                color: isDone
+                    ? colors.stream
+                    : isCurrent
+                        ? colors.stream
+                        : colors.border,
+                width: isDone || isCurrent ? 0 : 1.2,
+              ),
+              boxShadow: isCurrent
+                  ? [BoxShadow(color: colors.stream.withValues(alpha: 0.32), blurRadius: 12, spreadRadius: 1)]
+                  : isDone
+                      ? [BoxShadow(color: colors.stream.withValues(alpha: 0.18), blurRadius: 8)]
+                      : null,
+            ),
+            child: AnimatedSwitcher(
+              duration: dur,
+              switchInCurve: Curves.easeInOutCubic,
+              switchOutCurve: Curves.easeInOutCubic,
+              transitionBuilder: (child, anim) =>
+                  ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
+              child: isDone
+                  ? Icon(Icons.check_rounded, key: const ValueKey('done'), size: 16, color: colors.well)
+                  : Center(
+                      key: ValueKey('step-$step-$isCurrent'),
+                      child: Text(
+                        '$step',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                          color: isCurrent
+                              ? colors.well
+                              : isDone
+                                  ? colors.well
+                                  : colors.mist,
+                        ),
+                      ),
+                    ),
             ),
           ),
-          child: state == _PhaseDone.done
-              ? Icon(Icons.check, size: 15, color: colors.stream)
-              : Text(
-                  '$step',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.sora(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: state == _PhaseDone.todo
-                        ? colors.mist.withValues(alpha: 0.5)
-                        : colors.foam,
-                  ),
-                ),
         ),
-        const SizedBox(height: AppSpacing.xs),
-        Text(
-          label,
-          style: GoogleFonts.inter(fontSize: 11, color: activeFont),
+        const SizedBox(height: 7),
+        AnimatedDefaultTextStyle(
+          duration: dur,
+          curve: Curves.easeInOutCubic,
+          style: GoogleFonts.inter(
+            fontSize: 11,
+            fontWeight: isCurrent
+                ? FontWeight.w700
+                : isDone
+                    ? FontWeight.w600
+                    : FontWeight.w500,
+            letterSpacing: isCurrent ? 0.1 : 0,
+            color: activeFont,
+          ),
+          child: Text(label),
         ),
       ],
     );
@@ -4592,23 +4945,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                   actionLabel: 'Allow in App Settings',
                   onAction: _openAppSettingsAndRescan,
                 ),
-              if (!_networks.any((n) => isDeviceApSsid(n.name)))
-                Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: colors.sunlight.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    border: Border.all(color: colors.sunlight.withValues(alpha: 0.3)),
-                  ),
-                  child: Text(
-                    'Don\u2019t see your device? Power-cycle it (hold its button '
-                    '\u2248 5 s) until its LED blinks, then tap refresh. Setup networks '
-                    'start with \u201ctasmota-\u201d or show the device ID.',
-                    style: GoogleFonts.inter(fontSize: 11.5, color: colors.mist.withValues(alpha: 0.9)),
-                  ),
-                ),
+
               ConstrainedBox(
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.45,

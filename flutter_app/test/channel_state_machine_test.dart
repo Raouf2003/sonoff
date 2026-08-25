@@ -797,4 +797,83 @@ void main() {
       expect(showLanBadge(s, config, t0), isFalse);
     });
   });
+
+  group('resolveStatusBadge', () {
+    DeviceConnectivityState onlineState({CloudReachability cloud = CloudReachability.up}) {
+      var s = const DeviceConnectivityState();
+      s = deviceReduce(s, LocalReport(rep('ON', updatedAt: t0)), config, now: t0).state;
+      return deviceReduce(s, CloudHealth(cloud), config, now: t0).state;
+    }
+
+    DeviceConnectivityState offlineState() {
+      var s = const DeviceConnectivityState();
+      s = deviceReduce(s, LocalReport(rep('ON', updatedAt: t0)), config, now: t0).state;
+      return deviceReduce(s, LwtOffline(t0), config, now: t0).state;
+    }
+
+    test('cloud up + reachable + no local → online (green)', () {
+      expect(
+        resolveStatusBadge(onlineState(), config, t0, localVerified: false),
+        StatusBadgeKind.online,
+      );
+    });
+
+    test('cloud up + local path active → lan', () {
+      expect(
+        resolveStatusBadge(onlineState(), config, t0, localVerified: true),
+        StatusBadgeKind.lan,
+      );
+    });
+
+    test('cloud down + fresh local evidence → lan (never green)', () {
+      expect(
+        resolveStatusBadge(
+          onlineState(cloud: CloudReachability.down),
+          config,
+          t0.add(const Duration(seconds: 5)),
+          localVerified: false,
+        ),
+        StatusBadgeKind.lan,
+      );
+    });
+
+    test('cloud down + no fresh local evidence → syncing (never green)', () {
+      expect(
+        resolveStatusBadge(
+          onlineState(cloud: CloudReachability.down),
+          config,
+          t0.add(const Duration(minutes: 2)),
+          localVerified: false,
+        ),
+        StatusBadgeKind.syncing,
+      );
+    });
+
+    test('offline verdict + local verified → lanOnly', () {
+      expect(
+        resolveStatusBadge(offlineState(), config, t0, localVerified: true),
+        StatusBadgeKind.lanOnly,
+      );
+    });
+
+    test('offline verdict + no local path → offline', () {
+      expect(
+        resolveStatusBadge(offlineState(), config, t0, localVerified: false),
+        StatusBadgeKind.offline,
+      );
+    });
+
+    test('unknown verdict → syncing regardless of cloud/local', () {
+      final s = deviceReduce(
+        const DeviceConnectivityState(),
+        CloudHealth(CloudReachability.down),
+        config,
+        now: t0,
+      ).state;
+      expect(
+        resolveStatusBadge(s, config, t0, localVerified: true),
+        StatusBadgeKind.syncing,
+      );
+    });
+  });
 }

@@ -153,6 +153,35 @@ class _DevicesPageState extends State<DevicesPage>
 
   Timer? _statusTimer;
 
+  /// Accelerated local probing while the cloud is CONFIRMED down and the
+  /// device is on the verified same WiFi. The 15s poll cadence would take
+  /// ~45-55s to accumulate the offline evidence; at 5s the truth (LAN/LAN
+  /// ONLY while alive, OFFLINE once the local path fails) lands in ~15-25s.
+  /// Pure cadence: every tick flows through the unchanged reducer paths.
+  Timer? _fastLocalProbeTimer;
+
+  static const _fastLocalProbeInterval = Duration(seconds: 5);
+
+  /// Starts/stops the fast probe so it runs exactly while
+  /// `cloud down + sameWifi verified + not already offline`. Idempotent.
+  void _updateFastLocalProbe() {
+    final shouldRun = mounted &&
+        _selectedDeviceId != null &&
+        _deviceState.cloud == CloudReachability.down &&
+        _deviceState.connectivity != Connectivity.offline &&
+        _monitor.deviceId == _selectedDeviceId &&
+        _monitor.state.value.sameWifi;
+    if (shouldRun) {
+      _fastLocalProbeTimer ??= Timer.periodic(
+        _fastLocalProbeInterval,
+        (_) => _fetchStatus(silent: true),
+      );
+    } else {
+      _fastLocalProbeTimer?.cancel();
+      _fastLocalProbeTimer = null;
+    }
+  }
+
   /// Debounces the BADGE's visual representation of ReachabilityState. Rapid
   /// writes during a network transition (socket drop → local-status result →
   /// socket reconnect → debounced probe) collapse into one render. Routing
@@ -370,6 +399,8 @@ class _DevicesPageState extends State<DevicesPage>
     final r = deviceReduce(_deviceState, event, _config, now: now);
     _deviceState = r.state;
     setState(() {});
+    // An OFFLINE verdict ends the investigation: stop the fast probe.
+    _updateFastLocalProbe();
   }
 
   /// Applies the reducer's follow-up hints for a channel event. Timers, ripples
@@ -479,6 +510,7 @@ class _DevicesPageState extends State<DevicesPage>
     if (reach != _deviceState.cloud) {
       _dispatchDevice(CloudHealth(reach), now);
     }
+    _updateFastLocalProbe();
   }
 
   // Stops every ripple so an OFF channel is never left animating.
@@ -531,6 +563,8 @@ class _DevicesPageState extends State<DevicesPage>
     _cloudHealthTimer = null;
     _relayErrorToastTimer?.cancel();
     _relayErrorToastTimer = null;
+    _fastLocalProbeTimer?.cancel();
+    _fastLocalProbeTimer = null;
     _monitor.state.removeListener(_onReachabilityChanged);
     _monitor.dispose();
     // Cancel all pending indicator timers.
@@ -559,6 +593,9 @@ class _DevicesPageState extends State<DevicesPage>
 
   void _onReachabilityChanged() {
     if (!mounted) return;
+    // The fast local probe follows the live same-WiFi verdict directly (no
+    // need to wait for the badge settle debounce — probing is not visual).
+    _updateFastLocalProbe();
     // UI-only settle: the badge re-renders only after ReachabilityState has
     // been stable for [kBadgeSettleDelay], so a burst of writes during a
     // transition shows ONE badge change instead of a flicker per write. This
@@ -1631,19 +1668,15 @@ class _DevicesPageState extends State<DevicesPage>
                     ],
                   ),
                 ),
-                _StatusPill(
-                  online: _deviceState.connectivity == Connectivity.online,
-                  offline: _deviceState.connectivity == Connectivity.offline,
-                  lan: showLanBadge(_deviceState, _config, DateTime.now()) ||
-                      // The badge reflects the ACTUAL transport routingPolicy
-                      // will use for a tap (see _toggle:757-763): same-WiFi →
-                      // local control → LAN, regardless of the cloud socket.
-                      // Routing and badge always agree — a stable same-WiFi
-                      // session with the cloud up is controlled locally and
-                      // shows LAN, never ONLINE.
-                      (_monitor.deviceId == _selectedDeviceId &&
-                          _monitor.state.value.sameWifi),
+              _StatusPill(
+                kind: resolveStatusBadge(
+                  _deviceState,
+                  _config,
+                  DateTime.now(),
+                  localVerified: _monitor.deviceId == _selectedDeviceId &&
+                      _monitor.state.value.sameWifi,
                 ),
+              ),
                 const SizedBox(width: AppSpacing.xs),
                 IconButton(
                   onPressed: _deleting ? null : _confirmDeleteDevice,
@@ -1826,34 +1859,26 @@ class _HeroIcon extends StatelessWidget {
 }
 
 class _StatusPill extends StatelessWidget {
-  final bool online;
+  /// Resolved display state — see `resolveStatusBadge`. Green styling is
+  /// reserved for online/lan; LAN ONLY renders grey like offline because the
+  /// cloud is unavailable even though local control works.
+  final StatusBadgeKind kind;
 
-  /// Authoritative device-offline verdict (LWT or repeated poll failures).
-  final bool offline;
-
-  /// Local Mode badge: Online styling + the transport routingPolicy will use
-  /// for a tap (same-WiFi → local control) or, for the cloud-down case, fresh
-  /// local evidence. Never derived from "the last request ran on the LAN".
-  final bool lan;
-
-  const _StatusPill({
-    required this.online,
-    required this.offline,
-    required this.lan,
-  });
+  const _StatusPill({required this.kind});
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
-    final isOnline = online;
-    final color = isOnline ? colors.leaf : colors.mist;
-    final label = lan
-        ? 'LAN'
-        : isOnline
-            ? 'Online'
-            : offline
-                ? 'Offline'
-                : 'SYNCING';
+    final isGreen = kind == StatusBadgeKind.online ||
+        kind == StatusBadgeKind.lan;
+    final color = isGreen ? colors.leaf : colors.mist;
+    final label = switch (kind) {
+      StatusBadgeKind.online => 'Online',
+      StatusBadgeKind.lan => 'LAN',
+      StatusBadgeKind.lanOnly => 'LAN ONLY',
+      StatusBadgeKind.offline => 'Offline',
+      StatusBadgeKind.syncing => 'SYNCING',
+    };
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.sm + 2,
@@ -1873,7 +1898,7 @@ class _StatusPill extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: color,
-              boxShadow: isOnline
+              boxShadow: isGreen
                   ? [
                       BoxShadow(
                         color: color.withValues(alpha: 0.35),

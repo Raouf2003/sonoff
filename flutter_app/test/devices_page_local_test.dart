@@ -399,6 +399,22 @@ class _StatusFailingRepo extends _FakeRepo {
   }
 }
 
+/// Every status read fails (local ladder and cloud alike) — models a device
+/// that is gone while the phone still holds a verified same-WiFi verdict.
+class _StatusAlwaysFailingRepo extends _FakeRepo {
+  @override
+  Future<RelayStatusResult> getStatus(
+    String deviceId, {
+    bool cloudDown = false,
+  }) async {
+    statusCalls++;
+    throw const ApiException(
+      'Could not reach the server',
+      code: 'NETWORK_ERROR',
+    );
+  }
+}
+
 /// Repository that succeeds until [failNext] is set, then throws ONCE before
 /// succeeding again — models a transient status failure with valid device
 /// evidence already present.
@@ -1536,12 +1552,102 @@ void main() {
       socket.fireDisconnect();
       await tester.pump();
 
+      // A Socket.IO transport drop is not device-offline evidence — but it is
+      // a confirmed cloud outage, so the badge must stop implying a healthy
+      // cloud connection: SYNCING, never green Online while the cloud is down
+      // without fresh local evidence.
       expect(
         find.text('Online'),
-        findsOneWidget,
-        reason: 'a Socket.IO transport drop is not device-offline evidence',
+        findsNothing,
+        reason: 'cloud confirmed down without local evidence must not read green Online',
       );
+      expect(find.text('SYNCING'), findsOneWidget);
       expect(find.text('Offline'), findsNothing);
+
+      await _unmount(tester);
+    });
+
+    testWidgets(
+      'cloud down + sameWifi → fast local probes converge to OFFLINE quickly',
+      (tester) async {
+        final repo = _StatusAlwaysFailingRepo();
+        final socket = _ScriptableSocket();
+        final monitor = ReachabilityMonitor(repo);
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+          monitor: monitor,
+        );
+
+        expect(find.text('Offline'), findsNothing);
+
+        // Confirmed cloud outage, then a verified local path: the fast probe
+        // cadence (5s) engages instead of the 15s poll.
+        socket.fireDisconnect();
+        await tester.pump();
+        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+        await tester.pump();
+
+        // Fast ticks at ~5s and ~10s supply the 3rd consecutive failure —
+        // the OFFLINE verdict lands in ~11s instead of ~45s. The badge reads
+        // LAN ONLY while the sticky same-WiFi verdict persists, then OFFLINE
+        // once the monitor downgrades it.
+        await tester.pump(const Duration(seconds: 11));
+        await tester.pump();
+
+        expect(
+          find.text('LAN ONLY'),
+          findsOneWidget,
+          reason: 'three fast LOCAL failures with a verified same-WiFi path '
+              'are strong offline evidence (verdict offline, local still '
+              'sticky)',
+        );
+        // Cadence proof: the third probe (first FAST tick) arrived within the
+        // window — a 15s-only cadence would still be at 2 calls here. The
+        // timer then self-stops at the OFFLINE verdict.
+        expect(repo.statusCalls, greaterThanOrEqualTo(3));
+
+        // When the local verdict finally downgrades, the badge completes the
+        // transition to plain OFFLINE.
+        monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(find.text('Offline'), findsOneWidget);
+
+        await _unmount(tester);
+      },
+    );
+
+    testWidgets('fast local probes stop once the cloud recovers', (tester) async {
+      final repo = _FakeRepo();
+      final socket = _ScriptableSocket();
+      final monitor = ReachabilityMonitor(repo);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        monitor: monitor,
+      );
+
+      socket.fireDisconnect();
+      await tester.pump();
+      monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      final callsDuringFastCadence = repo.statusCalls;
+      expect(
+        callsDuringFastCadence,
+        greaterThanOrEqualTo(3),
+        reason: 'fast cadence must be engaged while the cloud is down',
+      );
+
+      // Cloud recovers: the fast timer must be cancelled. The reconnect
+      // reconcile adds exactly one more read; the 15s poll is not yet due.
+      socket.fireConnect();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      expect(repo.statusCalls, callsDuringFastCadence + 1);
 
       await _unmount(tester);
     });
