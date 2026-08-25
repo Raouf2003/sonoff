@@ -62,6 +62,7 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
           deviceId: deviceId,
           deviceName: _nameOf(deviceId),
           maxChannel: _channelsOf(deviceId),
+          siblings: _schedulesOf(deviceId),
         ),
       ),
     );
@@ -70,6 +71,7 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
     final deviceId = schedule['deviceId'] as String;
+    final id = schedule['_id'] as String?;
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
@@ -77,6 +79,9 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
           deviceName: _nameOf(deviceId),
           maxChannel: _channelsOf(deviceId),
           existing: schedule,
+          // Exclude the schedule under edit so it can't conflict with itself.
+          siblings:
+              _schedulesOf(deviceId).where((s) => s['_id'] != id).toList(),
         ),
       ),
     );

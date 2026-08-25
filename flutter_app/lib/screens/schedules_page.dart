@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
+import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
 import '../widgets/window_timeline.dart';
@@ -184,6 +185,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
           deviceId: deviceId,
           deviceName: _nameOf(deviceId),
           maxChannel: _channelsOf(deviceId),
+          siblings: _schedulesOf(deviceId),
         ),
       ),
     );
@@ -193,6 +195,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
     final deviceId = schedule['deviceId'] as String;
+    final id = schedule['_id'] as String?;
     final result = await Navigator.of(context).push<Object?>(
       MaterialPageRoute(
         builder: (_) => ScheduleFormScreen(
@@ -200,6 +203,9 @@ class _SchedulesPageState extends State<SchedulesPage> {
           deviceName: _nameOf(deviceId),
           maxChannel: _channelsOf(deviceId),
           existing: schedule,
+          // Exclude the schedule under edit so it can't conflict with itself.
+          siblings:
+              _schedulesOf(deviceId).where((s) => s['_id'] != id).toList(),
         ),
       ),
     );
@@ -343,11 +349,12 @@ class _SchedulesPageState extends State<SchedulesPage> {
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
         padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, AppSpacing.xxxl),
-        itemCount: _devices.length,
+        itemCount: _devices.length + 1,
         itemBuilder: (_, i) {
-          final deviceId = _devices[i]['deviceId'] as String;
+          if (i == 0) return _buildPageTitle(context.steesColors);
+          final deviceId = _devices[i - 1]['deviceId'] as String;
           return _DeviceSection(
-            device: _devices[i],
+            device: _devices[i - 1],
             schedules: _schedulesOf(deviceId),
             watches: _syncWatches
                 .where((w) => w.schedule['deviceId'] == deviceId)
@@ -361,10 +368,28 @@ class _SchedulesPageState extends State<SchedulesPage> {
       ),
     );
   }
+  Widget _buildPageTitle(SteesColors colors) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.xs,
+        AppSpacing.sm,
+        AppSpacing.xs,
+        AppSpacing.md,
+      ),
+      child: Text(
+        'SCHEDULES',
+        style: GoogleFonts.sora(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.8,
+          color: colors.mist,
+        ),
+      ),
+    );
+  }
 }
 
-_SyncWatch? _watchById(List<_SyncWatch> watches, String? id) {
-  if (id == null) return null;
+_SyncWatch? _watchById(List<_SyncWatch> watches, String? id) {  if (id == null) return null;
   for (final w in watches) {
     if (w.scheduleId == id) return w;
   }
@@ -389,53 +414,6 @@ class _DeviceSection extends StatelessWidget {
     required this.onToggle,
     required this.onDelete,
   });
-
-  /// Chip treatment for edit/toggle: the old schedule config remains valid on
-  /// the device until the new sync lands, so the card stays FULLY normal and
-  /// interactive — only a small corner chip communicates convergence.
-  Widget _chipOverlay(BuildContext context, _ScheduleTile tile, _SyncWatch watch) {
-    final colors = context.steesColors;
-    final offline = watch.phase == 'offline';
-    return Stack(
-      children: [
-        tile,
-        Positioned(
-          top: 6,
-          right: 6,
-          child: Tooltip(
-            message: _syncWatchLabel(watch) ?? '',
-            preferBelow: false,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: (offline ? colors.mist : colors.sunlight).withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                  color: (offline ? colors.mist : colors.sunlight).withValues(alpha: 0.5),
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(_syncWatchIcon(watch), size: 10, color: offline ? colors.mist : colors.sunlight),
-                  const SizedBox(width: 4),
-                  Text(
-                    offline ? 'DEVICE OFFLINE' : 'UPDATING\u2026',
-                    style: GoogleFonts.jetBrainsMono(
-                      fontSize: 8.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.1,
-                      color: offline ? colors.mist : colors.sunlight,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -475,7 +453,9 @@ class _DeviceSection extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'CH1\u2013CH$channels',
+                        schedules.isEmpty
+                            ? 'CH1\u2013CH$channels'
+                            : 'CH1\u2013CH$channels  \u00b7  ${schedules.length} ${schedules.length == 1 ? 'schedule' : 'schedules'}',
                         style: GoogleFonts.jetBrainsMono(
                           fontSize: 9.5,
                           fontWeight: FontWeight.w500,
@@ -503,23 +483,29 @@ class _DeviceSection extends StatelessWidget {
           ),
           const SizedBox(height: AppSpacing.md),
           if (schedules.isEmpty && watches.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppRadius.md),
-                border: Border.all(color: colors.border),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.schedule_outlined, size: 14, color: colors.mist.withValues(alpha: 0.5)),
-                  const SizedBox(width: AppSpacing.sm),
-                  Text(
-                    'No schedules for this device',
-                    style: GoogleFonts.inter(fontSize: 12.5, color: colors.mist.withValues(alpha: 0.6)),
-                  ),
-                ],
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onAdd,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  border: Border.all(color: colors.border),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.schedule_outlined, size: 14, color: colors.mist.withValues(alpha: 0.5)),
+                    const SizedBox(width: AppSpacing.sm),
+                    Text(
+                      'No schedules for this device',
+                      style: GoogleFonts.inter(fontSize: 12.5, color: colors.mist.withValues(alpha: 0.6)),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Icon(Icons.add, size: 14, color: colors.stream.withValues(alpha: 0.7)),
+                  ],
+                ),
               ),
             )
           else
@@ -541,16 +527,13 @@ class _DeviceSection extends StatelessWidget {
                       return _buildDimmedWatchCard(ctx, watch);
                     }
                     // edit/toggle: old config stays valid — normal
-                    // interactive card + corner chip only.
-                    return _chipOverlay(
-                      ctx,
-                      _ScheduleTile(
-                        schedule: schedule,
-                        onEdit: () => onEdit(schedule),
-                        onToggle: () => onToggle(schedule),
-                        onDelete: () => onDelete(schedule),
-                      ),
-                      watch,
+                    // interactive card with an inline sync tag.
+                    return _ScheduleTile(
+                      schedule: schedule,
+                      onEdit: () => onEdit(schedule),
+                      onToggle: () => onToggle(schedule),
+                      onDelete: () => onDelete(schedule),
+                      watch: watch,
                     );
                   }),
                   if (i < schedules.length - 1 || watches.any((w) => w.kind == 'delete'))
@@ -574,11 +557,16 @@ class _ScheduleTile extends StatefulWidget {
   final VoidCallback onToggle;
   final VoidCallback onDelete;
 
+  /// Non-null while an edit/toggle sync is converging: the tile renders an
+  /// inline sync tag in its header instead of an external corner overlay.
+  final _SyncWatch? watch;
+
   const _ScheduleTile({
     required this.schedule,
     required this.onEdit,
     required this.onToggle,
     required this.onDelete,
+    this.watch,
   });
 
   @override
@@ -596,6 +584,9 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     final enabled = (s['enabled'] as bool?) ?? false;
     final channels = (s['channels'] as List<dynamic>? ?? []).map((c) => 'CH$c').join(', ');
     final windows = _scheduleWindows(s);
+    final ranges = s['timeRanges'] as List<dynamic>? ?? const [];
+    final heroRange = ranges.isNotEmpty ? _rangeText(ranges.first) : '--:--';
+    final extraRanges = ranges.length > 1 ? '+${ranges.length - 1}' : null;
 
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
@@ -606,27 +597,56 @@ class _ScheduleTileState extends State<_ScheduleTile> {
         duration: const Duration(milliseconds: 120),
         child: SteesCard(
           active: enabled,
-          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.sm),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Time-first: the window IS the card's face, in the data face.
               Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Expanded(
                     child: Text(
-                      s['name'] as String? ?? '',
+                      heroRange,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.sora(fontSize: 14.5, fontWeight: FontWeight.w600, color: colors.foam),
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 23,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5,
+                        color: enabled ? colors.stream : colors.mist.withValues(alpha: 0.8),
+                      ),
                     ),
                   ),
+                  if (extraRanges != null) ...[
+                    const SizedBox(width: AppSpacing.sm),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: colors.surfaceLight.withValues(alpha: 0.7),
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
+                      ),
+                      child: Text(
+                        extraRanges,
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: colors.mist,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (widget.watch != null) ...[
+                    const SizedBox(width: AppSpacing.sm),
+                    _SyncTag(watch: widget.watch!),
+                  ],
                   const SizedBox(width: AppSpacing.sm),
                   SteesActiveTag(active: enabled),
                 ],
               ),
-              const SizedBox(height: 3),
+              const SizedBox(height: 4),
               Text(
-                '$channels  \u00b7  ${_recurrenceSummary(s)}',
+                _metaLine(s, channels),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: GoogleFonts.jetBrainsMono(
@@ -667,6 +687,24 @@ class _ScheduleTileState extends State<_ScheduleTile> {
         ),
       ),
     );
+  }
+
+  static String _rangeText(dynamic r) {
+    if (r is! Map) return '--:--';
+    final start = r['start'] as String? ?? '--:--';
+    final end = r['end'] as String? ?? '--:--';
+    return '$start\u2013$end';
+  }
+
+  /// Meta readout under the hero time: name (when present), channels,
+  /// recurrence — so same-hour programs stay distinguishable.
+  String _metaLine(Map<String, dynamic> s, String channels) {
+    final parts = <String>[
+      if ((s['name'] as String? ?? '').isNotEmpty) s['name'] as String,
+      channels,
+      _recurrenceSummary(s),
+    ];
+    return parts.join('  \u00b7  ');
   }
 
   String _recurrenceSummary(Map<String, dynamic> schedule) {
@@ -784,7 +822,6 @@ Widget _buildDimmedWatchCard(
               overflow: TextOverflow.ellipsis,
               style: GoogleFonts.inter(
                 fontSize: 11,
-                fontStyle: FontStyle.italic,
                 color: colors.mist.withValues(alpha: 0.85),
               ),
             ),
@@ -793,4 +830,48 @@ Widget _buildDimmedWatchCard(
       ),
     ],
   );
+}
+
+/// Inline sync tag for edit/toggle convergence: lives in the tile's own
+/// header row (next to the Active/Off tag) instead of a corner overlay.
+/// Long-form wording stays available through the tooltip.
+class _SyncTag extends StatelessWidget {
+  final _SyncWatch watch;
+
+  const _SyncTag({required this.watch});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    final offline = watch.phase == 'offline';
+    final color = offline ? colors.mist : colors.sunlight;
+    return Tooltip(
+      message: _syncWatchLabel(watch) ?? '',
+      preferBelow: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(_syncWatchIcon(watch), size: 9, color: color),
+            const SizedBox(width: 4),
+            Text(
+              offline ? 'OFFLINE' : 'UPDATING\u2026',
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.8,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

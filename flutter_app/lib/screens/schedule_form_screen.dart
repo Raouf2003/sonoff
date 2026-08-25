@@ -10,12 +10,18 @@ class ScheduleFormScreen extends StatefulWidget {
   final String deviceName;
   final int maxChannel;
   final Map<String, dynamic>? existing;
+
+  /// Other schedules already saved for this device (the caller excludes the
+  /// one being edited). Used purely client-side to block overlapping windows
+  /// on the same channel + day before a save reaches the backend.
+  final List<Map<String, dynamic>> siblings;
   const ScheduleFormScreen({
     super.key,
     required this.deviceId,
     required this.deviceName,
     this.maxChannel = 4,
     this.existing,
+    this.siblings = const [],
   });
 
   @override
@@ -23,7 +29,6 @@ class ScheduleFormScreen extends StatefulWidget {
 }
 
 class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
-  final _nameCtl = TextEditingController();
   final _api = ApiService();
 
   final Set<int> _channels = <int>{1};
@@ -36,6 +41,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   bool get _isEdit => widget.existing != null;
 
   static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  static const _dayShortLabels = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
 
   @override
   void initState() {
@@ -45,8 +51,6 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   }
 
   void _prefill(Map<String, dynamic> schedule) {
-    _nameCtl.text = (schedule['name'] as String?) ?? '';
-
     final channels = (schedule['channels'] as List<dynamic>?) ?? [];
     _channels.clear();
     for (final c in channels) {
@@ -89,7 +93,6 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
   @override
   void dispose() {
-    _nameCtl.dispose();
     super.dispose();
   }
 
@@ -133,15 +136,128 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     return true;
   }
 
+  // ──────────────────────────────────────────────────────────
+  // Overlap validation (client-side, same channel + day + time)
+  // ──────────────────────────────────────────────────────────
+
+  static int _minutesOf(String? hhmm) {
+    if (hhmm == null) return 0;
+    final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
+    if (m == null) return 0;
+    return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
+  }
+
+  static String _minutesText(int minutes) =>
+      '${(minutes ~/ 60).toString().padLeft(2, '0')}:${(minutes % 60).toString().padLeft(2, '0')}';
+
+  /// The form's windows as minute pairs (only valid ones; invalid ranges are
+  /// reported separately by [_validateRanges] on save).
+  List<({int start, int end})> get _formRanges => [
+        for (var i = 0; i < _rangeStarts.length; i++)
+          (
+            start: _rangeStarts[i].hour * 60 + _rangeStarts[i].minute,
+            end: _rangeEnds[i].hour * 60 + _rangeEnds[i].minute,
+          ),
+      ];
+
+  /// Days this schedule applies to: custom selection, or all seven.
+  Set<int> get _formDays => _recurrenceType == 'custom'
+      ? Set<int>.of(_daysOfWeek)
+      : const {0, 1, 2, 3, 4, 5, 6};
+
+  /// Null when the form is saveable, otherwise a human-readable conflict
+  /// report naming the channel(s), the conflicting window(s), the day(s) and
+  /// the existing schedule. Rule: same channel + same day + overlapping time.
+  String? _conflictMessage() {
+    final formDays = _formDays;
+    final formRanges = _formRanges;
+    if (_channels.isEmpty || formDays.isEmpty || formRanges.isEmpty) {
+      return null;
+    }
+    final conflicts = <String>[];
+    for (final sibling in widget.siblings) {
+      // Never compare a schedule against itself while editing.
+      if (_isEdit &&
+          widget.existing?['_id'] != null &&
+          sibling['_id'] == widget.existing!['_id']) {
+        continue;
+      }
+      final sibChannels = (sibling['channels'] as List<dynamic>? ?? [])
+          .whereType<int>()
+          .toSet();
+      final channelHit = sibChannels.intersection(_channels);
+      if (channelHit.isEmpty) continue;
+
+      final recurrence = sibling['recurrence'] as Map<String, dynamic>? ?? {};
+      final sibDays = (recurrence['type'] as String?) == 'custom'
+          ? (recurrence['daysOfWeek'] as List<dynamic>? ?? [])
+              .whereType<int>()
+              .toSet()
+          : const {0, 1, 2, 3, 4, 5, 6};
+      final dayHit = sibDays.intersection(formDays);
+      if (dayHit.isEmpty) continue;
+
+      final sibRanges = [
+        for (final r in (sibling['timeRanges'] as List<dynamic>? ?? []))
+          if (r is Map)
+            (
+              start: _minutesOf(r['start'] as String?),
+              end: _minutesOf(r['end'] as String?),
+            ),
+      ];
+      final hitRanges = <String>{};
+      for (final f in formRanges) {
+        if (f.end <= f.start) continue;
+        for (final s in sibRanges) {
+          if (s.end <= s.start) continue;
+          if (f.start < s.end && s.start < f.end) {
+            hitRanges.add(
+                '${_minutesText(s.start)}\u2013${_minutesText(s.end)}');
+          }
+        }
+      }
+      if (hitRanges.isEmpty) continue;
+
+      final chans = (channelHit.toList()..sort()).map((c) => 'CH$c').join(', ');
+      final dayText = dayHit.length == 7
+          ? 'every day'
+          : (dayHit.toList()..sort()).map((d) => _dayLabels[d]).join(', ');
+      final name = (sibling['name'] as String? ?? '').trim();
+      conflicts.add(
+        'Schedule conflict: $chans is already scheduled '
+        '${hitRanges.join(', ')} on $dayText'
+        '${name.isEmpty ? '' : ' ("$name")'}.',
+      );
+      if (conflicts.length >= 3) break;
+    }
+    if (conflicts.isEmpty) return null;
+    return conflicts.join('\n');
+  }
+
   Future<void> _save() async {
-    final name = _nameCtl.text.trim();
-    if (name.isEmpty) { _err('Enter a schedule name'); return; }
     if (_channels.isEmpty) { _err('Select at least one channel'); return; }
     if (_recurrenceType == 'custom' && _daysOfWeek.isEmpty) {
       _err('Pick at least one day for custom recurrence');
       return;
     }
     if (!_validateRanges()) return;
+    // Defense in depth: the Save button is already disabled on conflict.
+    final conflict = _conflictMessage();
+    if (conflict != null) {
+      _err(conflict.split('\n').first);
+      return;
+    }
+
+    // The name field was removed from the UI: the backend contract still
+    // requires one, so it is derived from the first window (create) or kept
+    // from the existing row (edit).
+    final autoName =
+        '${_hhmm(_rangeStarts.first)}\u2013${_hhmm(_rangeEnds.first)}';
+    final name = _isEdit
+        ? ((widget.existing!['name'] as String?)?.isNotEmpty ?? false)
+            ? widget.existing!['name'] as String
+            : autoName
+        : autoName;
 
     final channels = _channels.toList()..sort();
     final timeRanges = <Map<String, String>>[
@@ -241,71 +357,80 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 _DeviceBanner(deviceName: widget.deviceName, deviceId: widget.deviceId),
                 const SizedBox(height: 18),
                 _SectionCard(
-                  eyebrow: 'NAME',
-                  child: TextField(
-                    controller: _nameCtl,
-                    style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
-                    textInputAction: TextInputAction.next,
-                    decoration: _inputDec('Schedule name', 'e.g. Morning irrigation', Icons.label_outline, colors),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                _SectionCard(
                   eyebrow: 'CHANNELS',
                   description: 'Which outlets this schedule drives.',
-                  child: Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: [
-                      for (var i = 1; i <= widget.maxChannel; i++)
-                        _ChannelChip(
-                          label: 'CH$i',
-                          selected: _channels.contains(i),
-                          color: colors.stream,
-                          onTap: () => setState(() {
-                            if (!_channels.remove(i)) _channels.add(i);
-                          }),
-                        ),
-                    ],
+                  child: LayoutBuilder(
+                    builder: (ctx, box) {
+                      final count = widget.maxChannel;
+                      // Up to four outlets share one row; beyond that the
+                      // tiles fall back to a fixed-width grid flow.
+                      final tileWidth = count > 0 && count <= 4
+                          ? (box.maxWidth - (count - 1) * 8) / count
+                          : 64.0;
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (var i = 1; i <= count; i++)
+                            SizedBox(
+                              width: tileWidth,
+                              child: _ChannelTile(
+                                label: 'CH$i',
+                                selected: _channels.contains(i),
+                                onTap: () => setState(() {
+                                  if (!_channels.remove(i)) _channels.add(i);
+                                }),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(height: 14),
                 _SectionCard(
                   eyebrow: 'REPEATS',
-                  description: 'When the week this schedule runs.',
+                  description: 'When in the week this schedule runs.',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(value: 'daily', label: Text('Daily', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                          ButtonSegment(value: 'custom', label: Text('Custom days', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _ModeChip(
+                              label: 'Daily',
+                              icon: Icons.event_repeat,
+                              selected: _recurrenceType == 'daily',
+                              onTap: () => setState(() => _recurrenceType = 'daily'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _ModeChip(
+                              label: 'Custom days',
+                              icon: Icons.date_range,
+                              selected: _recurrenceType == 'custom',
+                              onTap: () => setState(() => _recurrenceType = 'custom'),
+                            ),
+                          ),
                         ],
-                        selected: {_recurrenceType},
-                        style: SegmentedButton.styleFrom(
-                          backgroundColor: colors.well,
-                          selectedBackgroundColor: colors.stream,
-                          selectedForegroundColor: colors.well,
-                          foregroundColor: colors.mist,
-                          side: BorderSide(color: colors.border),
-                        ),
-                        onSelectionChanged: (s) => setState(() => _recurrenceType = s.first),
                       ),
                       if (_recurrenceType == 'custom') ...[
                         const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
+                        Row(
                           children: [
-                            for (var i = 0; i < 7; i++)
-                              _ChannelChip(
-                                label: _dayLabels[i],
-                                selected: _daysOfWeek.contains(i),
-                                color: colors.sunlight,
-                                onTap: () => setState(() {
-                                  if (!_daysOfWeek.remove(i)) _daysOfWeek.add(i);
-                                }),
+                            for (var i = 0; i < 7; i++) ...[
+                              if (i > 0) const SizedBox(width: 6),
+                              Expanded(
+                                child: _DayTile(
+                                  label: _dayShortLabels[i],
+                                  selected: _daysOfWeek.contains(i),
+                                  onTap: () => setState(() {
+                                    if (!_daysOfWeek.remove(i)) _daysOfWeek.add(i);
+                                  }),
+                                ),
                               ),
+                            ],
                           ],
                         ),
                       ],
@@ -325,26 +450,80 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                         _buildRangeRow(i, colors),
                         if (i < _rangeStarts.length - 1) const SizedBox(height: 10),
                       ],
-                      const SizedBox(height: 8),
-                      TextButton.icon(
-                        onPressed: _rangeStarts.length >= 6
+                      const SizedBox(height: 10),
+                      // Full-width ghost tile instead of a text button.
+                      InkWell(
+                        onTap: _rangeStarts.length >= 6
                             ? null
                             : () => setState(() {
                                 _rangeStarts.add(TimeOfDay(hour: 6, minute: 0));
                                 _rangeEnds.add(TimeOfDay(hour: 12, minute: 0));
                               }),
-                        icon: const Icon(Icons.add, size: 16),
-                        label: Text('Add another window', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
-                        style: TextButton.styleFrom(foregroundColor: colors.stream),
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                        child: Container(
+                          width: double.infinity,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(AppRadius.md),
+                            border: Border.all(color: colors.border),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.add, size: 14, color: colors.stream.withValues(alpha: 0.7)),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Add window',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: colors.mist,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 22),
+                // Inline overlap error: names the channel, the clashing
+                // window, the day and the existing schedule. Save stays
+                // disabled while this is visible.
+                if (_conflictMessage() != null) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: colors.danger.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: colors.danger.withValues(alpha: 0.35)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.error_outline, size: 18, color: colors.danger),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _conflictMessage()!,
+                            style: GoogleFonts.inter(
+                              fontSize: 12.5,
+                              height: 1.45,
+                              color: colors.danger,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                ],
                 SizedBox(
                   width: double.infinity, height: 52,
                   child: FilledButton.icon(
-                    onPressed: _saving ? null : _save,
+                    onPressed: (_saving || _conflictMessage() != null) ? null : _save,
                     icon: _saving
                         ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                         : Icon(_isEdit ? Icons.save_outlined : Icons.add, size: 18),
@@ -376,14 +555,27 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
 
   Widget _buildRangeRow(int index, SteesColors colors) {
     return Container(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: colors.well,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(AppRadius.md),
         border: Border.all(color: colors.border),
       ),
       child: Row(
         children: [
+          SizedBox(
+            width: 26,
+            child: Text(
+              'W${index + 1}',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w600,
+                color: colors.mist.withValues(alpha: 0.6),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
           Expanded(
             child: _timeButton(
               label: 'Starts',
@@ -393,8 +585,8 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
             ),
           ),
           Container(
-            margin: const EdgeInsets.symmetric(horizontal: 6),
-            height: 18,
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            height: 30,
             width: 1,
             color: colors.border,
           ),
@@ -423,45 +615,33 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
     );
   }
 
+  /// Stacked time readout: label over a mono value, the same voice as the
+  /// time-first schedule cards.
   Widget _timeButton({required String label, required TimeOfDay time, required VoidCallback onTap, required SteesColors colors}) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(AppRadius.md),
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: colors.stream.withValues(alpha: 0.3)),
+          color: colors.submerged,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(color: colors.border),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        child: Column(
           children: [
-            Text(label, style: GoogleFonts.inter(fontSize: 10, color: colors.mist)),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(_hhmm(time), overflow: TextOverflow.ellipsis,
-                style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700, color: colors.foam)),
-            ),
+            Text(label, style: GoogleFonts.inter(fontSize: 9, color: colors.mist)),
+            const SizedBox(height: 3),
+            Text(_hhmm(time), overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.jetBrainsMono(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+                color: colors.foam,
+              )),
           ],
         ),
-      ),
-    );
-  }
-
-  InputDecoration _inputDec(String hint, String helper, IconData icon, SteesColors colors) {
-    return InputDecoration(
-      hintText: hint,
-      helperText: helper,
-      helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
-      hintStyle: GoogleFonts.inter(fontSize: 14, color: colors.mist.withValues(alpha: 0.6)),
-      prefixIcon: Icon(icon, size: 18, color: colors.mist),
-      filled: true,
-      fillColor: colors.well,
-      contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(color: colors.stream, width: 1.5),
       ),
     );
   }
@@ -475,21 +655,26 @@ class _DeviceBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final scheme = Theme.of(context).colorScheme;
+    // Same recipe as the Devices hero panel: bordered panel, soft neutral
+    // shadow, rounded-square badge, mono id readout.
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: colors.stream.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
+        color: colors.submerged,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(color: colors.border),
+        boxShadow: [AppShadows.softShadow(scheme.shadow)],
       ),
       child: Row(
         children: [
           Container(
-            width: 38, height: 38,
+            width: 40, height: 40,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: colors.stream.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              color: colors.well,
+              border: Border.all(color: colors.border),
             ),
             child: Icon(Icons.schedule, size: 20, color: colors.stream),
           ),
@@ -499,10 +684,15 @@ class _DeviceBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(deviceName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam)),
-                const SizedBox(height: 2),
-                Text(deviceId, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(fontSize: 11, color: colors.mist)),
+                  style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700, color: colors.foam)),
+                const SizedBox(height: 3),
+                Text(deviceId.toUpperCase(), maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.6,
+                    color: colors.mist.withValues(alpha: 0.55),
+                  )),
               ],
             ),
           ),
@@ -523,10 +713,10 @@ class _SectionCard extends StatelessWidget {
     final colors = context.steesColors;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       decoration: BoxDecoration(
         color: colors.submerged,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
         border: Border.all(color: colors.border),
       ),
       child: Column(
@@ -536,7 +726,7 @@ class _SectionCard extends StatelessWidget {
             children: [
               Container(width: 20, height: 2, decoration: BoxDecoration(color: colors.stream, borderRadius: BorderRadius.circular(2))),
               const SizedBox(width: 8),
-              Text(eyebrow, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
+              Text(eyebrow, style: GoogleFonts.jetBrainsMono(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: colors.stream)),
             ],
           ),
           if (description != null) ...[
@@ -554,33 +744,127 @@ class _SectionCard extends StatelessWidget {
   }
 }
 
-class _ChannelChip extends StatelessWidget {
+/// Channel selector tile: border-first module, mono label, tinted when
+/// selected.
+class _ChannelTile extends StatelessWidget {
   final String label;
   final bool selected;
-  final Color color;
   final VoidCallback onTap;
-  const _ChannelChip({required this.label, required this.selected, required this.color, required this.onTap});
+  const _ChannelTile({required this.label, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(AppRadius.md),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        height: 52,
+        alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: selected ? color : colors.well,
-          borderRadius: BorderRadius.circular(12),
+          color: selected ? colors.stream.withValues(alpha: 0.12) : colors.submerged,
+          borderRadius: BorderRadius.circular(AppRadius.md),
           border: Border.all(
-            color: selected ? color : colors.border,
-            width: selected ? 1 : 1,
+            color: selected ? colors.borderActive : colors.border,
+            width: selected ? 1.4 : 1,
           ),
         ),
         child: Text(
           label,
-          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? colors.well : colors.foam),
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? colors.stream : colors.mist,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Recurrence mode selector: border-first chip with icon + label.
+class _ModeChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _ModeChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadius.md),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        height: 44,
+        decoration: BoxDecoration(
+          color: selected ? colors.stream.withValues(alpha: 0.12) : colors.submerged,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(
+            color: selected ? colors.borderActive : colors.border,
+            width: selected ? 1.4 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 15, color: selected ? colors.stream : colors.mist),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: GoogleFonts.inter(
+                fontSize: 12.5,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                color: selected ? colors.stream : colors.mist,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Day selector tile: compact two-letter mono cell in a DIP-switch style row.
+class _DayTile extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DayTile({required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadius.sm),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? colors.sunlight.withValues(alpha: 0.14) : colors.submerged,
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          border: Border.all(
+            color: selected ? colors.sunlight.withValues(alpha: 0.6) : colors.border,
+            width: selected ? 1.4 : 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 10.5,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? colors.sunlight : colors.mist,
+          ),
         ),
       ),
     );
