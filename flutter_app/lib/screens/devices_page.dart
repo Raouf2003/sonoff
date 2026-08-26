@@ -135,6 +135,10 @@ class _DevicesPageState extends State<DevicesPage>
 
   static const int _maxPollFailures = 3;
 
+  /// Status-poll watchdog. A hung repository call must never pin the
+  /// single-flight guard — a timeout is treated exactly like a poll failure.
+  static const Duration _statusWatchdog = Duration(seconds: 20);
+
   // A cloud report whose backend updatedAt is older than this is considered
   // stale and can never overwrite a fresh LAN read.
   static const Duration _kCloudFreshWindow = Duration(minutes: 5);
@@ -396,9 +400,15 @@ class _DevicesPageState extends State<DevicesPage>
 
   /// The single controlled writer for DEVICE connectivity state.
   void _dispatchDevice(ChannelEvent event, DateTime now) {
+    final wasOffline = _deviceState.connectivity == Connectivity.offline;
     final r = deviceReduce(_deviceState, event, _config, now: now);
     _deviceState = r.state;
     setState(() {});
+    // Device-death transition: re-verify the local path so a stale LAN ONLY
+    // claim resolves to OFFLINE (probe failures feed the badge downgrade).
+    if (!wasOffline && r.state.connectivity == Connectivity.offline) {
+      _monitor.notifyNetworkChanged(_selectedDeviceId);
+    }
     // An OFFLINE verdict ends the investigation: stop the fast probe.
     _updateFastLocalProbe();
   }
@@ -542,9 +552,11 @@ class _DevicesPageState extends State<DevicesPage>
     _loadDevices();
     _connectSocket();
     _startCloudHealthMonitor();
-    // Badge reactivity: rebuild whenever the background reachability changes so
-    // LAN/Online reflects the live routing mode without requiring a tap.
+    // Badge reactivity: rebuild whenever the background reachability OR the
+    // badge-truth proof changes so LAN/LAN ONLY reflect fresh local evidence
+    // without requiring a tap.
     _monitor.state.addListener(_onReachabilityChanged);
+    _monitor.badgeTruth.addListener(_onReachabilityChanged);
     _statusTimer = Timer.periodic(
       const Duration(seconds: 15),
       (_) {
@@ -566,6 +578,7 @@ class _DevicesPageState extends State<DevicesPage>
     _fastLocalProbeTimer?.cancel();
     _fastLocalProbeTimer = null;
     _monitor.state.removeListener(_onReachabilityChanged);
+    _monitor.badgeTruth.removeListener(_onReachabilityChanged);
     _monitor.dispose();
     // Cancel all pending indicator timers.
     for (final timer in _pendingIndicatorTimers.values) {
@@ -956,10 +969,15 @@ class _DevicesPageState extends State<DevicesPage>
     if (_statusInFlight) return; // overlapping-poll guard
     _statusInFlight = true;
     try {
-      final result = await _repository.getStatus(
-        _selectedDeviceId!,
-        cloudDown: cloudDown,
-      );
+      final result = await _repository
+          .getStatus(
+            _selectedDeviceId!,
+            cloudDown: cloudDown,
+          )
+          // Watchdog: a hung HTTP call must never pin _statusInFlight (which
+          // would freeze the badge on SYNCING forever). A timeout flows into
+          // the catch below as a normal PollFailure.
+          .timeout(_statusWatchdog);
       if (!mounted) return;
       _applyStatusResult(result);
     } catch (e) {
@@ -1673,8 +1691,10 @@ class _DevicesPageState extends State<DevicesPage>
                   _deviceState,
                   _config,
                   DateTime.now(),
+                  // Badge truth: fresh local proof only — the sticky routing
+                  // signal (sameWifi) is never displayed as current truth.
                   localVerified: _monitor.deviceId == _selectedDeviceId &&
-                      _monitor.state.value.sameWifi,
+                      _monitor.badgeTruth.value.isFresh(DateTime.now()),
                 ),
               ),
                 const SizedBox(width: AppSpacing.xs),

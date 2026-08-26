@@ -37,6 +37,52 @@ const int kSameWifiDowngradeConfirmations = 2;
 /// transient cloud reads.
 const Duration kDowngradeStickyWindow = Duration(seconds: 10);
 
+/// Freshness window for the badge's local proof. `LAN`/`LAN ONLY` may only be
+/// displayed when a positive local confirmation exists within this window —
+/// badge truth is display-honest, unlike the sticky routing signal.
+const Duration kBadgeProofFreshness = Duration(seconds: 90);
+
+/// Cadence of the safety re-probe once local proof has gone stale. Runs ONLY
+/// while `localProof == true` and stale; there is no timer in the healthy
+/// state (fresh proof suppresses it) and none after the proof is lost.
+const Duration kBadgeSafetyProbeInterval = Duration(seconds: 60);
+
+/// Bound for one badge safety probe. A hung probe is a failure, never a block.
+const Duration kBadgeProbeTimeout = Duration(seconds: 4);
+
+/// Badge-truth signal: fresh, honest local-path evidence for the status
+/// badge. Deliberately SEPARATE from [ReachabilityState.sameWifi] — that is
+/// the routing signal (sticky, anti-flap, optimistic) and its semantics are
+/// untouched by badge logic. Display rule: `LAN`/`LAN ONLY` require
+/// `localProof && (now − lastProofAt) ≤ kBadgeProofFreshness`.
+@immutable
+class BadgeTruthState {
+  const BadgeTruthState({this.localProof = false, this.lastProofAt});
+
+  /// True while a positive local confirmation is the latest evidence.
+  final bool localProof;
+
+  /// When the local path was last positively confirmed (probe or local-read).
+  final DateTime? lastProofAt;
+
+  /// Whether the proof is fresh enough for the badge to claim LAN.
+  bool isFresh(DateTime now) =>
+      localProof &&
+      lastProofAt != null &&
+      now.difference(lastProofAt!) <= kBadgeProofFreshness;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is BadgeTruthState &&
+        other.localProof == localProof &&
+        other.lastProofAt == lastProofAt;
+  }
+
+  @override
+  int get hashCode => Object.hash(localProof, lastProofAt);
+}
+
 /// Live routing facts for the currently selected device, maintained
 /// CONTINUOUSLY in the background so a relay tap reads a fresh value with ZERO
 /// probe latency instead of racing a fresh probe against the tap.
@@ -110,6 +156,17 @@ class ReachabilityMonitor {
   final ValueNotifier<ReachabilityState> _state =
       ValueNotifier(const ReachabilityState());
 
+  /// Badge-truth evidence stream (see [BadgeTruthState]). Consumed by the
+  /// status badge ONLY; routing keeps reading [state]. Fed by the same
+  /// probe/poll results that feed [sameWifi] — one probe, two consumers.
+  final ValueNotifier<BadgeTruthState> _badgeTruth =
+      ValueNotifier(const BadgeTruthState());
+
+  /// Consecutive negative badge signals since the last positive proof.
+  int _badgeFailCount = 0;
+  Timer? _badgeSafetyTimer;
+  bool _badgeProbing = false;
+
   /// The device the current [state] describes. `null` before the first check.
   String? deviceId;
 
@@ -133,6 +190,14 @@ class ReachabilityMonitor {
   /// badge reactivity without waiting for a tap.
   ValueNotifier<ReachabilityState> get state => _state;
 
+  /// Observable badge-truth facts. The status badge listens to this instead of
+  /// consuming the sticky routing signal.
+  ValueNotifier<BadgeTruthState> get badgeTruth => _badgeTruth;
+
+  /// Whether the local proof is fresh enough for the badge to claim LAN/LAN
+  /// ONLY right now.
+  bool get badgeLocalProofFresh => _badgeTruth.value.isFresh(now());
+
   /// Folds a socket connect/disconnect fact into the state. Called from the
   /// page's existing socket handlers / cloud-monitor funnel.
   void setCloudSocketReady(bool ready) {
@@ -149,6 +214,9 @@ class ReachabilityMonitor {
     // Forget the previous device's confirmation streak too: the downgrade
     // counter is per-device evidence, never carried across a selection.
     _consecutiveCloudReads = 0;
+    _badgeFailCount = 0;
+    _stopBadgeSafetyTimer();
+    _badgeTruth.value = const BadgeTruthState();
     _state.value = _state.value.copyWith(sameWifi: false, lastCheckedAt: null);
   }
 
@@ -163,8 +231,13 @@ class ReachabilityMonitor {
     this.deviceId = deviceId;
     if (source == DeviceTransportSource.local) {
       _applyPositiveSignal();
+      _badgePositive();
     } else {
       _applyNegativeSignal();
+      // Weak negative for badge truth too: the repository ladder tries the
+      // local path first, so a cloud result implies local failed (or no local
+      // endpoint is known). Subject to the same 2-confirmation rule.
+      _badgeNegative();
     }
   }
 
@@ -195,11 +268,13 @@ class ReachabilityMonitor {
       if (sameWifi) {
         // Positive probe: trust instantly and reset the downgrade counter.
         _applyPositiveSignal();
+        _badgePositive();
       } else {
         // A failed probe is a negative signal subject to the SAME
         // consecutive-confirmation hysteresis as a cloud-sourced status read —
         // one fast-probe miss never downgrades the routing verdict.
         _applyNegativeSignal();
+        _badgeNegative();
       }
     } catch (_) {
       // A failed probe is not evidence: keep the previous sameWifi verdict and
@@ -258,10 +333,97 @@ class ReachabilityMonitor {
     }
   }
 
+  // ──────────────────────────────────────────────────────────
+  // Badge truth (fresh local-path evidence) — display only.
+  // ──────────────────────────────────────────────────────────
+
+  /// Positive local confirmation: proof refreshes instantly, the failure
+  /// streak resets, and the staleness check re-arms at the freshness edge.
+  void _badgePositive() {
+    _badgeFailCount = 0;
+    _badgeTruth.value =
+        BadgeTruthState(localProof: true, lastProofAt: now());
+    _armBadgeSafetyCheck(kBadgeProofFreshness);
+  }
+
+  /// Negative badge signal (failed probe / cloud-sourced read). The proof
+  /// drops after 2 consecutive negatives, or after 1 negative when the
+  /// existing proof is already stale.
+  void _badgeNegative() {
+    if (!_badgeTruth.value.localProof) {
+      _stopBadgeSafetyTimer();
+      return;
+    }
+    final lastProofAt = _badgeTruth.value.lastProofAt;
+    final stale = lastProofAt != null &&
+        now().difference(lastProofAt) >= kBadgeProofFreshness;
+    _badgeFailCount++;
+    if (_badgeFailCount >= kSameWifiDowngradeConfirmations ||
+        (_badgeFailCount >= 1 && stale)) {
+      _stopBadgeSafetyTimer();
+      _badgeTruth.value = const BadgeTruthState(localProof: false);
+      return;
+    }
+    _armBadgeSafetyCheck(kBadgeSafetyProbeInterval);
+  }
+
+  /// Arms the one-shot staleness check. No repeating timer exists while the
+  /// proof is fresh — the check fires exactly at the freshness edge.
+  void _armBadgeSafetyCheck(Duration delay) {
+    if (_disposed || !_badgeTruth.value.localProof) return;
+    _badgeSafetyTimer?.cancel();
+    _badgeSafetyTimer = Timer(delay, _badgeSafetyCheck);
+  }
+
+  void _badgeSafetyCheck() {
+    if (_disposed || !_badgeTruth.value.localProof) return;
+    final lastProofAt = _badgeTruth.value.lastProofAt;
+    if (lastProofAt != null &&
+        now().difference(lastProofAt) < kBadgeProofFreshness) {
+      // Re-proved while the check was pending — re-arm at the new edge.
+      _armBadgeSafetyCheck(
+          kBadgeProofFreshness - now().difference(lastProofAt));
+      return;
+    }
+    unawaited(_badgeSafetyProbe());
+  }
+
+  /// One bounded local re-validation. Success re-proves; failure feeds the
+  /// same 2-confirmation rule. Never blocks, never touches UI.
+  Future<void> _badgeSafetyProbe() async {
+    final deviceId = this.deviceId;
+    if (_disposed || deviceId == null || _badgeProbing) return;
+    _badgeProbing = true;
+    try {
+      final ok = await _repository
+          .isDeviceOnSameNetwork(deviceId)
+          .timeout(kBadgeProbeTimeout);
+      if (_disposed) return;
+      if (ok) {
+        _badgePositive();
+      } else {
+        _badgeNegative();
+      }
+    } on Object {
+      // A hung/failed safety probe counts as a negative (bounded evidence).
+      if (_disposed) return;
+      _badgeNegative();
+    } finally {
+      _badgeProbing = false;
+    }
+  }
+
+  void _stopBadgeSafetyTimer() {
+    _badgeSafetyTimer?.cancel();
+    _badgeSafetyTimer = null;
+  }
+
   void dispose() {
     _disposed = true;
     _networkDebounce?.cancel();
     _networkDebounce = null;
+    _stopBadgeSafetyTimer();
     _state.dispose();
+    _badgeTruth.dispose();
   }
 }

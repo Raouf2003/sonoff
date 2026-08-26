@@ -1081,8 +1081,9 @@ void main() {
         // The background monitor confirms same-WiFi while the cloud socket stays
         // UP: routing flips to local (routingPolicy sameWifi-first) and the
         // badge must show LAN — no cloud outage is required. Badge and reality
-        // agree; the old ONLINE-while-local lie is gone.
-        monitor.state.value = monitor.state.value.copyWith(sameWifi: true);
+        // agree; the old ONLINE-while-local lie is gone. Badge truth is fed by
+        // the LOCAL status read (fresh proof), not by the sticky routing flag.
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
         await tester.pump(const Duration(milliseconds: 500));
         expect(find.text('LAN'), findsOneWidget);
         expect(find.text('Online'), findsNothing);
@@ -1116,18 +1117,15 @@ void main() {
 
         // Simulate the Online→LAN transition burst from the trace: socket drop
         // (S2) → local-status result (S4) → socket reconnect (S1) → debounced
-        // probe (S5), all landing within kBadgeSettleDelay.
+        // probe (S5), all landing within kBadgeSettleDelay. The local-status
+        // result (S4) is also the badge-truth positive signal.
         monitor.state.value =
             monitor.state.value.copyWith(cloudSocketReady: false); // S2
         await tester.pump(const Duration(milliseconds: 100));
-        monitor.state.value = monitor.state.value
-            .copyWith(sameWifi: true, cloudSocketReady: false); // S4
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local); // S4
         await tester.pump(const Duration(milliseconds: 100));
         monitor.state.value =
             monitor.state.value.copyWith(cloudSocketReady: true); // S1
-        await tester.pump(const Duration(milliseconds: 100));
-        monitor.state.value =
-            monitor.state.value.copyWith(sameWifi: true); // S5
         await tester.pump(const Duration(milliseconds: 100));
 
         // No intermediate write rendered: the badge is debounced.
@@ -1590,30 +1588,24 @@ void main() {
         await tester.pump();
 
         // Fast ticks at ~5s and ~10s supply the 3rd consecutive failure —
-        // the OFFLINE verdict lands in ~11s instead of ~45s. The badge reads
-        // LAN ONLY while the sticky same-WiFi verdict persists, then OFFLINE
-        // once the monitor downgrades it.
+        // the OFFLINE verdict lands in ~11s instead of ~45s. Badge truth is
+        // never proven (every status read fails), so the badge goes straight
+        // to OFFLINE — no LAN ONLY claim without fresh local proof.
         await tester.pump(const Duration(seconds: 11));
         await tester.pump();
 
         expect(
-          find.text('LAN ONLY'),
+          find.text('Offline'),
           findsOneWidget,
           reason: 'three fast LOCAL failures with a verified same-WiFi path '
-              'are strong offline evidence (verdict offline, local still '
-              'sticky)',
+              'are strong offline evidence; the badge never claims LAN without '
+              'fresh local proof',
         );
+        expect(find.text('LAN ONLY'), findsNothing);
         // Cadence proof: the third probe (first FAST tick) arrived within the
         // window — a 15s-only cadence would still be at 2 calls here. The
         // timer then self-stops at the OFFLINE verdict.
         expect(repo.statusCalls, greaterThanOrEqualTo(3));
-
-        // When the local verdict finally downgrades, the badge completes the
-        // transition to plain OFFLINE.
-        monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 600));
-        expect(find.text('Offline'), findsOneWidget);
 
         await _unmount(tester);
       },
@@ -3563,6 +3555,11 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
         // (b) Badge: after 500ms debounce, still LAN (sticky absorbed the cloud
         // read, no downgrade).
+        // Badge truth must be fresh at real wall-clock time — the monitor's
+        // proof was written with a fake clock, so refresh it to real time.
+        monitor.now = DateTime.now;
+        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+        await tester.pump(const Duration(milliseconds: 100));
         expect(find.text('LAN'), findsOneWidget);
         expect(find.text('Online'), findsNothing);
         expect(monitor.state.value.sameWifi, isTrue);
