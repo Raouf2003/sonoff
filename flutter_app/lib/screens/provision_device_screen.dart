@@ -311,6 +311,88 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   int _probeElapsedSec = 0;
   DateTime? _waitStart;
 
+  // Wait-step elapsed timer (MM:SS) — independent of disableAnimations.
+  // Pulse animation alone respects disableAnimations; this ticker always runs
+  // and stops only on completed/failed/terminal or leaving the Wait step.
+  Timer? _elapsedTicker;
+  int _elapsedSec = 0;
+
+  void _startElapsedTimer() {
+    _elapsedTicker?.cancel();
+    _elapsedSec = 0;
+    _elapsedTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) {
+        _elapsedTicker?.cancel();
+        return;
+      }
+      if (_step != _Step.waiting ||
+          _state == ProvisionState.completed ||
+          _state == ProvisionState.failed ||
+          _isTerminal) {
+        _elapsedTicker?.cancel();
+        return;
+      }
+      final start = _waitStart;
+      if (start == null) return;
+      setState(() {
+        _elapsedSec = DateTime.now().difference(start).inSeconds;
+      });
+    });
+  }
+
+  void _stopElapsedTimer() {
+    _elapsedTicker?.cancel();
+    _elapsedTicker = null;
+  }
+
+  String get _elapsedLabel {
+    final m = (_elapsedSec ~/ 60).toString().padLeft(2, '0');
+    final s = (_elapsedSec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  /// Mono stage readout mapped from the EXISTING state machine — display only.
+  String get _waitStageReadout {
+    switch (_state) {
+      case ProvisionState.waitingForReboot:
+        return 'REBOOTING';
+      case ProvisionState.waitingForWifi:
+        return 'JOINING WI-FI';
+      case ProvisionState.waitingForMqtt:
+        return 'CONNECTING TO MQTT';
+      case ProvisionState.deviceDetected:
+        return 'DEVICE DETECTED';
+      case ProvisionState.verifyingPossession:
+        return 'VERIFYING';
+      case ProvisionState.claiming:
+        return 'CLAIMING';
+      case ProvisionState.settingUpLocalControl:
+      case ProvisionState.localSetupWaiting:
+        return 'FINALIZING';
+      case ProvisionState.completed:
+        return 'DONE';
+      case ProvisionState.failed:
+        return 'FAILED';
+      default:
+        return 'WAITING';
+    }
+  }
+
+  /// 1-based stage index for the mini dot track (existing states only).
+  int get _waitStageIndex {
+    switch (_state) {
+      case ProvisionState.waitingForReboot:
+        return 1;
+      case ProvisionState.waitingForWifi:
+        return 2;
+      case ProvisionState.completed:
+      case ProvisionState.failed:
+        return 3;
+      default:
+        return 3; // waitingForMqtt and all claiming stages
+    }
+  }
+
   // The device identity IS the canonical physical MAC, derived locally the
   // moment the setup AP is reached (see _readDeviceMac / normalizeMac). It is
   // never issued by the backend and never needs a session or claim token.
@@ -601,6 +683,7 @@ String get _sweepProgressLabel {
     _probeTicker?.cancel();
     _waitStageTimer?.cancel();
     _stageRebootTimer?.cancel();
+    _stopElapsedTimer();
     _closeProvisionSocket();
     _ssidCtl.dispose();
     _wifiPassCtl.dispose();
@@ -1046,8 +1129,8 @@ String get _sweepProgressLabel {
   // Android needs a moment after returning from Wi-Fi Settings before the
   // active network, the process binding and routing to 192.168.4.1 are usable.
   // A single failed probe is a TRANSIENT condition — never an error.
-  static const Duration _stabilizeDelay = Duration(milliseconds: 1200);
-  static const Duration _probeRetryInterval = Duration(milliseconds: 2500);
+  static const Duration _stabilizeDelay = Duration(milliseconds: 650);
+  static const Duration _probeRetryInterval = Duration(milliseconds: 1800);
   static const Duration _apProbeGrace = Duration(seconds: 20);
 
   // Generation counter used to guarantee only ONE detection process is ever
@@ -1961,6 +2044,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     debugPrint('[PROVISION] waiting for device online: deviceId=$_issuedDeviceId');
     _trace.enter(ProvisionPhase.mqtt, 'WAIT_MQTT_DEVICE');
     _waitStart = DateTime.now();
+    _startElapsedTimer();
     _claimed = false;
     // Stage label pacing: "Rebooting device…" for the immediate boot window,
     // then "Connecting device to Wi-Fi…", then "Connecting device to MQTT…".
@@ -3043,14 +3127,14 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                                   SizedBox(
                                     width: 16,
                                     height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: colors.mist),
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: colors.stream),
                                   ),
                                   const SizedBox(width: 8),
                                   Flexible(
                                     child: Text(
                                       _connectBusyLabel,
                                       overflow: TextOverflow.ellipsis,
-                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: colors.mist),
+                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: colors.stream),
                                     ),
                                   ),
                                 ],
@@ -3755,60 +3839,120 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
 
   Widget _buildWaiting(SteesColors colors) {
     final failed = _state == ProvisionState.failed;
+    final completed = _state == ProvisionState.completed;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: AppSpacing.xl),
         _PhaseProgress(active: 2, colors: colors),
-        const SizedBox(height: AppSpacing.xxxl),
-        Center(
-          child: Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
+        const SizedBox(height: AppSpacing.xl),
+        // Bordered status panel — same panel language as Connect/Configure.
+        Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: colors.submerged,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(
               color: failed
-                  ? colors.danger.withValues(alpha: 0.06)
-                  : colors.stream.withValues(alpha: 0.06),
-              border: Border.all(
-                color: (failed ? colors.danger : colors.stream).withValues(alpha: 0.12),
-              ),
-            ),
-            child: Icon(
-              failed
-                  ? Icons.error_outline
-                  : Icons.cloud_done_outlined,
-              size: 32,
-              color: (failed ? colors.danger : colors.stream).withValues(alpha: 0.5),
+                  ? colors.danger.withValues(alpha: 0.35)
+                  : colors.border,
             ),
           ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      color: colors.well,
+                      border: Border.all(
+                        color: failed
+                            ? colors.danger.withValues(alpha: 0.35)
+                            : colors.border,
+                      ),
+                    ),
+                    child: Icon(
+                      failed ? Icons.error_outline : Icons.memory,
+                      size: 20,
+                      color: failed ? colors.danger : colors.stream,
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          failed ? _terminalTitle : 'Waiting for device',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.sora(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: colors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'STEP 3 OF 3',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.6,
+                            color: colors.mist.withValues(alpha: 0.55),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              // Real elapsed timer — independent of disableAnimations.
+              Text(
+                _elapsedLabel,
+                style: GoogleFonts.jetBrainsMono(
+                  fontSize: 30,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1,
+                  color: failed ? colors.danger : colors.foam,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _waitStageReadout,
+                style: GoogleFonts.jetBrainsMono(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.4,
+                  color: failed ? colors.danger : colors.stream,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              _WaitStageDots(
+                stage: _waitStageIndex,
+                failed: failed,
+                completed: completed,
+                reduceMotion: reduceMotion,
+              ),
+              if (!failed) ...[
+                const SizedBox(height: AppSpacing.lg),
+                _WaitChecklist(state: _state, colors: colors),
+              ],
+            ],
+          ),
         ),
-        const SizedBox(height: AppSpacing.xl),
-        Text(
-          failed
-              ? _terminalTitle
-              : provisionUserLabel(_state),
-          textAlign: TextAlign.center,
-          style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
-        ),
-        const SizedBox(height: AppSpacing.sm),
+        const SizedBox(height: AppSpacing.md),
         Text(
           failed
               ? _error ?? 'Something went wrong. Please try again.'
               : 'The device will join your Wi-Fi and connect to the cloud automatically.',
           textAlign: TextAlign.center,
-          style: GoogleFonts.inter(fontSize: 13, height: 1.5, color: colors.mist.withValues(alpha: 0.7)),
+          style: GoogleFonts.inter(fontSize: 12.5, height: 1.5, color: colors.mist.withValues(alpha: 0.75)),
         ),
-        if (!failed) ...[
-          const SizedBox(height: AppSpacing.xxl),
-          Center(
-            child: SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2.5),
-            ),
-          ),
-        ],
         if (failed) ...[
           const SizedBox(height: AppSpacing.lg),
           if (_terminalKind == _TerminalKind.alreadyAdded ||
@@ -3874,14 +4018,6 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             ),
           ),
         ],
-        if (_error != null && !failed) ...[
-          const SizedBox(height: AppSpacing.xl),
-          Text(
-            _error!,
-            textAlign: TextAlign.center,
-            style: GoogleFonts.inter(fontSize: 13, color: colors.danger),
-          ),
-        ],
       ],
     );
   }
@@ -3910,73 +4046,127 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       children: [
         const SizedBox(height: AppSpacing.xl),
         _PhaseProgress(active: 2, colors: colors),
-        const SizedBox(height: AppSpacing.xxxl),
-        Center(
-          child: Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: failed
-                  ? colors.danger.withValues(alpha: 0.06)
-                  : colors.stream.withValues(alpha: 0.06),
-              border: Border.all(
-                color: (failed ? colors.danger : colors.stream)
-                    .withValues(alpha: 0.12),
-              ),
-            ),
-            child: failed
-                ? Icon(Icons.warning_amber_outlined,
-                    size: 32,
-                    color: colors.danger.withValues(alpha: 0.6))
-                : Icon(Icons.wifi_tethering,
-                    size: 32,
-                    color: colors.stream.withValues(alpha: 0.5)),
-          ),
-        ),
         const SizedBox(height: AppSpacing.xl),
-        Text(
-          failed ? 'Local control not ready' : 'Preparing local control…',
-          textAlign: TextAlign.center,
-          style: GoogleFonts.sora(
-              fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          localControlMessage,
-          textAlign: TextAlign.center,
-          style: GoogleFonts.inter(
-              fontSize: 13, height: 1.5,
-              color: colors.mist.withValues(alpha: 0.7)),
-        ),
-        if (!failed) ...[
-          const SizedBox(height: AppSpacing.xxl),
-          Center(
-            child: SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2.5),
+        // Bordered panel — same language as Connect/Configure/Wait.
+        Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: colors.submerged,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(
+              color: failed
+                  ? colors.danger.withValues(alpha: 0.35)
+                  : colors.border,
             ),
           ),
-        ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      color: colors.well,
+                      border: Border.all(
+                        color: failed
+                            ? colors.danger.withValues(alpha: 0.35)
+                            : colors.border,
+                      ),
+                    ),
+                    child: Icon(
+                      failed
+                          ? Icons.warning_amber_outlined
+                          : Icons.wifi_tethering,
+                      size: 20,
+                      color: failed ? colors.danger : colors.stream,
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          failed
+                              ? 'Local control not ready'
+                              : 'Preparing local control…',
+                          style: GoogleFonts.sora(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: colors.foam),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'LOCAL CONTROL',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.6,
+                            color: colors.mist.withValues(alpha: 0.55),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.lg),
+              Text(
+                localControlMessage,
+                style: GoogleFonts.inter(
+                    fontSize: 12.5, height: 1.5, color: colors.mist),
+              ),
+              if (!failed) ...[
+                const SizedBox(height: AppSpacing.lg),
+                Row(
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: colors.stream),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'ENABLING…',
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.4,
+                        color: colors.stream,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (failed) ...[
+                const SizedBox(height: AppSpacing.lg),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: colors.stream.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    border:
+                        Border.all(color: colors.stream.withValues(alpha: 0.20)),
+                  ),
+                  child: Text(
+                    'The device is already added to your account — you can '
+                    'control it through the cloud while local control is '
+                    'pending. Retry enables direct local control without '
+                    'claiming the device again.',
+                    style: GoogleFonts.inter(
+                        fontSize: 12, height: 1.45, color: colors.mist),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
         if (failed) ...[
-          const SizedBox(height: AppSpacing.xl),
-          Container(
-            padding: const EdgeInsets.all(AppSpacing.lg),
-            decoration: BoxDecoration(
-              color: colors.well,
-              borderRadius: BorderRadius.circular(AppRadius.lg),
-            ),
-            child: Text(
-              'The device is already added to your account — you can control '
-              'it through the cloud while local control is pending. Retry '
-              'enables direct local control without claiming the device again.',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.inter(
-                  fontSize: 12, height: 1.4,
-                  color: colors.mist.withValues(alpha: 0.8)),
-            ),
-          ),
           const SizedBox(height: AppSpacing.lg),
           SizedBox(
             width: double.infinity,
@@ -3995,13 +4185,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             height: 50,
             child: OutlinedButton(
               onPressed: _continueLocalSetupInBackground,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: colors.stream,
-                side: BorderSide(color: colors.stream.withValues(alpha: 0.35)),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.xl),
-                ),
-              ),
+              style: _outlinedStyle(colors),
               child: Text('Continue in background',
                   style: GoogleFonts.sora(
                       fontSize: 15, fontWeight: FontWeight.w600)),
@@ -4017,7 +4201,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                 foregroundColor: colors.mist,
                 side: BorderSide(color: colors.mist.withValues(alpha: 0.35)),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.xl),
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
                 ),
               ),
               child: Text('Close',
@@ -4407,6 +4591,173 @@ class _PhaseItem extends StatelessWidget {
           ),
           child: Text(label),
         ),
+      ],
+    );
+  }
+}
+
+/// Mini stage dots on a thin track — reuses the approved dot language.
+/// Pure display: stage index comes from the existing state machine.
+class _WaitStageDots extends StatelessWidget {
+  final int stage; // 1..3
+  final bool failed;
+  final bool completed;
+  final bool reduceMotion;
+
+  const _WaitStageDots({
+    required this.stage,
+    required this.failed,
+    required this.completed,
+    required this.reduceMotion,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return Row(
+      children: [
+        _dot(colors, 1),
+        _segment(colors, 1),
+        _dot(colors, 2),
+        _segment(colors, 2),
+        _dot(colors, 3),
+      ],
+    );
+  }
+
+  Widget _dot(SteesColors colors, int i) {
+    final done = completed || stage > i;
+    final active = !completed && stage == i;
+    final danger = failed && stage == i && !done;
+    final Color fill = done || active
+        ? (danger ? colors.danger : colors.stream)
+        : colors.border;
+    return AnimatedContainer(
+      duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 400),
+      curve: Curves.easeInOutCubic,
+      width: 10,
+      height: 10,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: fill,
+        boxShadow: active && !failed
+            ? [
+                BoxShadow(
+                  color: colors.stream.withValues(alpha: 0.30),
+                  blurRadius: 8,
+                ),
+              ]
+            : null,
+      ),
+    );
+  }
+
+  Widget _segment(SteesColors colors, int i) {
+    final filled = completed || stage > i;
+    return Expanded(
+      child: AnimatedContainer(
+        duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 400),
+        curve: Curves.easeInOutCubic,
+        height: 2,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: filled
+              ? (failed ? colors.danger : colors.stream)
+              : colors.border,
+          borderRadius: BorderRadius.circular(1),
+        ),
+      ),
+    );
+  }
+}
+
+/// Wait checklist rows — ✓ done / spinner active / — pending, mapped from
+/// the EXISTING ProvisionState. No new timing semantics.
+class _WaitChecklist extends StatelessWidget {
+  final ProvisionState state;
+  final SteesColors colors;
+  const _WaitChecklist({required this.state, required this.colors});
+
+  @override
+  Widget build(BuildContext context) {
+    final isFailed = state == ProvisionState.failed;
+    final isCompleted = state == ProvisionState.completed;
+
+    bool rowDone(int row) {
+      if (isCompleted) return true;
+      if (isFailed) return false;
+      if (row == 1) return state != ProvisionState.waitingForReboot;
+      if (row == 2) {
+        return state == ProvisionState.waitingForMqtt ||
+            state == ProvisionState.deviceDetected ||
+            state == ProvisionState.verifyingPossession ||
+            state == ProvisionState.claiming ||
+            state == ProvisionState.settingUpLocalControl ||
+            state == ProvisionState.localSetupWaiting;
+      }
+      return false; // row 3 completes only on completed
+    }
+
+    bool rowActive(int row) {
+      if (isFailed || isCompleted) return false;
+      if (row == 1) return state == ProvisionState.waitingForReboot;
+      if (row == 2) return state == ProvisionState.waitingForWifi;
+      // Row 3 stays active through MQTT + all claiming stages while in Wait.
+      return state == ProvisionState.waitingForMqtt ||
+          state == ProvisionState.deviceDetected ||
+          state == ProvisionState.verifyingPossession ||
+          state == ProvisionState.claiming ||
+          state == ProvisionState.settingUpLocalControl ||
+          state == ProvisionState.localSetupWaiting;
+    }
+
+    Widget row(String label, int idx) {
+      final done = rowDone(idx);
+      final active = rowActive(idx);
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: done
+                  ? Icon(Icons.check_circle, size: 16, color: colors.leaf)
+                  : active
+                      ? SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: colors.stream),
+                        )
+                      : Text('—',
+                          style: TextStyle(
+                              color: colors.mist.withValues(alpha: 0.5),
+                              fontSize: 12)),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: GoogleFonts.inter(
+                  fontSize: 12.5,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                  color: done || active
+                      ? colors.foam
+                      : colors.mist.withValues(alpha: 0.6),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        row('Device rebooting...', 1),
+        row('Joining your Wi-Fi...', 2),
+        row('Connecting to cloud...', 3),
       ],
     );
   }
