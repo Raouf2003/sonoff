@@ -102,9 +102,8 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                         ),
                         boxShadow: [BoxShadow(color: colors.border, blurRadius: 14, spreadRadius: 0)],
                       ),
-                      child: Center(
-                        child: Text('S', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w700, color: colors.well)),
-                      ),
+                      padding: const EdgeInsets.all(12),
+                      child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
                     ),
                     const SizedBox(height: 20),
                     Text('STEES', style: GoogleFonts.sora(fontSize: 28, fontWeight: FontWeight.w700, color: colors.foam, letterSpacing: 3)),

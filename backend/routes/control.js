@@ -87,6 +87,7 @@ router.post('/control', async (req, res) => {
       [key]: reported,
       acked: !!outcome.acked,
       opId: opId || null,
+      online: true,
       // The device's last-known LAN IP (learned via MQTT telemetry) so the app
       // can seed a local discovery candidate even if it only ever talks to the
       // cloud — identity is still verified with `Status 5` before use.

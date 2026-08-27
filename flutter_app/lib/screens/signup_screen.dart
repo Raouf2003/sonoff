@@ -81,6 +81,20 @@ class _SignupScreenState extends State<SignupScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  Container(
+                    width: 64, height: 64,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft, end: Alignment.bottomRight,
+                        colors: [colors.stream, colors.leaf],
+                      ),
+                      boxShadow: [BoxShadow(color: colors.border, blurRadius: 12)],
+                    ),
+                    padding: const EdgeInsets.all(10),
+                    child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
+                  ),
+                  const SizedBox(height: 16),
                   Text('Create Account', style: GoogleFonts.sora(fontSize: 24, fontWeight: FontWeight.w700, color: colors.foam)),
                   const SizedBox(height: 6),
                   Text('Join STEES', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),

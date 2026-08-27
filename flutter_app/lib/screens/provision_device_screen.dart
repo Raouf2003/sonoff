@@ -2879,6 +2879,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   /// REMAINS claimed and cached (cloud control works); only local readiness is
   /// postponed. The wizard pops `true` so the Devices page shows the added
   /// device.
+  // ignore: unused_element
   void _closeLocalControlReady() {
     _waitTimer?.cancel();
     _waitStageTimer?.cancel();
@@ -4187,24 +4188,6 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
               onPressed: _continueLocalSetupInBackground,
               style: _outlinedStyle(colors),
               child: Text('Continue in background',
-                  style: GoogleFonts.sora(
-                      fontSize: 15, fontWeight: FontWeight.w600)),
-            ),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: OutlinedButton(
-              onPressed: _closeLocalControlReady,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: colors.mist,
-                side: BorderSide(color: colors.mist.withValues(alpha: 0.35)),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.lg),
-                ),
-              ),
-              child: Text('Close',
                   style: GoogleFonts.sora(
                       fontSize: 15, fontWeight: FontWeight.w600)),
             ),

@@ -1,5 +1,4 @@
 ﻿import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_controller.dart';
 import 'services/auth_service.dart';
@@ -140,13 +139,10 @@ class _SteesLogo extends StatelessWidget {
           begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [colors.stream, colors.leaf],
         ),
-        boxShadow: [
-          BoxShadow(color: colors.border, blurRadius: 12, spreadRadius: 0),
-        ],
+        boxShadow: [BoxShadow(color: colors.border, blurRadius: 12, spreadRadius: 0)],
       ),
-      child: Center(
-        child: Text('S', style: GoogleFonts.sora(fontSize: size * 0.5, fontWeight: FontWeight.w700, color: colors.well)),
-      ),
+      padding: EdgeInsets.all(size * 0.18),
+      child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
     );
   }
 }

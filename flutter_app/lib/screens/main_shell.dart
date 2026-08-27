@@ -153,13 +153,10 @@ class _MainShellState extends State<MainShell> {
                 end: Alignment.bottomRight,
                 colors: [colors.stream, colors.leaf],
               ),
-              boxShadow: [
-                BoxShadow(color: colors.border, blurRadius: 8),
-              ],
+              boxShadow: [BoxShadow(color: colors.border, blurRadius: 8)],
             ),
-            child: Center(
-              child: Text('S', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w700, color: colors.well)),
-            ),
+            padding: const EdgeInsets.all(6),
+            child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
           ),
           const SizedBox(width: AppSpacing.md),
           Expanded(
