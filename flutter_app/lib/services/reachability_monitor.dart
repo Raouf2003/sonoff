@@ -40,7 +40,7 @@ const Duration kDowngradeStickyWindow = Duration(seconds: 10);
 /// Freshness window for the badge's local proof. `LAN`/`LAN ONLY` may only be
 /// displayed when a positive local confirmation exists within this window —
 /// badge truth is display-honest, unlike the sticky routing signal.
-const Duration kBadgeProofFreshness = Duration(seconds: 90);
+const Duration kBadgeProofFreshness = Duration(seconds: 30);
 
 /// Cadence of the safety re-probe once local proof has gone stale. Runs ONLY
 /// while `localProof == true` and stale; there is no timer in the healthy
