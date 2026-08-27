@@ -64,7 +64,7 @@ test('P3: ownership check succeeds via registry without DB call when device is i
     dbCalled = true;
     return null;
   };
-  mqttGateway.publishCommand = async () => ({ acked: true, observed: 'ON' });
+  mqttGateway.publishCommand = async () => ({ acked: false, pending: true, opId: undefined, expected: 'ON' });
   runtimeState.getDeviceState = () => ({
     channels: { 1: { state: 'ON', updatedAt: Date.now() } },
   });
@@ -76,7 +76,7 @@ test('P3: ownership check succeeds via registry without DB call when device is i
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ deviceId: DEVICE.deviceId, channel: 1, state: 'ON' }),
     });
-    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.status, 202);
     assert.strictEqual(dbCalled, false, 'DB should not be called when registry hit');
   } finally {
     Device.findOne = origFindOne;
@@ -94,7 +94,7 @@ test('P3: falls back to DB correctly on registry miss', async () => {
     if (query.deviceId === DEVICE.deviceId) return { ...DEVICE };
     return null;
   };
-  mqttGateway.publishCommand = async () => ({ acked: true, observed: 'ON' });
+  mqttGateway.publishCommand = async () => ({ acked: false, pending: true, opId: undefined, expected: 'ON' });
   runtimeState.getDeviceState = () => ({
     channels: { 1: { state: 'ON', updatedAt: Date.now() } },
   });
@@ -106,7 +106,7 @@ test('P3: falls back to DB correctly on registry miss', async () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ deviceId: DEVICE.deviceId, channel: 1, state: 'ON' }),
     });
-    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.status, 202);
     assert.strictEqual(dbCalled, true, 'DB should be called on registry miss');
   } finally {
     Device.findOne = origFindOne;
@@ -116,7 +116,7 @@ test('P3: falls back to DB correctly on registry miss', async () => {
 
 test('P3: unauthorized/ownership-mismatch still correctly rejected via registry path', async () => {
   deviceRegistry.devices.set(DEVICE.deviceId, { ...DEVICE, ownerId: 'owner1' });
-  mqttGateway.publishCommand = async () => ({ acked: true, observed: 'ON' });
+  mqttGateway.publishCommand = async () => ({ acked: false, pending: true, opId: undefined, expected: 'ON' });
 
   const { base, close } = await start();
   // Make app with different userId

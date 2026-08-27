@@ -51,9 +51,9 @@ router.post('/control', async (req, res) => {
       return res.status(503).json({ error: 'MQTT broker not connected' });
     }
 
-    let outcome;
+    let ack;
     try {
-      outcome = await mqttGateway.publishCommand(
+      ack = await mqttGateway.publishCommand(
         device.deviceId,
         channel,
         state.toUpperCase(),
@@ -75,31 +75,17 @@ router.post('/control', async (req, res) => {
       return res.status(500).json({ error: `Failed to publish command: ${err.message}` });
     }
 
-    // The device report that resolved the ACK is the authoritative state: the
-    // actual reported value (which may differ from the request), whether it
-    // matched, and the runtimeState timestamp of that report.
-    const reported = outcome.observed || state.toUpperCase();
-    const key = `POWER${channel}`;
-    const entry = runtimeState.getDeviceState(device.deviceId);
-    const chEntry = entry ? entry.channels[channel] : null;
-    timeline(device.deviceId, channel, opId, 'HTTP ACK response sent');
-    res.json({
-      [key]: reported,
-      acked: !!outcome.acked,
+    timeline(device.deviceId, channel, opId, 'HTTP 202 sent');
+    return res.status(202).json({
+      status: 'pending',
       opId: opId || null,
+      acked: false,
+      pending: true,
+      deviceId: device.deviceId,
+      channel,
+      expected: state.toUpperCase(),
       online: true,
-      // The device's last-known LAN IP (learned via MQTT telemetry) so the app
-      // can seed a local discovery candidate even if it only ever talks to the
-      // cloud — identity is still verified with `Status 5` before use.
       lastIp: device.lastIp || null,
-      channels: {
-        [String(channel)]: {
-          state: reported,
-          updatedAt: chEntry && chEntry.updatedAt
-            ? new Date(chEntry.updatedAt).toISOString()
-            : null,
-        },
-      },
     });
   } catch (err) {
     console.error('Control error:', err);

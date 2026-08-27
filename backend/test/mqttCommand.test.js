@@ -40,6 +40,11 @@ test('publishCommand rejects with MQTT_DISCONNECTED when the broker is down', as
 
 test('a concurrent command for the same device+channel SUPERSEDES the previous pending', async () => {
   const gw = gateway();
+  // Use delayed publish so second can supersede before first PUBACK
+  gw.client.publish = (topic, payload, opts, cb) => {
+    gw.client.published.push({ topic, payload: String(payload) });
+    setTimeout(() => { if (typeof cb === 'function') cb(null); }, 20);
+  };
   const first = gw.publishCommand('dev-a', 1, 'ON');
   const second = gw.publishCommand('dev-a', 1, 'OFF');
 
@@ -48,13 +53,10 @@ test('a concurrent command for the same device+channel SUPERSEDES the previous p
     (err) => err.code === 'SUPERSEDED',
   );
 
-  // The superseding command must still be pending (not settled) until an ack.
-  let settled = false;
-  second.then(() => { settled = true; }, () => { settled = true; });
-  await new Promise((r) => setTimeout(r, 20));
-  assert.strictEqual(settled, false, 'superseding command stays pending awaiting ACK');
+  // Fast-ack: superseding command resolves on PUBACK (~70ms via mock), not RESULT
+  const outcome = await second;
+  assert.deepStrictEqual(outcome, { acked: false, pending: true, opId: undefined, expected: 'OFF' });
 
-  // Cleanup the outstanding timer so the test process can exit promptly.
   const pend = gw.pending.get('dev-a:1');
   if (pend) {
     clearTimeout(pend.timer);
@@ -65,21 +67,24 @@ test('a concurrent command for the same device+channel SUPERSEDES the previous p
 test('a device report resolves the pending command with acked/observed', async () => {
   const gw = gateway();
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
+  const ack = await cmd;
+  assert.deepStrictEqual(ack, { acked: false, pending: true, opId: undefined, expected: 'ON' });
   // Mismatched report should NOT resolve - keep waiting
   const result = gw._resolvePending('dev-a', 1, 'OFF');
   assert.strictEqual(result, null, 'mismatched report does not resolve');
-  // Matching report should resolve
-  gw._resolvePending('dev-a', 1, 'ON');
-  const outcome = await cmd;
-  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
+  // Matching report should clear pending and allow socket emit (not resolve HTTP)
+  const opId = gw._resolvePending('dev-a', 1, 'ON');
+  assert.strictEqual(opId, undefined);
+  assert.strictEqual(gw.pending.has('dev-a:1'), false);
 });
 
 test('a matching report resolves with acked true', async () => {
   const gw = gateway();
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
-  gw._resolvePending('dev-a', 1, 'ON');
-  const outcome = await cmd;
-  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
+  const ack = await cmd;
+  assert.deepStrictEqual(ack, { acked: false, pending: true, opId: undefined, expected: 'ON' });
+  const opId = gw._resolvePending('dev-a', 1, 'ON');
+  assert.strictEqual(gw.pending.has('dev-a:1'), false);
 });
 
 test('a stat/RESULT payload resolves the pending ACK and feeds runtimeState', async () => {
@@ -94,10 +99,11 @@ test('a stat/RESULT payload resolves the pending ACK and feeds runtimeState', as
     },
   };
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
+  const ack = await cmd;
+  assert.deepStrictEqual(ack, { acked: false, pending: true, opId: undefined, expected: 'ON' });
   gw._handle('stat/dev-a/RESULT', JSON.stringify({ POWER1: 'ON' }));
-  const outcome = await cmd;
-  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
   assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
+  assert.strictEqual(gw.pending.has('dev-a:1'), false);
 });
 
 // LWT Offline must be authoritative even when telemetry is fresh, and a later
@@ -357,9 +363,10 @@ test('a stat/RESULT POWER payload resolves the ACK, feeds runtimeState, and neve
   });
 
   const cmd = gw.publishCommand('dev-a', 1, 'ON');
+  const ack = await cmd;
+  assert.deepStrictEqual(ack, { acked: false, pending: true, opId: undefined, expected: 'ON' });
   gw._handle('stat/dev-a/RESULT', JSON.stringify({ POWER1: 'ON' }));
-  const outcome = await cmd;
-  assert.deepStrictEqual(outcome, { acked: true, observed: 'ON' });
   assert.deepStrictEqual(applied, [{ deviceId: 'dev-a', ch: 1, st: 'ON' }]);
   assert.strictEqual(syncCalls.length, 0, 'RESULT handling must never call schedule sync');
+  assert.strictEqual(gw.pending.has('dev-a:1'), false);
 });

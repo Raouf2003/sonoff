@@ -57,8 +57,8 @@ async function start() {
   };
 }
 
-test('POST /control returns the reported state plus the per-channel shape', async () => {
-  mqttGateway.publishCommand = async () => ({ acked: true, observed: 'ON' });
+test('POST /control returns 202 pending after PUBACK (fast-ack)', async () => {
+  mqttGateway.publishCommand = async () => ({ acked: false, pending: true, opId: 'op1', expected: 'ON' });
   runtimeState.getDeviceState = () => ({
     channels: { 1: { state: 'ON', updatedAt: Date.now() } },
   });
@@ -68,14 +68,16 @@ test('POST /control returns the reported state plus the per-channel shape', asyn
     const res = await fetch(`${base}/control`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ deviceId: DEVICE.deviceId, channel: 1, state: 'ON' }),
+      body: JSON.stringify({ deviceId: DEVICE.deviceId, channel: 1, state: 'ON', opId: 'op1' }),
     });
     const body = await res.json();
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(body.POWER1, 'ON');
-    assert.strictEqual(body.acked, true);
-    assert.strictEqual(body.channels['1'].state, 'ON');
-    assert.ok(typeof body.channels['1'].updatedAt === 'string');
+    assert.strictEqual(res.status, 202);
+    assert.strictEqual(body.status, 'pending');
+    assert.strictEqual(body.pending, true);
+    assert.strictEqual(body.acked, false);
+    assert.strictEqual(body.opId, 'op1');
+    assert.strictEqual(body.expected, 'ON');
+    assert.strictEqual(body.deviceId, DEVICE.deviceId);
   } finally {
     await close();
   }
@@ -148,7 +150,7 @@ test('GET /status defaults every channel to UNKNOWN when nothing was observed', 
 
 test('GET /status and POST /control expose the device lastIp for the app', async () => {
   deviceIp = '192.168.1.9';
-  mqttGateway.publishCommand = async () => ({ acked: true, observed: 'ON' });
+  mqttGateway.publishCommand = async () => ({ acked: false, pending: true, opId: null, expected: 'ON' });
   runtimeState.getDeviceState = () => ({
     channels: { 1: { state: 'ON', updatedAt: Date.now() } },
   });
@@ -167,8 +169,9 @@ test('GET /status and POST /control expose the device lastIp for the app', async
       body: JSON.stringify({ deviceId: DEVICE.deviceId, channel: 1, state: 'ON' }),
     });
     const cbody = await cres.json();
-    assert.strictEqual(cres.status, 200);
+    assert.strictEqual(cres.status, 202);
     assert.strictEqual(cbody.lastIp, '192.168.1.9');
+    assert.strictEqual(cbody.status, 'pending');
   } finally {
     deviceIp = null;
     await close();

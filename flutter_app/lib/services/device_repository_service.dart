@@ -659,6 +659,23 @@ class DeviceRepositoryService {
           _tl(opId, deviceId, channel, 'Cloud request start');
           final cloud = await _cloud.control(deviceId, channel, state, opId: opId);
           _tl(opId, deviceId, channel, 'Cloud response received');
+          if (cloud['status'] == 'pending') {
+            _tl(opId, deviceId, channel, 'Cloud 202 pending — awaiting Socket.IO RESULT');
+            _lastSource = DeviceTransportSource.cloud;
+            await _seedOneCandidate(deviceId, cloud['lastIp']);
+            _log('cloud 202 pending for $deviceId channel $channel op=$opId');
+            final expected = cloud['expected'] as String? ?? state;
+            return parseRelayStatus(
+              {
+                'online': true,
+                'channels': {
+                  '$channel': {'state': expected, 'updatedAt': null}
+                },
+              },
+              source: DeviceTransportSource.cloud,
+              seq: seq,
+            );
+          }
           _lastSource = DeviceTransportSource.cloud;
           await _seedOneCandidate(deviceId, cloud['lastIp']);
           _log('cloud control success for $deviceId channel $channel');

@@ -224,13 +224,13 @@ class MqttGateway {
   // end-to-end timing timeline; it is echoed on the device_update socket event
   // so the app can correlate the MQTT RESULT to its tap.
   publishCommand(deviceId, channel, state, opId) {
-    return new Promise((resolve, reject) => {
+    return new Promise((ackResolve, ackReject) => {
       const c = this.client;
       timeline(deviceId, channel, opId, 'MQTT publish start');
       if (!c || !c.connected) {
         const err = new Error('MQTT not connected');
         err.code = 'MQTT_DISCONNECTED';
-        return reject(err);
+        return ackReject(err);
       }
       const topic = `cmnd/${deviceId}/POWER${channel}`;
       const key = `${deviceId}:${channel}`;
@@ -242,15 +242,14 @@ class MqttGateway {
           `Command superseded for ${deviceId} channel ${channel}`,
         );
         err.code = 'SUPERSEDED';
+        if (prev.ackReject) prev.ackReject(err);
         if (prev.reject) prev.reject(err);
       }
 
       const timer = setTimeout(() => {
         this.pending.delete(key);
-        const err = new Error(`ACK timeout waiting for ${deviceId} channel ${channel}`);
-        err.code = 'ACK_TIMEOUT';
         console.log(`ACK timeout: ${deviceId} POWER${channel} (pending: ${this.pending.size})`);
-        reject(err);
+        timeline(deviceId, channel, opId, 'ACK_TIMEOUT');
       }, ACK_TIMEOUT_MS);
 
       this.pending.set(key, {
@@ -259,9 +258,9 @@ class MqttGateway {
         state: expected,
         timestamp: Date.now(),
         timer,
-        resolve,
-        reject,
         opId,
+        ackResolve,
+        ackReject,
       });
 
       console.log(`[ACK DEBUG] publishCommand: deviceId=${deviceId} channel=${channel} expected=${expected} opId=${opId} key=${key} pendingSize=${this.pending.size}`);
@@ -273,9 +272,11 @@ class MqttGateway {
           clearTimeout(timer);
           this.pending.delete(key);
           console.error(`MQTT publish failed: ${deviceId} POWER${channel}: ${err.message}`);
-          reject(err);
+          ackReject(err);
         } else {
           timeline(deviceId, channel, opId, 'MQTT publish completed');
+          timeline(deviceId, channel, opId, 'HTTP 202 sent');
+          ackResolve({ acked: false, pending: true, opId, expected });
         }
       });
     });
@@ -384,8 +385,6 @@ class MqttGateway {
     if (!p) return null;
     const observedUpper = String(observed).toUpperCase();
     const expectedUpper = p.state;
-    // For TOGGLE commands, resolve on any valid ON/OFF response
-    // For ON/OFF commands, only resolve if observed matches expected
     const isToggle = expectedUpper === 'TOGGLE';
     const matches = isToggle ? (observedUpper === 'ON' || observedUpper === 'OFF') : (observedUpper === expectedUpper);
     if (!matches) {
@@ -396,7 +395,6 @@ class MqttGateway {
     this.pending.delete(key);
     timeline(deviceId, channel, p.opId, 'Device RESULT received');
     console.log(`[ACK DEBUG] opId=${p.opId} elapsed=${Date.now() - p.timestamp}ms topic=${topic} payload=${JSON.stringify({ observed: observedUpper, expected: expectedUpper })} channel=${channel} pendingExisted=true resolvePending=true acked=true`);
-    if (p.resolve) p.resolve({ acked: true, observed: observedUpper });
     return p.opId;
   }
 
@@ -406,6 +404,7 @@ class MqttGateway {
     for (const [key, p] of this.pending) {
       clearTimeout(p.timer);
       this.pending.delete(key);
+      if (p.ackReject) p.ackReject(err);
       if (p.reject) p.reject(err);
     }
     console.log(`Pending commands cleared (${reason}): ${this.pending.size}`);

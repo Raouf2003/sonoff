@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
+import 'control_timeline.dart';
 
 const String kBaseUrl = 'https://sonoff-3na2.onrender.com';
 
@@ -383,9 +384,13 @@ class ApiService {
       'deviceId': deviceId,
       'channel': channel,
       'state': state,
-      'opId': ?opId,
+      'opId': opId,
     });
-    return _checkObject(res, const [200], 'Control failed');
+    if (opId != null) {
+      ControlTimeline.mark(opId, deviceId, channel, 'HTTP response received');
+      ControlTimeline.mark(opId, deviceId, channel, 'HTTP 202 received');
+    }
+    return _checkObject(res, const [200, 202], 'Control failed');
   }
 
   Future<void> unclaimDevice(String deviceId) async {
