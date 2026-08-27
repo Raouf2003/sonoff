@@ -128,6 +128,11 @@ class DeviceRepositoryService {
   /// duplicate `Status 5` on operations that immediately follow that probe.
   final Map<String, DateTime> _identityTrustedAt = {};
 
+  /// Latest pending cloud opId per deviceId:channel awaiting Socket.IO RESULT.
+  /// Keyed by "$deviceId:$channel" — stores the opId from the 202 pending response.
+  final Map<String, String> _lastPendingOpId = {};
+  final Map<String, DateTime> _pendingSince = {};
+
   /// Last reason the claim-time local HTTP setup failed (for the wizard's
   /// terminal diagnostic). `null` before the first setup attempt or after a
   /// success.
@@ -661,6 +666,11 @@ class DeviceRepositoryService {
           _tl(opId, deviceId, channel, 'Cloud response received');
           if (cloud['status'] == 'pending') {
             _tl(opId, deviceId, channel, 'Cloud 202 pending — awaiting Socket.IO RESULT');
+            if (opId != null) {
+              final key = '$deviceId:$channel';
+              _lastPendingOpId[key] = opId;
+              _pendingSince[key] = DateTime.now();
+            }
             _lastSource = DeviceTransportSource.cloud;
             await _seedOneCandidate(deviceId, cloud['lastIp']);
             _log('cloud 202 pending for $deviceId channel $channel op=$opId');
@@ -1199,6 +1209,43 @@ class DeviceRepositoryService {
   void _tl(String? opId, String deviceId, int channel, String label) {
     if (opId == null) return;
     ControlTimeline.mark(opId, deviceId, channel, label);
+  }
+
+  String _pendingKey(String deviceId, int channel) => '$deviceId:$channel';
+
+  bool isStaleDeviceUpdate(String deviceId, int channel,
+      {String? opId, DateTime? updatedAt}) {
+    final key = _pendingKey(deviceId, channel);
+    final pendingOp = _lastPendingOpId[key];
+    if (pendingOp == null) return false;
+    if (opId != null) return opId != pendingOp;
+    final since = _pendingSince[key];
+    if (since != null && updatedAt != null) {
+      if (updatedAt.isBefore(since)) return true;
+    }
+    return true;
+  }
+
+  void clearPendingIfMatches(String deviceId, int channel, String? opId) {
+    final key = _pendingKey(deviceId, channel);
+    final pendingOp = _lastPendingOpId[key];
+    if (pendingOp == null) return;
+    if (opId == null || opId == pendingOp) {
+      _lastPendingOpId.remove(key);
+      _pendingSince.remove(key);
+      _tl(opId ?? pendingOp, deviceId, channel, 'Pending cleared (confirmed)');
+    }
+  }
+
+  void discardStaleUpdate(String deviceId, int channel,
+      {String? opId, DateTime? updatedAt}) {
+    final key = _pendingKey(deviceId, channel);
+    final pendingOp = _lastPendingOpId[key];
+    ControlTimeline.mark(
+        pendingOp ?? opId ?? 'stale',
+        deviceId,
+        channel,
+        'Discarded stale device_update, opId mismatch (got=$opId pending=$pendingOp)');
   }
 
   LocalDeviceTransport _buildLocal(String address, String deviceId) {

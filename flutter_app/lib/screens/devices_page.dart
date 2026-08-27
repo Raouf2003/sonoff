@@ -498,6 +498,13 @@ class _DevicesPageState extends State<DevicesPage>
     );
     for (final e in result.channels.entries) {
       if (skipChannels?.contains(e.key) ?? false) continue;
+      if (id != null &&
+          _repository.isStaleDeviceUpdate(id, e.key,
+              updatedAt: e.value.updatedAt)) {
+        _repository.discardStaleUpdate(id, e.key,
+            updatedAt: e.value.updatedAt);
+        continue;
+      }
       _dispatchChannel(
         e.key - 1,
         isLocal
@@ -855,6 +862,12 @@ class _DevicesPageState extends State<DevicesPage>
         // confirmation — never do that. A LAN tap is instead confirmed by its
         // verified local REST read-back (LocalDeviceTransport UNCONFIRMED).
         final backendOpId = map['opId'] as String?;
+        if (_repository.isStaleDeviceUpdate(
+            deviceId!, channel, opId: backendOpId, updatedAt: updatedAt)) {
+          _repository.discardStaleUpdate(
+              deviceId, channel, opId: backendOpId, updatedAt: updatedAt);
+          return;
+        }
         if (backendOpId != null) {
           ControlTimeline.mark(backendOpId, _selectedDeviceId!, channel,
               'Socket.IO received (device_update)');
@@ -867,6 +880,9 @@ class _DevicesPageState extends State<DevicesPage>
           SocketUpdate(report, opId: backendOpId),
           now,
         );
+        if (backendOpId != null && r.committed) {
+          _repository.clearPendingIfMatches(deviceId, channel, backendOpId);
+        }
         // A committed device report is strong liveness evidence (the device
         // demonstrably talked to MQTT and produced a real state) — restore
         // ONLINE even if the paired `device_status` event is delayed or lost.
