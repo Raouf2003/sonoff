@@ -302,6 +302,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   String? _error;
   Timer? _reachTimer;
   Timer? _waitTimer;
+  Timer? _fallbackTimer;
   // Connect-step progress transparency (B/E): live elapsed counters for the
   // specifier-join await and the AP probe grace, so neither 20 s window looks
   // frozen.
@@ -679,6 +680,7 @@ String get _sweepProgressLabel {
     unawaited(_releaseWifiBinding());
     _reachTimer?.cancel();
     _waitTimer?.cancel();
+    _fallbackTimer?.cancel();
     _joinTicker?.cancel();
     _probeTicker?.cancel();
     _waitStageTimer?.cancel();
@@ -2113,6 +2115,22 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     _pollDeviceSeen();
     // Optional fast path: Socket.IO wake-up for this deviceId only.
     unawaited(_startDeviceWatch());
+    // Fallback local discovery after 30s if MQTT not yet seen — runs in parallel
+    _fallbackTimer?.cancel();
+    _fallbackTimer = Timer(const Duration(seconds: 30), () {
+      if (!mounted || _step != _Step.waiting || _isTerminal || _claimed) return;
+      debugPrint('[PROVISION] LOCAL_FALLBACK_GRACE_PERIOD_START');
+      _trace.enter(ProvisionPhase.mqtt, 'LOCAL_FALLBACK_GRACE_PERIOD_START');
+      _pollLocalFallback();
+    });
+    // Fallback local discovery after 30s if MQTT not yet seen — runs in parallel
+    _fallbackTimer?.cancel();
+    _fallbackTimer = Timer(const Duration(seconds: 30), () {
+      if (!mounted || _step != _Step.waiting || _isTerminal || _claimed) return;
+      debugPrint('[PROVISION] LOCAL_FALLBACK_GRACE_PERIOD_START');
+      _trace.enter(ProvisionPhase.mqtt, 'LOCAL_FALLBACK_GRACE_PERIOD_START');
+      _pollLocalFallback();
+    });
   }
 
   // Socket.IO fast path. Notification only - never the source of truth. The
@@ -2203,6 +2221,66 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     _waitTimer = Timer(_seenPollInterval, () => _pollDeviceSeen());
   }
 
+  Future<void> _pollLocalFallback() async {
+    if (_step != _Step.waiting || _isTerminal || _claimed) return;
+    debugPrint('[PROVISION] LOCAL_FALLBACK_MDNS_ATTEMPT');
+    _trace.enter(ProvisionPhase.mqtt, 'LOCAL_FALLBACK_MDNS_ATTEMPT');
+    String? candidateIp = _lastKnownIp;
+    if (candidateIp == null || !isValidLocalIp(candidateIp)) {
+      debugPrint('[PROVISION] LOCAL_FALLBACK no candidate IP, skipping');
+      if (!mounted || _step != _Step.waiting || _isTerminal || _claimed) return;
+      final started = _waitStart;
+      if (started != null && DateTime.now().difference(started) > _waitDeadline - const Duration(seconds: 15)) return;
+      _fallbackTimer = Timer(const Duration(seconds: 15), () => _pollLocalFallback());
+      return;
+    }
+    try {
+      final uri = Uri.parse('http://$candidateIp/cm').replace(queryParameters: {'cmnd': 'Topic'});
+      final res = await _httpGet(uri).timeout(const Duration(seconds: 3));
+      final body = jsonDecode(res.body) as Map<String, dynamic>?;
+      final topic = body?['Topic'] as String?;
+      if (topic == _issuedDeviceId) {
+        debugPrint('[PROVISION] LOCAL_FALLBACK_TOPIC_VERIFY_OK $candidateIp topic=$topic');
+        _trace.enter(ProvisionPhase.mqtt, 'LOCAL_FALLBACK_TOPIC_VERIFY_OK');
+        _fallbackTimer?.cancel();
+        _waitTimer?.cancel();
+        debugPrint('[PROVISION] LOCAL_SETUP_VIA_MDNS_FALLBACK');
+        _trace.enter(ProvisionPhase.mqtt, 'LOCAL_SETUP_VIA_MDNS_FALLBACK');
+        await _onDeviceDetectedViaFallback(candidateIp);
+        return;
+      } else {
+        debugPrint('[PROVISION] LOCAL_FALLBACK_TOPIC_VERIFY_MISMATCH expected=$_issuedDeviceId got=$topic');
+        _trace.enter(ProvisionPhase.mqtt, 'LOCAL_FALLBACK_TOPIC_VERIFY_MISMATCH');
+      }
+    } catch (e) {
+      debugPrint('[PROVISION] LOCAL_FALLBACK_TOPIC_VERIFY failed: $e');
+    }
+    if (!mounted || _step != _Step.waiting || _isTerminal || _claimed) return;
+    final started = _waitStart;
+    if (started != null && DateTime.now().difference(started) > _waitDeadline - const Duration(seconds: 15)) return;
+    _fallbackTimer = Timer(const Duration(seconds: 15), () => _pollLocalFallback());
+  }
+
+  Future<void> _onDeviceDetectedViaFallback(String ip) async {
+    if (!mounted || _step != _Step.waiting || _isTerminal) return;
+    if (_claimed) return;
+    _claimed = true;
+    _waitTimer?.cancel();
+    _fallbackTimer?.cancel();
+    _waitStageTimer?.cancel();
+    _stageRebootTimer?.cancel();
+    _closeProvisionSocket();
+    _trace.enter(ProvisionPhase.mqtt, 'DEVICE_DETECTED_VIA_FALLBACK');
+    debugPrint('[PROVISION] DEVICE_SEEN via fallback (local) ip=$ip');
+    if (mounted) {
+      setState(() {
+        _state = ProvisionState.deviceDetected;
+      });
+    }
+    unawaited(HapticFeedback.mediumImpact());
+    await _registerDevice();
+  }
+
   // Terminal stop of the wait loop. The device never appeared before the
   // deadline (or the backend could not be reached). This is a RECOVERY state,
   // not a dead-end: the wizard keeps its identity and offers Reconfigure Wi-Fi
@@ -2214,6 +2292,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // recovery for all of them is the same, so the wording stays evidence-based.
   void _finishWaitFailed() {
     _waitTimer?.cancel();
+    _fallbackTimer?.cancel();
     _waitStageTimer?.cancel();
     _stageRebootTimer?.cancel();
     _closeProvisionSocket();
@@ -2236,6 +2315,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     if (_isTerminal) return;
     _claimed = true;
     _waitTimer?.cancel();
+    _fallbackTimer?.cancel();
     _waitStageTimer?.cancel();
     _stageRebootTimer?.cancel();
     _closeProvisionSocket();
