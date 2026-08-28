@@ -1092,13 +1092,13 @@ String get _sweepProgressLabel {
   // back. The device only leaves the AP for good once Restart 1 fires with the
   // home SSID present.
   Future<bool> _waitForDeviceOnAp() async {
-    for (var attempt = 1; attempt <= 20; attempt++) {
+    for (var attempt = 1; attempt <= 30; attempt++) {
       await _ensureBoundToWifi();
       if (await _isReachable()) {
         debugPrint('[PROVISION] device back on setup AP after write-triggered reboot');
         return true;
       }
-      if (attempt == 20) {
+      if (attempt == 30) {
         debugPrint('[PROVISION] device did not return to setup AP after reboot');
         return false;
       }
@@ -1594,6 +1594,50 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   if (mounted) {
     setState(() => _state = ProvisionState.wifiTestSucceeded);
   }
+  for (var i = 0; i < 3; i++) {
+    if (await _isReachable()) break;
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+  }
+  debugPrint('[PROVISION] tearing down STA after WifiTest3 success to keep AP-only');
+  _trace.debugTrace(ProvisionPhase.wifi, label: 'STA_TEARDOWN_START');
+  bool staTeardownOk = false;
+  try {
+    final ok = await _sendCommand('Wifi 0');
+    if (ok) {
+      bool apStable = false;
+      for (var i = 0; i < 3; i++) {
+        if (await _isReachable()) {
+          apStable = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+      if (apStable) {
+        staTeardownOk = true;
+        debugPrint('[PROVISION] STA teardown OK, AP stable');
+        _trace.debugTrace(ProvisionPhase.wifi, label: 'STA_TEARDOWN_OK');
+        _trace.debugTrace(ProvisionPhase.wifi, label: 'AP_STABLE_POST_TEARDOWN');
+      } else {
+        debugPrint('[PROVISION] STA teardown: AP not stable after Wifi 0');
+        _trace.debugTrace(ProvisionPhase.wifi, label: 'STA_TEARDOWN_FAILED');
+      }
+    } else {
+      debugPrint('[PROVISION] Wifi 0 command failed');
+      _trace.debugTrace(ProvisionPhase.wifi, label: 'STA_TEARDOWN_FAILED');
+    }
+  } catch (e) {
+    debugPrint('[PROVISION] STA teardown exception: $e');
+    _trace.debugTrace(ProvisionPhase.wifi, label: 'STA_TEARDOWN_FAILED');
+  }
+  if (!staTeardownOk) {
+    final apReachable = await _isReachable();
+    if (apReachable) {
+      debugPrint('[PROVISION] STA teardown failed but AP still reachable, continuing');
+      _trace.debugTrace(ProvisionPhase.wifi, label: 'AP_STABLE_POST_TEARDOWN');
+    } else {
+      debugPrint('[PROVISION] STA teardown failed and AP not reachable, but continuing as best-effort');
+    }
+  }
 
   // ── STEP 2/8: broker + credentials ───────────────────────────────────────
   _setSweepStep(1); // broker
@@ -1791,7 +1835,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   Future<bool> _applyIdentityBatched(String topic) async {
     const fullTopic = '%prefix%/%topic%/';
     final batched = 'Backlog Topic $topic; FullTopic $fullTopic';
-    final ok = await _sendCommand(batched);
+    final ok = await _sendCommand(batched, attempts: 3);
     debugPrint('[PROVISION] identity Backlog response=${ok ? 'OK' : 'FAILED'}');
     if (!ok) return false;
     await _waitForDeviceOnAp();
