@@ -132,6 +132,10 @@ class DeviceRepositoryService {
   /// Keyed by "$deviceId:$channel" — stores the opId from the 202 pending response.
   final Map<String, String> _lastPendingOpId = {};
   final Map<String, DateTime> _pendingSince = {};
+  final Map<String, Timer> _pendingTimers = {};
+
+  static const Duration _kPendingAckTimeout = Duration(milliseconds: 5300);
+  static const Duration _kStaleWindow = Duration(milliseconds: 300);
 
   /// Last reason the claim-time local HTTP setup failed (for the wizard's
   /// terminal diagnostic). `null` before the first setup attempt or after a
@@ -670,6 +674,7 @@ class DeviceRepositoryService {
               final key = '$deviceId:$channel';
               _lastPendingOpId[key] = opId;
               _pendingSince[key] = DateTime.now();
+              _schedulePendingTimeout(deviceId, channel, opId);
             }
             _lastSource = DeviceTransportSource.cloud;
             await _seedOneCandidate(deviceId, cloud['lastIp']);
@@ -699,6 +704,7 @@ class DeviceRepositoryService {
         if (_isLogicalRejection(e)) {
           _tl(opId, deviceId, channel, '$attempt attempt rejected');
           _log('$attempt control REJECTED for $deviceId (${_describe(e)})');
+          if (opId != null) clearPendingIfMatches(deviceId, channel, opId);
           rethrow;
         }
         if (i == 0) {
@@ -731,10 +737,12 @@ class DeviceRepositoryService {
               if (_isLogicalRejection(fastError)) {
                 _tl(opId, deviceId, channel, 'Fast fallback rejected');
                 _log('fast fallback REJECTED for $deviceId (${_describe(fastError)})');
+                if (opId != null) clearPendingIfMatches(deviceId, channel, opId);
                 rethrow;
               }
               _log('fast fallback failed for $deviceId (${_describe(fastError)}); '
                   'surfacing cloud error without full discovery');
+              if (opId != null) clearPendingIfMatches(deviceId, channel, opId);
               // ignore: unnecessary_non_null_assertion
               Error.throwWithStackTrace(firstError!, StackTrace.current);
             }
@@ -755,6 +763,7 @@ class DeviceRepositoryService {
         _tl(opId, deviceId, channel, 'Both transports unavailable');
         _log('$attempt control failed for $deviceId (${_describe(e)}); '
             'both transports exhausted');
+        if (opId != null) clearPendingIfMatches(deviceId, channel, opId);
         throw DeviceTransportException(
           'The device could not be reached locally or online.',
           cause: firstError,
@@ -1221,7 +1230,8 @@ class DeviceRepositoryService {
     if (opId != null) return opId != pendingOp;
     final since = _pendingSince[key];
     if (since != null && updatedAt != null) {
-      if (updatedAt.isBefore(since)) return true;
+      if (updatedAt.isBefore(since.subtract(_kStaleWindow))) return true;
+      return false;
     }
     return true;
   }
@@ -1231,10 +1241,25 @@ class DeviceRepositoryService {
     final pendingOp = _lastPendingOpId[key];
     if (pendingOp == null) return;
     if (opId == null || opId == pendingOp) {
+      _pendingTimers[key]?.cancel();
+      _pendingTimers.remove(key);
       _lastPendingOpId.remove(key);
       _pendingSince.remove(key);
       _tl(opId ?? pendingOp, deviceId, channel, 'Pending cleared (confirmed)');
     }
+  }
+
+  void _schedulePendingTimeout(String deviceId, int channel, String opId) {
+    final key = _pendingKey(deviceId, channel);
+    _pendingTimers[key]?.cancel();
+    _pendingTimers[key] = Timer(_kPendingAckTimeout, () {
+      if (_lastPendingOpId[key] == opId) {
+        _lastPendingOpId.remove(key);
+        _pendingSince.remove(key);
+        _pendingTimers.remove(key);
+        _tl(opId, deviceId, channel, 'Pending auto-cleared (ACK timeout)');
+      }
+    });
   }
 
   void discardStaleUpdate(String deviceId, int channel,

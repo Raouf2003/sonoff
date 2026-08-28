@@ -505,13 +505,16 @@ class _DevicesPageState extends State<DevicesPage>
             updatedAt: e.value.updatedAt);
         continue;
       }
-      _dispatchChannel(
+      final r = _dispatchChannel(
         e.key - 1,
         isLocal
             ? LocalReport(e.value) as ChannelEvent
             : CloudReport(e.value, deviceOnline: result.online) as ChannelEvent,
         now,
       );
+      if (id != null && r.committed) {
+        _repository.clearPendingIfMatches(id, e.key, null);
+      }
     }
   }
 
@@ -880,7 +883,7 @@ class _DevicesPageState extends State<DevicesPage>
           SocketUpdate(report, opId: backendOpId),
           now,
         );
-        if (backendOpId != null && r.committed) {
+        if (r.committed) {
           _repository.clearPendingIfMatches(deviceId, channel, backendOpId);
         }
         // A committed device report is strong liveness evidence (the device
