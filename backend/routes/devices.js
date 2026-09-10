@@ -18,6 +18,7 @@ const PROVISION_ERROR_STATUS = {
   INVALID_MAC: 400,
   BAD_CHANNELS: 400,
   BAD_NAME: 400,
+  BAD_PROFILE: 400,
   DEVICE_ALREADY_EXISTS: 409,
   DEVICE_ALREADY_REGISTERED: 409,
   DEVICE_NOT_SEEN: 409,
@@ -41,12 +42,13 @@ router.get('/', async (req, res) => {
 // point, so concurrent registrations of one MAC resolve to one Device.
 router.post('/provision', async (req, res) => {
   try {
-    const { deviceId, name, channels } = req.body || {};
+    const { deviceId, name, channels, deviceProfile } = req.body || {};
     const device = await deviceProvisioningService.provision({
       ownerId: req.userId,
       deviceId,
       name,
       channels,
+      deviceProfile,
     });
     res.status(201).json(device.toJSON());
   } catch (err) {

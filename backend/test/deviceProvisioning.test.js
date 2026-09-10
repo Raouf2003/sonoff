@@ -372,6 +372,31 @@ test('claim without a hint leaves lastIp null (no seed, no crash)', async () => 
   assert.deepStrictEqual(deviceModel.updateOneCalls, []);
 });
 
+test('omitted deviceProfile defaults to sonoff with unchanged type', async () => {
+  const { svc } = service({ recent: true });
+  const device = await provision(svc);
+  assert.strictEqual(device.deviceProfile, 'sonoff_4ch_pro_r3');
+  assert.strictEqual(device.type, 'sonoff-4ch');
+  assert.strictEqual(device.channels, 4);
+});
+
+test('lilygo profile is stored with a namespaced type', async () => {
+  const { svc } = service({ recent: true });
+  const device = await provision(svc, { deviceProfile: 'lilygo_trelay_esp32' });
+  assert.strictEqual(device.deviceProfile, 'lilygo_trelay_esp32');
+  assert.strictEqual(device.type, 'lilygo-trelay-4ch');
+  assert.strictEqual(device.channels, 4);
+});
+
+test('unknown deviceProfile is rejected without creating a device', async () => {
+  const { svc, deviceModel } = service({ recent: true });
+  await assert.rejects(
+    provision(svc, { deviceProfile: 'acme-9ch' }),
+    (err) => err.code === 'BAD_PROFILE',
+  );
+  assert.strictEqual(deviceModel.rows.length, 0);
+});
+
 test('authMiddleware: missing/bad/expired token => 401, valid token sets userId', async () => {
   const missing = { headers: {} };
   const res401 = { statusCode: 0, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };

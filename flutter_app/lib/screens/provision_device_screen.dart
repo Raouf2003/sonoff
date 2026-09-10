@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../models/device_profile.dart';
 import '../models/device_type.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -19,6 +20,7 @@ import '../services/provisioning_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../widgets/device_type_picker.dart';
+import '../widgets/hardware_profile_picker.dart';
 
 enum _Step { connect, provision, waiting, localControl }
 
@@ -291,6 +293,7 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   bool _manualWifi = false;
   DeviceType _deviceType = DeviceType.fourRelay;
+  HardwareProfile _hardwareProfile = HardwareProfile.sonoff4chProR3;
 
   _Step _step = _Step.connect;
   // Explicit state machine. The UI renders only [provisionUserLabel]; the log
@@ -1702,7 +1705,9 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // device reporting only POWER1 — exactly the bug this fixes. oneRelay writes
   // nothing (a stock Tasmota already exposes one relay).
   _setSweepStep(3); // module
-  final module = _deviceType.tasmotaModule;
+  final module = _deviceType == DeviceType.fourRelay
+      ? _hardwareProfile.tasmotaModule
+      : _deviceType.tasmotaModule;
   if (module != null) {
     debugPrint(
         '[PROVISION] configuring module $module for ${_deviceType.name} '
@@ -2352,6 +2357,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         deviceId: deviceId,
         name: name,
         channels: _deviceType.channelCount,
+        deviceProfile: _deviceType == DeviceType.fourRelay ? _hardwareProfile.id : null,
       );
       _trace.enter(ProvisionPhase.claim, 'REGISTERED');
       _recoveryMode = false;
@@ -3656,6 +3662,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
           value: _deviceType,
           onChanged: (t) => setState(() => _deviceType = t),
         ),
+        if (_deviceType == DeviceType.fourRelay) ...[
+          const SizedBox(height: AppSpacing.md),
+          HardwareProfilePicker(
+            value: _hardwareProfile,
+            onChanged: (p) => setState(() => _hardwareProfile = p),
+          ),
+        ],
         const SizedBox(height: AppSpacing.md),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),

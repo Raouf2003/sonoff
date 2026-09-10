@@ -25,6 +25,7 @@ class _FakeApi extends ApiService {
     required String deviceId,
     required String name,
     required int channels,
+    String? deviceProfile,
   }) async {
     provisionCalls++;
     if (!provisionSucceeds) {

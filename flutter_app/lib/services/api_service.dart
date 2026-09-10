@@ -309,11 +309,13 @@ class ApiService {
     required String deviceId,
     required String name,
     required int channels,
+    String? deviceProfile,
   }) async {
     final res = await post('/api/devices/provision', {
       'deviceId': deviceId,
       'name': name,
       'channels': channels,
+      if (deviceProfile != null) 'deviceProfile': deviceProfile,
     });
     return _checkObject(res, const [201], 'Could not register the device');
   }

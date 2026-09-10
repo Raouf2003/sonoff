@@ -30,6 +30,12 @@ const deviceSchema = new mongoose.Schema({
     trim: true,
     maxlength: 30,
   },
+  deviceProfile: {
+    type: String,
+    default: 'sonoff_4ch_pro_r3',
+    trim: true,
+    maxlength: 40,
+  },
   channels: {
     type: Number,
     default: 4,

@@ -1,0 +1,24 @@
+name: stees_local
+description: "STEES Local-Only controller for Sonoff 4CH Pro R3 over Tasmota SoftAP HTTP. No cloud, no MQTT, no backend."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.1.0
+  http: ^1.2.0
+  shared_preferences: ^2.3.0
+  flutter_secure_storage: ^9.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

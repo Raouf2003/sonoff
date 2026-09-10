@@ -26,7 +26,7 @@ class DeviceProvisioningService {
     this.onProvisioned = null; // (deviceId) => void
   }
 
-  async provision({ ownerId, deviceId, name, channels }) {
+  async provision({ ownerId, deviceId, name, channels, deviceProfile }) {
     // The device identity is a canonical MAC, strictly validated: anything that
     // is not exactly 12 hex digits (after stripping separators) is rejected.
     const mac = normalizeMac(deviceId);
@@ -48,6 +48,19 @@ class DeviceProvisioningService {
       err.code = 'BAD_NAME';
       throw err;
     }
+
+    const KNOWN_PROFILES = ['sonoff_4ch_pro_r3', 'lilygo_trelay_esp32'];
+    const profile = deviceProfile === undefined || deviceProfile === null
+      ? 'sonoff_4ch_pro_r3'
+      : String(deviceProfile);
+    if (!KNOWN_PROFILES.includes(profile)) {
+      const err = new Error('unknown deviceProfile');
+      err.code = 'BAD_PROFILE';
+      throw err;
+    }
+    const typeFor = (ch) => profile === 'lilygo_trelay_esp32'
+      ? `lilygo-trelay-${ch}ch`
+      : (ch === 1 ? 'sonoff-1ch' : `sonoff-${ch}ch`);
 
     // Duplicate identity checks happen BEFORE possession: if the MAC is already
     // in this user's account (or another's), say so immediately - there is
@@ -80,7 +93,8 @@ class DeviceProvisioningService {
               deviceId: mac,
               ownerId,
               name: cleanName,
-              type: ch === 1 ? 'sonoff-1ch' : `sonoff-${ch}ch`,
+              type: typeFor(ch),
+              deviceProfile: profile,
               channels: ch,
               claimedAt: new Date(),
               hardwareId: mac,
@@ -93,7 +107,8 @@ class DeviceProvisioningService {
           deviceId: mac,
           name: cleanName,
           ownerId,
-          type: ch === 1 ? 'sonoff-1ch' : `sonoff-${ch}ch`,
+          type: typeFor(ch),
+          deviceProfile: profile,
           channels: ch,
           claimedAt: new Date(),
           hardwareId: mac,
