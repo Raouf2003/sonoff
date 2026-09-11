@@ -151,6 +151,7 @@ class ProvisionDeviceScreen extends StatefulWidget {
 class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
     with WidgetsBindingObserver {
   static const String _deviceUrl = 'http://192.168.4.1';
+  String _apBase = _deviceUrl;
 
   // Expected Tasmota AP SSID used only for the Wi-Fi binding sanity check.
   // The trailing XXXX acts as a tasmota- prefix wildcard in MainActivity.
@@ -1046,20 +1047,80 @@ String get _sweepProgressLabel {
     _wifiBound = false;
   }
 
-  Future<bool> _isReachable() async {
+  Future<String?> _setupApGateway() async {
     try {
-      debugPrint('[PROVISION] probing $_deviceUrl');
-      final res = await _httpGet(Uri.parse(_deviceUrl))
-          .timeout(const Duration(seconds: 3));
-      // Any HTTP response counts as reachable, regardless of status code.
-      debugPrint('[PROVISION] probe status=${res.statusCode}');
-      return true;
-    } catch (_) {
-      debugPrint('[PROVISION] probe unreachable (connection failed or timeout)');
-      _wifiBound = false;
-      await _logNetworkInfo('probe failed');
-      return false;
+      final info = await _wifiBindChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getWifiDetails');
+      final gateway = info?['gateway']?.toString();
+      if (gateway == null ||
+          gateway.isEmpty ||
+          gateway == '0.0.0.0' ||
+          gateway == Uri.parse(_deviceUrl).host) {
+        debugPrint('[PROVISION] DHCP gateway unusable: $gateway');
+        return null;
+      }
+      debugPrint('[PROVISION] DHCP gateway=$gateway server=${info?['server']} ip=${info?['ip']}');
+      return 'http://$gateway';
+    } catch (e) {
+      debugPrint('[PROVISION] DHCP details unavailable: $e');
+      return null;
     }
+  }
+
+  Future<List<String>> _linkGateways() async {
+    try {
+      final info = await _wifiBindChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getApLinkInfo');
+      if (info?['linked'] != true) return const [];
+      final raw = info?['gateways'];
+      if (raw is! List) return const [];
+      final out = <String>[];
+      for (final g in raw) {
+        final host = '$g'.trim();
+        if (host.isEmpty ||
+            host == '0.0.0.0' ||
+            host == '::' ||
+            host == Uri.parse(_deviceUrl).host ||
+            host.startsWith('fe80')) {
+          continue;
+        }
+        final url = 'http://$host';
+        if (!out.contains(url)) out.add(url);
+      }
+      if (out.isNotEmpty) {
+        debugPrint('[PROVISION] link gateways=${out.join(',')} iface=${info?['interface']} addrs=${info?['addresses']}');
+      }
+      return out;
+    } catch (e) {
+      debugPrint('[PROVISION] link info unavailable: $e');
+      return const [];
+    }
+  }
+
+  Future<bool> _isReachable() async {
+    final gatewayUrl = await _setupApGateway();
+    // ignore: use_null_aware_elements
+    final candidates = [
+      _deviceUrl,
+      if (gatewayUrl != null) gatewayUrl,
+      ...await _linkGateways(),
+    ];
+    for (final target in candidates) {
+      try {
+        debugPrint('[PROVISION] probing $target');
+        final res = await _httpGet(Uri.parse(target))
+            .timeout(const Duration(seconds: 3));
+        // Any HTTP response counts as reachable, regardless of status code.
+        debugPrint('[PROVISION] probe $target status=${res.statusCode}');
+        _apBase = target;
+        return true;
+      } catch (_) {
+        debugPrint('[PROVISION] probe $target unreachable (connection failed or timeout)');
+      }
+    }
+    _wifiBound = false;
+    await _logNetworkInfo('probe failed');
+    return false;
   }
 
   // Single HTTP fetch path for every Tasmota setup-AP request. Uses the
@@ -1110,6 +1171,18 @@ String get _sweepProgressLabel {
       await Future<void>.delayed(const Duration(milliseconds: 700));
     }
     return false;
+  }
+
+  int _noWifiStreak = 0;
+
+  Future<bool> _isWifiActive() async {
+    try {
+      final info = await _wifiBindChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getNetworkInfo');
+      return info?['wifi'] == true;
+    } catch (_) {
+      return true;
+    }
   }
 
   Future<bool> _logNetworkInfo(String tag) async {
@@ -1169,6 +1242,8 @@ String get _sweepProgressLabel {
     final gen = _apProbeGen;
     _apProbeStart = DateTime.now();
     _apAttempt = 0;
+    _noWifiStreak = 0;
+    _apBase = _deviceUrl;
     _wifiBound = false;
     debugPrint('[PROVISION] phase=$_phaseLabel app resumed/restarting detection, waiting for network stabilization');
     if (mounted) {
@@ -1178,7 +1253,12 @@ String get _sweepProgressLabel {
       });
     }
     // Small stabilization delay BEFORE the first probe (not after a failure).
+    // Programmatic joins need longer: DHCP on a fresh SoftAP association can
+    // take seconds, and probing before the phone has an IP always fails.
     // E: per-second elapsed counter keeps the grace window visibly alive.
+    final stabilize = _apConnectMode
+        ? const Duration(milliseconds: 2500)
+        : _stabilizeDelay;
     _probeElapsedSec = 0;
     _probeTicker?.cancel();
     _probeTicker = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -1188,7 +1268,7 @@ String get _sweepProgressLabel {
       }
       setState(() => _probeElapsedSec = DateTime.now().difference(_apProbeStart!).inSeconds);
     });
-    _reachTimer = Timer(_stabilizeDelay, () => _runApProbe(gen));
+    _reachTimer = Timer(stabilize, () => _runApProbe(gen));
   }
 
   /// C: manual-path wrong-network detection — if the phone is clearly on a
@@ -1281,6 +1361,26 @@ String get _sweepProgressLabel {
         'You\u2019re connected to ${activeSsid ?? 'your own network'} \u2014 that '
         'isn\u2019t the device\u2019s setup network. Reopen the picker and choose '
         'the device\u2019s network (starts with "tasmota-", "T-Relay", or shows its ID).',
+      );
+      return;
+    }
+
+    // Not reachable YET. If the phone is not on Wi-Fi at all (mobile data
+    // only), no probe can ever succeed — fail fast instead of burning the
+    // whole grace window. Skipped in programmatic mode: a specifier-joined
+    // network is never the "active" network, so its Wi-Fi flags always read
+    // false even while the bind is perfectly usable.
+    if (!_apConnectMode && !await _isWifiActive()) {
+      _noWifiStreak++;
+    } else {
+      _noWifiStreak = 0;
+    }
+    if (_noWifiStreak >= 3) {
+      debugPrint('[PROVISION] no Wi-Fi active — failing fast');
+      await _failProbe(
+        'No Wi-Fi connection detected — the phone is on mobile data. Join the '
+        'device\u2019s setup network (starts with "tasmota-", "T-Relay", or shows its ID), '
+        'then tap Continue to try again.',
       );
       return;
     }
@@ -1499,7 +1599,7 @@ String get _sweepProgressLabel {
 
   // Reads the immutable Tasmota MAC via the read-only `Status 5` query.
   Future<String?> _readDeviceMac() async {    try {
-      final uri = Uri.parse('$_deviceUrl/cm').replace(
+      final uri = Uri.parse('$_apBase/cm').replace(
         queryParameters: {'cmnd': 'Status 5'},
       );
       debugPrint('[PROVISION] reading device MAC (Status 5)');
@@ -1797,7 +1897,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   Future<bool> _verifyModule(int module) async {
     for (var attempt = 1; attempt <= 6; attempt++) {
       try {
-        final uri = Uri.parse('$_deviceUrl/cm')
+        final uri = Uri.parse('$_apBase/cm')
             .replace(queryParameters: {'cmnd': 'Module'});
         debugPrint('[PROVISION] read-back GET $uri (attempt $attempt)');
         final res = await _httpGet(uri).timeout(const Duration(seconds: 3));
@@ -1873,7 +1973,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       bool? verdict; // null -> retry, true/false -> settled
       var rawBody = '';
       try {
-        final uri = Uri.parse('$_deviceUrl/cm').replace(
+        final uri = Uri.parse('$_apBase/cm').replace(
           queryParameters: {'cmnd': command},
         );
         debugPrint('[PROVISION] HTTP GET $uri');
@@ -1943,7 +2043,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   Future<bool> _verifySetting(String key, String expected) async {
     for (var attempt = 1; attempt <= 6; attempt++) {
       try {
-        final uri = Uri.parse('$_deviceUrl/cm').replace(
+        final uri = Uri.parse('$_apBase/cm').replace(
           queryParameters: {'cmnd': key},
         );
         debugPrint('[PROVISION] read-back GET $uri (attempt $attempt)');
@@ -2011,7 +2111,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       return WifiTestResult.unknown;
     }
 
-    final startUri = Uri.parse('$_deviceUrl/cm').replace(
+    final startUri = Uri.parse('$_apBase/cm').replace(
       queryParameters: {'cmnd': 'WifiTest3 $ssid+$password'},
     );
     try {
@@ -2035,7 +2135,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     // deadline expires. A transient HTTP failure mid-test is a LOCAL AP
     // communication problem, not a Wi-Fi verdict - retry the loop, and only
     // classify if we exhaust the deadline.
-    final pollUri = Uri.parse('$_deviceUrl/cm').replace(
+    final pollUri = Uri.parse('$_apBase/cm').replace(
       queryParameters: {'cmnd': 'WifiTest'},
     );
     final deadline = DateTime.now().add(_wifiTestTotalDeadline);

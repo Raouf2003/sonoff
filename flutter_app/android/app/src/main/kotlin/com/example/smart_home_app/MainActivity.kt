@@ -103,6 +103,8 @@ class MainActivity : FlutterActivity() {
                     }
                     "releaseWifiBinding" -> releaseWifiBinding(result)
                     "getNetworkInfo" -> getNetworkInfo(result)
+                    "getWifiDetails" -> getWifiDetails(result)
+                    "getApLinkInfo" -> getApLinkInfo(result)
                     else -> result.notImplemented()
                 }
             }
@@ -511,16 +513,77 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun getNetworkInfo(result: MethodChannel.Result) {
-        val nw = boundNetwork ?: connectivityManager.activeNetwork
+        val specifierBound = apConnectBoundNetwork != null
+        val nw = apConnectBoundNetwork ?: boundNetwork ?: connectivityManager.activeNetwork
         val caps = nw?.let { connectivityManager.getNetworkCapabilities(it) }
         result.success(
             mapOf(
-                "bound" to (boundNetwork != null),
+                "bound" to (boundNetwork != null || specifierBound),
+                "specifierBound" to specifierBound,
                 "wifi" to (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true),
                 "internet" to (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true),
                 "validated" to (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true),
             )
         )
+    }
+
+    private fun intToIp(ip: Int): String {
+        return "${ip and 0xFF}.${(ip shr 8) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 24) and 0xFF}"
+    }
+
+    /**
+     * DHCP details of the active Wi-Fi: the phone's own IP, the gateway (the
+     * AP itself on Tasmota SoftAPs, whatever subnet it uses), the DHCP server
+     * and the netmask, plus the readable SSID when available. Lets Dart probe
+     * the ACTUAL gateway instead of assuming 192.168.4.1 on every board.
+     */
+    private fun getWifiDetails(result: MethodChannel.Result) {
+        try {
+            val wm = wifiManager
+            val dhcp = runCatching { wm?.dhcpInfo }.getOrNull()
+            result.success(
+                mapOf(
+                    "ip" to (dhcp?.let { intToIp(it.ipAddress) }),
+                    "gateway" to (dhcp?.let { intToIp(it.gateway) }),
+                    "server" to (dhcp?.let { intToIp(it.serverAddress) }),
+                    "netmask" to (dhcp?.let { intToIp(it.netmask) }),
+                    "ssid" to readSsid(),
+                )
+            )
+        } catch (e: Exception) {
+            result.error("DETAILS_FAILED", e.message ?: "cannot read DHCP info", null)
+        }
+    }
+
+    /**
+     * Link properties of the AP network: interface addresses and route
+     * gateways of the specifier-joined (or bound/active) network. This is how
+     * Dart learns the AP's ACTUAL subnet (some boards don't use 192.168.4.1)
+     * and which addresses to probe. Never throws: reports linked=false.
+     */
+    private fun getApLinkInfo(result: MethodChannel.Result) {
+        try {
+            val nw = apConnectBoundNetwork ?: boundNetwork
+                ?: connectivityManager.activeNetwork
+            if (nw == null) {
+                result.success(mapOf("linked" to false))
+                return
+            }
+            val lp = runCatching { connectivityManager.getLinkProperties(nw) }.getOrNull()
+            val addresses = lp?.linkAddresses?.map { it.toString() } ?: emptyList<String>()
+            val gateways = lp?.routes?.mapNotNull { it.gateway?.hostAddress }?.distinct()
+                ?: emptyList<String>()
+            result.success(
+                mapOf(
+                    "linked" to true,
+                    "interface" to lp?.interfaceName,
+                    "addresses" to addresses,
+                    "gateways" to gateways,
+                )
+            )
+        } catch (e: Exception) {
+            result.error("LINKINFO_FAILED", e.message ?: "cannot read link properties", null)
+        }
     }
 
     private fun releaseWifiBinding(result: MethodChannel.Result?) {
