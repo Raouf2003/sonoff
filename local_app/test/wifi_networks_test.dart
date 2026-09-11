@@ -19,6 +19,12 @@ void main() {
     ]);
   });
 
+  test('lilygo board names count as device APs', () {
+    expect(const WifiNetwork(name: 'T-Relay-AB12').looksLikeTasmota, isTrue);
+    expect(const WifiNetwork(name: 'trelay-esp32').looksLikeTasmota, isTrue);
+    expect(const WifiNetwork(name: 'HomeNet').looksLikeTasmota, isFalse);
+  });
+
   test('looksLikeTasmota is a hint only', () {
     expect(const WifiNetwork(name: 'tasmota-1').looksLikeTasmota, isTrue);
     expect(const WifiNetwork(name: 'Tasmota-XYZ').looksLikeTasmota, isTrue);

@@ -315,6 +315,7 @@ class ApiService {
       'deviceId': deviceId,
       'name': name,
       'channels': channels,
+      // ignore: use_null_aware_elements
       if (deviceProfile != null) 'deviceProfile': deviceProfile,
     });
     return _checkObject(res, const [201], 'Could not register the device');

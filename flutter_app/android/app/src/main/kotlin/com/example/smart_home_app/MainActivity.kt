@@ -502,6 +502,11 @@ class MainActivity : FlutterActivity() {
             Log.d("SteesProvision", "[probe] active SSID is a MAC-shaped device AP; accepting for bind")
             return true
         }
+        val lower = act.lowercase()
+        if (lower.startsWith("tasmota") || lower.startsWith("trelay") || lower.startsWith("t-relay")) {
+            Log.d("SteesProvision", "[probe] active SSID is a device-family AP; accepting for bind")
+            return true
+        }
         return false
     }
 

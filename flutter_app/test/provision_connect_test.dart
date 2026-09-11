@@ -79,6 +79,22 @@ void main() {
     });
   });
 
+  group('device AP SSID recognition', () {
+    test('factory, MAC-named and LilyGO names count as device APs', () {
+      expect(isDeviceApSsid('tasmota-AB12CD'), isTrue);
+      expect(isDeviceApSsid('Tasmota-XXXXXX'), isTrue);
+      expect(isDeviceApSsid('34987AC30304'), isTrue);
+      expect(isDeviceApSsid('T-Relay-AB12'), isTrue);
+      expect(isDeviceApSsid('trelay-esp32'), isTrue);
+    });
+
+    test('router-like names are not device APs', () {
+      expect(isDeviceApSsid('HomeNet'), isFalse);
+      expect(isDeviceApSsid('MyRouter_5G'), isFalse);
+      expect(isDeviceApSsid(''), isFalse);
+    });
+  });
+
   group('provisioning state machine has no session-prep state', () {
     test('creatingSession was removed from ProvisionState', () {
       final labels = <String>[

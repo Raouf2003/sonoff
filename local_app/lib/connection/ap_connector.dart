@@ -44,9 +44,13 @@ class WifiNetwork {
   final int? rssi;
   final String? bssid;
 
-  bool get looksLikeTasmota =>
-      name.toLowerCase().startsWith('tasmota') ||
-      RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(name.trim());
+  bool get looksLikeTasmota {
+    final lower = name.toLowerCase();
+    return lower.startsWith('tasmota') ||
+        lower.startsWith('trelay') ||
+        lower.startsWith('t-relay') ||
+        RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(name.trim());
+  }
 }
 
 List<WifiNetwork> sortNetworks(List<WifiNetwork> networks) {

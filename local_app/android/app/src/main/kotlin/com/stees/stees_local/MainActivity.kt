@@ -313,6 +313,10 @@ class MainActivity : FlutterActivity() {
         if (macSsidRe.matches(act)) {
             return true
         }
+        val lower = act.lowercase()
+        if (lower.startsWith("tasmota") || lower.startsWith("trelay") || lower.startsWith("t-relay")) {
+            return true
+        }
         return false
     }
 

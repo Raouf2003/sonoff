@@ -1202,9 +1202,7 @@ String get _sweepProgressLabel {
           .invokeMethod<Map<dynamic, dynamic>>('getNetworkInfo');
       final ssid = info?['activeSsid']?.toString();
       if (ssid == null || ssid.isEmpty || ssid == '<unknown>') return false;
-      final looksDevice = ssid.toLowerCase().startsWith('tasmota') ||
-          RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(ssid.trim());
-      return !looksDevice;
+      return !isDeviceApSsid(ssid);
     } catch (_) {
       return false; // unreadable: no verdict, keep probing
     }
@@ -1282,7 +1280,7 @@ String get _sweepProgressLabel {
       await _failProbe(
         'You\u2019re connected to ${activeSsid ?? 'your own network'} \u2014 that '
         'isn\u2019t the device\u2019s setup network. Reopen the picker and choose '
-        'the device\u2019s network (starts with "tasmota-" or shows its ID).',
+        'the device\u2019s network (starts with "tasmota-", "T-Relay", or shows its ID).',
       );
       return;
     }
@@ -1359,7 +1357,8 @@ String get _sweepProgressLabel {
         _provisioning = false;
         _error = 'The device is not reachable on its setup Wi-Fi anymore. '
             'It likely already connected to your home network; power-cycle it '
-            'and, if it reconnects instead of showing the tasmota-XXXX AP, '
+            'and, if it reconnects instead of showing its setup AP '
+            '(tasmota-XXXX or T-Relay…), '
             'factory-reset it (hold its button ~10s), then try again.';
       });
       return;
@@ -1468,8 +1467,8 @@ String get _sweepProgressLabel {
                 '$_lastFailedStep). It\u2019s still reachable \u2014 try again.'
             : 'The device did not accept all settings '
                 '(failed step: $_lastFailedStep). Power-cycle it (hold its '
-                'button ~10s to factory-reset if it no longer shows the '
-                'tasmota-XXXX access point), then try again.';
+                'button ~10s to factory-reset if it no longer shows its '
+                'setup access point), then try again.';
       });
       return;
     }
@@ -3206,7 +3205,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
               _ConnectStepLine(
                 index: 1,
                 text: 'Power on the device \u2014 its setup network starts '
-                    'with "tasmota-" or shows its device ID.',
+                    'with "tasmota-" or "T-Relay", or shows its device ID.',
               ),
               const SizedBox(height: AppSpacing.sm),
               _ConnectStepLine(
@@ -3527,8 +3526,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         title: const Text('Recovery steps'),
         content: const Text(
           '1. Power-cycle the device and wait 30 seconds for its setup AP '
-          '(tasmota-XXXX) to appear.\n\n'
-          '2. Open Wi-Fi Settings and connect to the tasmota-XXXX network.\n\n'
+          '(tasmota-XXXX or T-Relay…) to appear.\n\n'
+          '2. Open Wi-Fi Settings and connect to that network.\n\n'
           '3. Return here and tap Continue.\n\n'
           '4. Make sure the home Wi-Fi name and password are correct, then tap '
           'Provision Device.',
@@ -5079,11 +5078,18 @@ class ScannedNetwork {
   }
 }
 
-// Tasmota setup APs: factory name "tasmota-*" or the MAC/hostname a
-// previously-configured device broadcasts in setup mode (bare 12 hex digits).
-bool isDeviceApSsid(String ssid) =>
-    ssid.toLowerCase().startsWith('tasmota') ||
-    RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(ssid.trim());
+// Device setup APs: factory name "tasmota-*", the MAC/hostname a
+// previously-configured device broadcasts in setup mode (bare 12 hex digits),
+// or a LilyGO T-Relay board name ("trelay*", "t-relay*"). This is ONLY a
+// discovery/UI hint — the 192.168.4.1 probe stays authoritative, and an
+// unrecognized SSID must never by itself fail provisioning.
+bool isDeviceApSsid(String ssid) {
+  final lower = ssid.toLowerCase();
+  return lower.startsWith('tasmota') ||
+      lower.startsWith('trelay') ||
+      lower.startsWith('t-relay') ||
+      RegExp(r'^[0-9A-Fa-f]{12}$').hasMatch(ssid.trim());
+}
 
 int rssiBars(int rssi) => rssi >= -55 ? 3 : (rssi >= -67 ? 2 : (rssi >= -75 ? 1 : 0));
 
