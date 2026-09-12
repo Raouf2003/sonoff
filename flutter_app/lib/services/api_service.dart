@@ -524,4 +524,45 @@ class ApiService {
     });
     _checkObject(res, const [200], 'Failed to send MQTT command');
   }
+
+  Future<Map<String, dynamic>> getWeatherToday(String deviceId) async {
+    final res = await get('/api/weather/$deviceId/today');
+    return _checkObject(res, const [200], 'Failed to load weather');
+  }
+
+  Future<List<dynamic>> getWeatherAdvisories() async {
+    final res = await get('/api/weather/advisories/mine');
+    if (res.statusCode == 200) {
+      try {
+        return jsonDecode(res.body) as List<dynamic>;
+      } catch (_) {
+        return const [];
+      }
+    }
+    return _checkList(res, 'Failed to load advisories');
+  }
+
+  Future<Map<String, dynamic>> updateDeviceLocation({
+    required String deviceId,
+    String? farmName,
+    double? lat,
+    double? lon,
+    String? timezone,
+  }) async {
+    final body = <String, dynamic>{};
+    if (farmName != null) body['farmName'] = farmName;
+    if (lat != null) body['lat'] = lat;
+    if (lon != null) body['lon'] = lon;
+    if (timezone != null) body['timezone'] = timezone;
+    final res = await patch('/api/devices/$deviceId/location', body);
+    return _checkObject(res, const [200], 'Failed to update location');
+  }
+
+  Future<Map<String, dynamic>> registerPushToken(String token, {String platform = 'android'}) async {
+    final res = await post('/api/weather/push-tokens', {
+      'token': token,
+      'platform': platform,
+    });
+    return _checkObject(res, const [201], 'Failed to register push token');
+  }
 }

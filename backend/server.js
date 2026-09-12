@@ -11,6 +11,7 @@ const controlRoutes = require('./routes/control');
 const sensorRoutes = require('./routes/sensors');
 const ruleRoutes = require('./routes/rules');
 const scheduleRoutes = require('./routes/schedules');
+const weatherRoutes = require('./routes/weather');
 const devSyncRoutes = require('./routes/devSync');
 const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
 const { normalizeMac } = require('./services/macIdentity');
@@ -187,6 +188,7 @@ app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api/sensors', authMiddleware, sensorRoutes);
 app.use('/api/rules', authMiddleware, ruleRoutes);
 app.use('/api/schedules', authMiddleware, scheduleRoutes);
+app.use('/api/weather', authMiddleware, weatherRoutes);
 app.use('/api', authMiddleware, controlRoutes);
 
 // DEVELOPMENT-ONLY manual sync trigger (Phase 6.5). Never exposed in

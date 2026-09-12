@@ -61,6 +61,34 @@ const deviceSchema = new mongoose.Schema({
     trim: true,
     maxlength: 64,
   },
+  // OPTIONAL WEATHER LOCATION (advisory-only). All fields nullable so
+  // existing devices keep working with Weather disabled. Never used for
+  // identity, ownership, provisioning, MQTT topics, or Tasmota execution.
+  // Coordinates are the farm/device location (never phone GPS).
+  farmName: {
+    type: String,
+    default: null,
+    trim: true,
+    maxlength: 80,
+  },
+  lat: {
+    type: Number,
+    default: null,
+    min: -90,
+    max: 90,
+  },
+  lon: {
+    type: Number,
+    default: null,
+    min: -180,
+    max: 180,
+  },
+  timezone: {
+    type: String,
+    default: 'Africa/Algiers',
+    trim: true,
+    maxlength: 64,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

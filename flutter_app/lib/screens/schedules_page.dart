@@ -6,6 +6,7 @@ import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
+import '../widgets/weather_advisory_chip.dart';
 import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
 
@@ -34,6 +35,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
   //                         until the new sync lands)
   final List<_SyncWatch> _syncWatches = [];
   Timer? _removalTimer;
+  final Map<String, Map<String, dynamic>> _weatherBySchedule = {};
 
   @override
   void initState() {
@@ -152,6 +154,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
           _schedules = results[1].cast<Map<String, dynamic>>();
           _loading = false;
         });
+        _loadWeather();
       }
     } catch (e) {
       if (mounted) {
@@ -164,6 +167,29 @@ class _SchedulesPageState extends State<SchedulesPage> {
       }
     }
   }
+
+  Future<void> _loadWeather() async {
+    for (final d in _devices) {
+      final deviceId = d['deviceId'] as String?;
+      if (deviceId == null) continue;
+      if (d['lat'] == null || d['lon'] == null) continue;
+      try {
+        final res = await _api.getWeatherToday(deviceId);
+        final advisories = (res['advisories'] as List<dynamic>? ?? []);
+        var changed = false;
+        for (final a in advisories) {
+          if (a is Map<String, dynamic> && a['scheduleId'] != null) {
+            _weatherBySchedule[a['scheduleId'] as String] = a;
+            changed = true;
+          }
+        }
+        if (changed && mounted) setState(() {});
+      } catch (_) {}
+    }
+  }
+
+  Map<String, dynamic>? _weatherFor(String? scheduleId) =>
+      scheduleId == null ? null : _weatherBySchedule[scheduleId];
 
   Map<String, dynamic> _deviceOf(String deviceId) {
     for (final d in _devices) {
@@ -359,6 +385,7 @@ class _SchedulesPageState extends State<SchedulesPage> {
             watches: _syncWatches
                 .where((w) => w.schedule['deviceId'] == deviceId)
                 .toList(),
+            weatherFor: _weatherFor,
             onAdd: () => _add(deviceId),
             onEdit: _edit,
             onToggle: _toggle,
@@ -404,6 +431,7 @@ class _DeviceSection extends StatelessWidget {
   final void Function(Map<String, dynamic>) onEdit;
   final void Function(Map<String, dynamic>) onToggle;
   final void Function(Map<String, dynamic>) onDelete;
+  final Map<String, dynamic>? Function(String? scheduleId)? weatherFor;
 
   const _DeviceSection({
     required this.device,
@@ -413,6 +441,7 @@ class _DeviceSection extends StatelessWidget {
     required this.onEdit,
     required this.onToggle,
     required this.onDelete,
+    this.weatherFor,
   });
 
   @override
@@ -514,12 +543,14 @@ class _DeviceSection extends StatelessWidget {
                 for (final (i, schedule) in schedules.indexed) ...[
                   Builder(builder: (ctx) {
                     final watch = _watchById(watches, schedule['_id'] as String?);
+                    final advisory = weatherFor?.call(schedule['_id'] as String?);
                     if (watch == null) {
                       return _ScheduleTile(
                         schedule: schedule,
                         onEdit: () => onEdit(schedule),
                         onToggle: () => onToggle(schedule),
                         onDelete: () => onDelete(schedule),
+                        advisory: advisory,
                       );
                     }
                     if (watch.isDim) {
@@ -534,6 +565,7 @@ class _DeviceSection extends StatelessWidget {
                       onToggle: () => onToggle(schedule),
                       onDelete: () => onDelete(schedule),
                       watch: watch,
+                      advisory: advisory,
                     );
                   }),
                   if (i < schedules.length - 1 || watches.any((w) => w.kind == 'delete'))
@@ -560,6 +592,7 @@ class _ScheduleTile extends StatefulWidget {
   /// Non-null while an edit/toggle sync is converging: the tile renders an
   /// inline sync tag in its header instead of an external corner overlay.
   final _SyncWatch? watch;
+  final Map<String, dynamic>? advisory;
 
   const _ScheduleTile({
     required this.schedule,
@@ -567,6 +600,7 @@ class _ScheduleTile extends StatefulWidget {
     required this.onToggle,
     required this.onDelete,
     this.watch,
+    this.advisory,
   });
 
   @override
@@ -658,6 +692,10 @@ class _ScheduleTileState extends State<_ScheduleTile> {
               ),
               const SizedBox(height: AppSpacing.md),
               WindowTimeline(windows: windows, compact: true),
+              if (widget.advisory != null) ...[
+                const SizedBox(height: AppSpacing.sm),
+                WeatherAdvisoryChip(advisory: widget.advisory!),
+              ],
               const SizedBox(height: AppSpacing.sm),
               Row(
                 children: [

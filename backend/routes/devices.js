@@ -123,6 +123,45 @@ router.post('/unclaim', async (req, res) => {
   }
 });
 
+// Optional advisory-only weather location. Never affects identity,
+// ownership, provisioning, MQTT topics, or Tasmota execution. Coordinates
+// are the farm/device location (never phone GPS). Clearing with nulls
+// disables Weather for the device.
+router.patch('/:deviceId/location', async (req, res) => {
+  try {
+    const device = await Device.findOne({ deviceId: req.params.deviceId });
+    if (!device || !device.ownerId || device.ownerId.toString() !== req.userId) {
+      return res.status(403).json({ error: 'You do not own this device' });
+    }
+    const { farmName, lat, lon, timezone } = req.body || {};
+    if (lat !== undefined && lat !== null && (typeof lat !== 'number' || lat < -90 || lat > 90)) {
+      return res.status(400).json({ error: 'lat must be between -90 and 90' });
+    }
+    if (lon !== undefined && lon !== null && (typeof lon !== 'number' || lon < -180 || lon > 180)) {
+      return res.status(400).json({ error: 'lon must be between -180 and 180' });
+    }
+    if (farmName !== undefined) {
+      if (farmName !== null && (typeof farmName !== 'string' || farmName.length > 80)) {
+        return res.status(400).json({ error: 'farmName must be a short string' });
+      }
+      device.farmName = farmName === null ? null : String(farmName).trim() || null;
+    }
+    if (lat !== undefined) device.lat = lat;
+    if (lon !== undefined) device.lon = lon;
+    if (timezone !== undefined) {
+      if (timezone !== null && typeof timezone !== 'string') {
+        return res.status(400).json({ error: 'timezone must be a string' });
+      }
+      device.timezone = timezone === null ? 'Africa/Algiers' : String(timezone).trim() || 'Africa/Algiers';
+    }
+    await device.save();
+    res.json(device.toJSON());
+  } catch (err) {
+    console.error('Device location error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.delete('/:deviceId', async (req, res) => {
   try {
     const device = await Device.findOne({ deviceId: req.params.deviceId });
