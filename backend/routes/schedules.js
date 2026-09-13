@@ -1,6 +1,7 @@
 const express = require('express');
 const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
+const WeatherAdvisory = require('../models/WeatherAdvisory');
 const scheduleSyncService = require('../services/scheduleSyncService');
 
 const router = express.Router();
@@ -125,6 +126,20 @@ function toMinutesFromHhmm(hhmm) {
   return h * 60 + m;
 }
 
+// Canonical fingerprints of the fields that determine rain overlap. Used by
+// PATCH /:id to detect material timing edits (vs. label/channel-only edits).
+function canonicalRanges(ranges) {
+  return JSON.stringify(
+    (ranges || []).map((r) => ({ start: r && r.start, end: r && r.end })),
+  );
+}
+
+function canonicalRecurrence(rec) {
+  const r = rec || {};
+  const days = Array.isArray(r.daysOfWeek) ? [...r.daysOfWeek].sort((a, b) => a - b) : [];
+  return JSON.stringify({ type: r.type || null, daysOfWeek: days });
+}
+
 router.get('/', async (req, res) => {
   try {
     // pendingDelete rows are invisible to the API: they exist only until the
@@ -185,6 +200,13 @@ router.patch('/:id', async (req, res) => {
     if (!validation.ok) return res.status(validation.status).json(validation.json);
     const data = validation.data;
 
+    // Snapshot pre-edit timing: the weather dedup key is
+    // (device|schedule|rainDate|location) and does NOT capture the schedule
+    // window, so a stale 'sent' advisory from the pre-edit window would
+    // suppress a genuine new overlap (card shows, no push).
+    const prevRanges = canonicalRanges(schedule.timeRanges);
+    const prevRecurrence = canonicalRecurrence(schedule.recurrence);
+
     schedule.name = data.name;
     schedule.channels = data.channels;
     schedule.recurrence = data.recurrence;
@@ -197,6 +219,25 @@ router.patch('/:id', async (req, res) => {
     // Clear the engine's in-memory cache too, otherwise the next tick still
     // sees the pre-edit applied state and may skip firing the changed window.
     scheduleEngine.invalidate(schedule._id);
+
+    // Material timing edit (timeRanges or recurrence/days changed) → clear
+    // this schedule's advisory history so the trigger below re-evaluates from
+    // scratch and notifies on a fresh overlap. Label/channel-only edits keep
+    // history (no re-spam). Never blocks the CRUD response.
+    const timingChanged =
+      canonicalRanges(schedule.timeRanges) !== prevRanges ||
+      canonicalRecurrence(schedule.recurrence) !== prevRecurrence;
+    if (timingChanged) {
+      try {
+        const cleared = await WeatherAdvisory.deleteMany({ scheduleId: String(schedule._id) });
+        console.log(
+          `[weatherScheduler][dedup-reset] schedule=${String(schedule._id)} ` +
+            `cleared=${cleared && cleared.deletedCount !== undefined ? cleared.deletedCount : '?'} reason=time-or-days-changed`,
+        );
+      } catch (err) {
+        console.error(`[weatherScheduler][dedup-reset] schedule=${String(schedule._id)} failed: ${err.message}`);
+      }
+    }
 
     const sync = triggerDeviceSync(schedule.deviceId, 'schedule-update');
     try { weatherNotifyScheduler.trigger(schedule.deviceId, req.app.get('io')); } catch (_) {}

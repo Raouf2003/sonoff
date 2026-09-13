@@ -4,6 +4,7 @@ const express = require('express');
 const schedulesRouter = require('../routes/schedules');
 const Schedule = require('../models/Schedule');
 const Device = require('../models/Device');
+const WeatherAdvisory = require('../models/WeatherAdvisory');
 const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
 const scheduleEngine = require('../services/scheduleEngine');
 const scheduleSyncService = require('../services/scheduleSyncService');
@@ -15,10 +16,16 @@ const DEVICE = { deviceId: '34987AC30304', ownerId: 'owner1', channels: 4 };
 // validation failures trigger NONE.
 let triggers = [];
 
+// Weather dedup-reset contract: PATCH /:id clears this schedule's advisory
+// history ONLY when timeRanges/recurrence materially change (so a genuine new
+// overlap re-notifies); label/channel-only edits must not reset (no re-spam).
+let dedupResets = [];
+
 const originals = {
   scheduleFindOne: Schedule.findOne,
   scheduleCreate: Schedule.create,
   deviceFindOne: Device.findOne,
+  advisoryDeleteMany: WeatherAdvisory.deleteMany,
   trigger: scheduleSyncTrigger.trigger,
   invalidate: scheduleEngine.invalidate,
   release: scheduleEngine.release,
@@ -57,6 +64,10 @@ function scheduleDoc() {
 Schedule.findOne = async (query) => (query._id === 'sch1' && query.ownerId === 'owner1' ? scheduleDoc() : null);
 Schedule.create = async (data) => scheduleDoc();
 Device.findOne = async (query) => (query.deviceId === DEVICE.deviceId ? { ...DEVICE } : null);
+WeatherAdvisory.deleteMany = async (filter) => {
+  dedupResets.push(filter);
+  return { deletedCount: 1 };
+};
 scheduleSyncTrigger.trigger = (deviceId) => {
   triggers.push(String(deviceId || ''));
   return { status: 'queued', deviceId };
@@ -68,6 +79,7 @@ after(() => {
   Schedule.findOne = originals.scheduleFindOne;
   Schedule.create = originals.scheduleCreate;
   Device.findOne = originals.deviceFindOne;
+  WeatherAdvisory.deleteMany = originals.advisoryDeleteMany;
   scheduleSyncTrigger.trigger = originals.trigger;
   scheduleEngine.invalidate = originals.invalidate;
   scheduleEngine.release = originals.release;
@@ -167,6 +179,62 @@ test('PATCH /schedules/:id/enable toggles and triggers EXACTLY ONE sync', async 
   try {
     const res = await fetch(`${base}/sch1/enable`, { method: 'PATCH' });
     assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(triggers, [DEVICE.deviceId]);
+  } finally {
+    await close();
+  }
+});
+
+async function patchSchedule(base, body) {
+  const res = await fetch(`${base}/sch1`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+test('PATCH /schedules/:id with changed timeRanges clears that schedule weather dedup', async () => {
+  triggers = [];
+  dedupResets = [];
+  const { base, close } = await start();
+  try {
+    const { status } = await patchSchedule(base, {
+      ...validBody,
+      timeRanges: [{ start: '06:00', end: '10:00' }],
+    });
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(dedupResets, [{ scheduleId: 'sch1' }]);
+    assert.deepStrictEqual(triggers, [DEVICE.deviceId]);
+  } finally {
+    await close();
+  }
+});
+
+test('PATCH /schedules/:id with changed recurrence days clears that schedule weather dedup', async () => {
+  triggers = [];
+  dedupResets = [];
+  const { base, close } = await start();
+  try {
+    const { status } = await patchSchedule(base, {
+      ...validBody,
+      recurrence: { type: 'custom', daysOfWeek: [0, 2] },
+    });
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(dedupResets, [{ scheduleId: 'sch1' }]);
+  } finally {
+    await close();
+  }
+});
+
+test('PATCH /schedules/:id with label/channels-only edit keeps weather dedup (no re-spam)', async () => {
+  triggers = [];
+  dedupResets = [];
+  const { base, close } = await start();
+  try {
+    const { status } = await patchSchedule(base, { ...validBody, name: 'renamed' });
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(dedupResets, []);
     assert.deepStrictEqual(triggers, [DEVICE.deviceId]);
   } finally {
     await close();
