@@ -14,10 +14,10 @@ class SchedulesPage extends StatefulWidget {
   const SchedulesPage({super.key});
 
   @override
-  State<SchedulesPage> createState() => _SchedulesPageState();
+  State<SchedulesPage> createState() => SchedulesPageState();
 }
 
-class _SchedulesPageState extends State<SchedulesPage> {
+class SchedulesPageState extends State<SchedulesPage> {
   final _api = ApiService();
   List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _schedules = [];
@@ -35,19 +35,26 @@ class _SchedulesPageState extends State<SchedulesPage> {
   //                         until the new sync lands)
   final List<_SyncWatch> _syncWatches = [];
   Timer? _removalTimer;
+  Timer? _weatherTimer;
   final Map<String, Map<String, dynamic>> _weatherBySchedule = {};
 
   @override
   void initState() {
     super.initState();
     _load();
+    _weatherTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+      if (mounted) _loadWeather();
+    });
   }
 
   @override
   void dispose() {
     _removalTimer?.cancel();
+    _weatherTimer?.cancel();
     super.dispose();
   }
+
+  void refreshWeather() => _loadWeather();
 
   void _upsertWatch(_SyncWatch watch) {
     _syncWatches.removeWhere((w) => w.scheduleId == watch.scheduleId);
@@ -169,22 +176,39 @@ class _SchedulesPageState extends State<SchedulesPage> {
   }
 
   Future<void> _loadWeather() async {
-    for (final d in _devices) {
-      final deviceId = d['deviceId'] as String?;
-      if (deviceId == null) continue;
-      if (d['lat'] == null || d['lon'] == null) continue;
-      try {
-        final res = await _api.getWeatherToday(deviceId);
-        final advisories = (res['advisories'] as List<dynamic>? ?? []);
-        var changed = false;
-        for (final a in advisories) {
-          if (a is Map<String, dynamic> && a['scheduleId'] != null) {
-            _weatherBySchedule[a['scheduleId'] as String] = a;
-            changed = true;
-          }
+    final locDevices = _devices
+        .where((d) => d['deviceId'] != null && d['lat'] != null && d['lon'] != null)
+        .toList();
+    if (locDevices.isEmpty) {
+      if (mounted && _weatherBySchedule.isNotEmpty) {
+        setState(() => _weatherBySchedule.clear());
+      }
+      return;
+    }
+    final results = await Future.wait(
+      locDevices.map((d) async {
+        try {
+          final res = await _api.getWeatherToday(d['deviceId'] as String);
+          return res['advisories'] as List<dynamic>? ?? [];
+        } catch (_) {
+          return <dynamic>[];
         }
-        if (changed && mounted) setState(() {});
-      } catch (_) {}
+      }),
+    );
+    final next = <String, Map<String, dynamic>>{};
+    for (final list in results) {
+      for (final a in list) {
+        if (a is Map<String, dynamic> && a['scheduleId'] != null) {
+          next[a['scheduleId'] as String] = a;
+        }
+      }
+    }
+    if (mounted) {
+      setState(() {
+        _weatherBySchedule
+          ..clear()
+          ..addAll(next);
+      });
     }
   }
 

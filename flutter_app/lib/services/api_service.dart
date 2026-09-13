@@ -558,6 +558,17 @@ class ApiService {
     return _checkObject(res, const [200], 'Failed to update location');
   }
 
+  Future<Map<String, dynamic>> clearDeviceLocation({
+    required String deviceId,
+  }) async {
+    final res = await patch('/api/devices/$deviceId/location', {
+      'farmName': null,
+      'lat': null,
+      'lon': null,
+    });
+    return _checkObject(res, const [200], 'Failed to remove location');
+  }
+
   Future<Map<String, dynamic>> registerPushToken(String token, {String platform = 'android'}) async {
     final res = await post('/api/weather/push-tokens', {
       'token': token,

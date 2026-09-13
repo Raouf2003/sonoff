@@ -23,11 +23,12 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
   final _auth = AuthService();
+  final _schedulesKey = GlobalKey<SchedulesPageState>();
 
   late final List<Widget> _pages = [
     DevicesPage(onNavigateToTab: (i) => _switchTab(i)),
     SensorsPage(onNavigateToTab: (i) => _switchTab(i)),
-    const SchedulesPage(),
+    SchedulesPage(key: _schedulesKey),
     const RulesPage(),
     WeatherPage(onNavigateToTab: (i) => _switchTab(i)),
   ];
@@ -50,6 +51,10 @@ class _MainShellState extends State<MainShell> {
 
   void _switchTab(int index) {
     setState(() => _currentIndex = index);
+    if (index == 2) {
+      // Schedules tab became visible: refresh weather chips in parallel
+      _schedulesKey.currentState?.refreshWeather();
+    }
   }
 
   void _routeToLogin() {
@@ -112,7 +117,10 @@ class _MainShellState extends State<MainShell> {
       ),
       bottomNavigationBar: SteesNavBar(
         currentIndex: _currentIndex,
-        onTap: (i) => setState(() => _currentIndex = i),
+        onTap: (i) {
+          setState(() => _currentIndex = i);
+          if (i == 2) _schedulesKey.currentState?.refreshWeather();
+        },
         items: const [
           SteesNavItem(
             icon: Icons.developer_board_outlined,

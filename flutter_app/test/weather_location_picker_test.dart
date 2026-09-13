@@ -65,7 +65,7 @@ void main() {
     expect(fallback.farmName, 'Bou Saada');
   });
 
-  testWidgets('map pick + device select saves correct PATCH', (tester) async {
+  testWidgets('map pick saves with auto farmName from place', (tester) async {
     Map<String, dynamic>? patched;
     String? patchedPath;
     final client = MockClient((req) async {
@@ -73,7 +73,7 @@ void main() {
         patchedPath = req.url.path;
         patched = jsonDecode(req.body) as Map<String, dynamic>;
         return http.Response(
-            jsonEncode({'deviceId': 'D2', 'farmName': 'Farm South'}),
+            jsonEncode({'deviceId': 'D1', 'farmName': 'Bou Saada'}),
             200);
       }
       return http.Response('Not found', 404);
@@ -91,26 +91,85 @@ void main() {
     ))));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(DropdownButtonFormField<String>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Sonoff 02').last);
-    await tester.pumpAndSettle();
-
     await tester.tap(find.text('stub-pick'));
     await tester.pumpAndSettle();
     expect(find.textContaining('35.2000'), findsWidgets);
     expect(find.textContaining('Bou Saada'), findsWidgets);
 
-    await tester.enterText(find.byType(TextField), 'Farm South');
-
     await tester.tap(find.text('Confirm Location'));
     await tester.pumpAndSettle();
 
-    expect(patchedPath, '/api/devices/D2/location');
+    expect(patchedPath, '/api/devices/D1/location');
     expect(patched?['lat'], 35.2);
     expect(patched?['lon'], 4.18);
-    expect(patched?['farmName'], 'Farm South');
+    expect(patched?['farmName'], 'Bou Saada');
     expect(patched?['timezone'], 'Africa/Algiers');
+  });
+
+  testWidgets('remove location sends null PATCH for selected device',
+      (tester) async {
+    String? patchedPath;
+    Map<String, dynamic>? patched;
+    final client = MockClient((req) async {
+      if (req.method == 'PATCH') {
+        patchedPath = req.url.path;
+        patched = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response(jsonEncode({'deviceId': 'D2'}), 200);
+      }
+      return http.Response('Not found', 404);
+    });
+    final api = ApiService(auth: _FakeAuth(), client: client);
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: WeatherLocationPickerPage(
+      devices: _devices,
+      initialDeviceId: 'D2',
+      api: api,
+      reverseGeocode: (_, _) async => null,
+      mapBuilder: (_, _) => const SizedBox(height: 400, child: SizedBox.expand()),
+    ))));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove').last);
+    await tester.pumpAndSettle();
+    expect(patchedPath, '/api/devices/D2/location');
+    expect(patched?['lat'], isNull);
+    expect(patched?['lon'], isNull);
+  });
+
+  testWidgets('dropdown shows device name only, not location', (tester) async {
+    final api = ApiService(
+        auth: _FakeAuth(),
+        client: MockClient((_) async => http.Response('{}', 200)));
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: WeatherLocationPickerPage(
+      devices: const [
+        {
+          'deviceId': 'D1',
+          'name': 'Sonoff 01',
+          'farmName': 'Field North',
+          'channels': 4,
+        },
+        {
+          'deviceId': 'D2',
+          'name': 'Sonoff 02',
+          'channels': 4,
+        },
+      ],
+      initialDeviceId: 'D1',
+      api: api,
+      reverseGeocode: (_, _) async => null,
+      mapBuilder: (_, _) => const SizedBox.shrink(),
+    ))));
+    await tester.pumpAndSettle();
+    expect(find.text('Sonoff 01'), findsOneWidget);
+    expect(find.textContaining('Field North'), findsNothing);
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await tester.pumpAndSettle();
+    expect(find.text('Sonoff 02'), findsWidgets);
   });
 
   testWidgets('save blocked without map pick', (tester) async {

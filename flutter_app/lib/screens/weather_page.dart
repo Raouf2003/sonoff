@@ -209,7 +209,7 @@ class _WeatherPageState extends State<WeatherPage> {
                   children: [
                     Expanded(
                       child: Text(
-                        '${d['farmName'] ?? d['name'] ?? d['deviceId']}',
+                        '${d['name'] ?? d['deviceId']}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.inter(
@@ -622,11 +622,9 @@ class _HourCell extends StatelessWidget {
                   fontWeight: FontWeight.w700,
                   color: colors.foam)),
           Text(
-              rainy
-                  ? '${hour.precipitationMm.toStringAsFixed(1)}mm'
-                  : '${hour.precipitationProbability}%',
+              '${hour.precipitationMm.toStringAsFixed(1)}mm · ${hour.precipitationProbability}%',
               style: GoogleFonts.jetBrainsMono(
-                  fontSize: 9, color: colors.mist)),
+                  fontSize: 8.5, color: colors.mist)),
         ],
       ),
     );

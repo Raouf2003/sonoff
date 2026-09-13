@@ -192,7 +192,7 @@ void main() {
     expect(find.text('Rain overlaps irrigation'), findsOneWidget);
     await tester.tap(find.byType(DropdownButton<String>));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Field South').last);
+    await tester.tap(find.text('South').last);
     await tester.pumpAndSettle();
     expect(find.textContaining('No significant rain overlap'), findsOneWidget);
     expect(find.text('Rain overlaps irrigation'), findsNothing);

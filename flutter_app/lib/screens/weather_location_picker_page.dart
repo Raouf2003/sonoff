@@ -32,15 +32,19 @@ class LocationSaveRequest {
 
 LocationSaveRequest buildLocationSave({
   required String deviceId,
-  required String name,
   String? placeName,
+  String? name,
   required double lat,
   required double lon,
 }) {
-  final trimmed = name.trim();
+  // Auto name only: place label drives farmName. `name` kept for legacy tests.
+  final fromPlace = placeName?.split(',').first.trim();
+  final trimmedPlace = fromPlace != null && fromPlace.isNotEmpty ? fromPlace : null;
+  final trimmedName = name?.trim();
+  final farm = (trimmedName != null && trimmedName.isNotEmpty) ? trimmedName : trimmedPlace;
   return LocationSaveRequest(
     deviceId: deviceId,
-    farmName: trimmed.isEmpty ? placeName : trimmed,
+    farmName: farm,
     lat: lat,
     lon: lon,
     timezone: kWeatherTimezone,
@@ -73,7 +77,6 @@ class _WeatherLocationPickerPageState
   late final ApiService _api = widget.api ?? ApiService();
   final MapController _mapController = MapController();
   final GlobalKey _mapKey = GlobalKey();
-  final TextEditingController _nameCtl = TextEditingController();
 
   String? _selectedDeviceId;
   LatLng? _picked;
@@ -81,7 +84,6 @@ class _WeatherLocationPickerPageState
   bool _resolving = false;
   bool _saving = false;
   String? _error;
-  bool _nameTouched = false;
   int _resolveGen = 0;
 
   @override
@@ -93,13 +95,11 @@ class _WeatherLocationPickerPageState
             : null);
     final device = _selectedDevice;
     if (device != null) _applyDevice(device);
-    _nameCtl.addListener(() => _nameTouched = true);
   }
 
   @override
   void dispose() {
     _mapController.dispose();
-    _nameCtl.dispose();
     super.dispose();
   }
 
@@ -108,6 +108,12 @@ class _WeatherLocationPickerPageState
       if (d['deviceId'] == _selectedDeviceId) return d;
     }
     return null;
+  }
+
+  // Device selector shows the device name only — never the farm/location
+  // name and never the typed text.
+  static String _deviceLabel(Map<String, dynamic> device) {
+    return '${device['name'] ?? device['deviceId']}';
   }
 
   LatLng? _deviceLatLng(Map<String, dynamic> device) {
@@ -122,8 +128,6 @@ class _WeatherLocationPickerPageState
     final at = _deviceLatLng(device);
     _picked = at;
     _placeName = null;
-    _nameCtl.text = '${device['farmName'] ?? ''}';
-    _nameTouched = false;
     if (at != null) unawaited(_resolvePlace(at));
   }
 
@@ -145,9 +149,6 @@ class _WeatherLocationPickerPageState
       if (!mounted || gen != _resolveGen) return;
       setState(() {
         _placeName = name;
-        if (!_nameTouched && name != null && _nameCtl.text.trim().isEmpty) {
-          _nameCtl.text = name.split(',').first.trim();
-        }
       });
     } finally {
       if (mounted && gen == _resolveGen) {
@@ -164,6 +165,71 @@ class _WeatherLocationPickerPageState
     _onPick(_mapController.camera.screenOffsetToLatLng(local));
   }
 
+  bool get _selectedHasLocation {
+    final device = _selectedDevice;
+    return device != null && _deviceLatLng(device) != null;
+  }
+
+  Future<void> _removeLocation() async {
+    final deviceId = _selectedDeviceId;
+    if (deviceId == null) return;
+    final colors = context.steesColors;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.surface,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.xl)),
+        title: Text('Remove location?',
+            style: GoogleFonts.sora(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: colors.foam)),
+        content: Text(
+            'Weather forecasts will be disabled for this device. Your irrigation schedules are unaffected.',
+            style:
+                GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text('Cancel',
+                  style: GoogleFonts.inter(
+                      fontSize: 13, color: colors.mist))),
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text('Remove',
+                  style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: colors.danger))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await _api.clearDeviceLocation(deviceId: deviceId);
+      if (mounted) Navigator.of(context).pop(true);
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = e.message;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = 'Could not remove location.';
+        });
+      }
+    }
+  }
+
   Future<void> _save() async {
     final picked = _picked;
     final deviceId = _selectedDeviceId;
@@ -178,7 +244,6 @@ class _WeatherLocationPickerPageState
     try {
       final req = buildLocationSave(
         deviceId: deviceId,
-        name: _nameCtl.text,
         placeName: _placeName,
         lat: picked.latitude,
         lon: picked.longitude,
@@ -229,6 +294,26 @@ class _WeatherLocationPickerPageState
               child: Stack(
                 children: [
                   _buildMap(center),
+                  if (_selectedHasLocation)
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: Material(
+                        color: colors.surface,
+                        shape: const CircleBorder(),
+                        elevation: 3,
+                        child: IconButton(
+                          onPressed: _saving ? null : _removeLocation,
+                          icon: Icon(Icons.delete_outline,
+                              size: 18, color: colors.danger),
+                          tooltip: 'Remove location',
+                          style: IconButton.styleFrom(
+                            minimumSize: const Size(44, 44),
+                            tapTargetSize: MaterialTapTargetSize.padded,
+                          ),
+                        ),
+                      ),
+                    ),
                   Positioned(
                     right: 12,
                     bottom: 12,
@@ -350,15 +435,9 @@ class _WeatherLocationPickerPageState
               ),
             ],
             const SizedBox(height: AppSpacing.sm),
-            TextField(
-              controller: _nameCtl,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
-                  labelText: 'Location name (e.g. Farm North)'),
-            ),
-            const SizedBox(height: AppSpacing.sm),
             DropdownButtonFormField<String>(
-              initialValue: _selectedDeviceId,
+              // ignore: deprecated_member_use
+              value: _selectedDeviceId,
               dropdownColor: colors.submerged,
               decoration:
                   const InputDecoration(labelText: 'Use for device'),
@@ -366,8 +445,7 @@ class _WeatherLocationPickerPageState
                 for (final d in widget.devices)
                   DropdownMenuItem<String>(
                     value: '${d['deviceId']}',
-                    child: Text(
-                        '${d['farmName'] ?? d['name'] ?? d['deviceId']}',
+                    child: Text(_deviceLabel(d),
                         overflow: TextOverflow.ellipsis),
                   ),
               ],
