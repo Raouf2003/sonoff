@@ -451,8 +451,41 @@ class _WeatherPageState extends State<WeatherPage> {
     );
   }
 
+  String _dayLabel(String rainDate) {
+    final now = DateTime.now();
+    String fmt(DateTime d) =>
+        '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final today = fmt(now);
+    final tomorrow = fmt(now.add(const Duration(days: 1)));
+    if (rainDate == today) return 'Today';
+    if (rainDate == tomorrow) return 'Tomorrow';
+    try {
+      final parts = rainDate.split('-');
+      if (parts.length == 3) {
+        final m = int.parse(parts[1]);
+        final d = int.parse(parts[2]);
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        if (m >= 1 && m <= 12) return '${months[m - 1]} $d';
+      }
+    } catch (_) {}
+    return rainDate;
+  }
+
   Widget _buildAdvisorySection(SteesColors colors, WeatherToday w) {
-    if (w.advisories.isEmpty) {
+    // Always render ALL deduped advisories for all 3 days — never filter by _hourlyDay.
+    final seen = <String, WeatherAdvisory>{};
+    for (final a in w.advisories) {
+      final key = '${a.scheduleId}|${a.rainDate}|${a.rainStart}|${a.rainEnd}|${a.type}';
+      seen[key] ??= a;
+    }
+    // Group by schedule+date: keep HIGH overlap as primary, keep MEDIUM near as subtle secondary hint
+    final byScheduleDate = <String, List<WeatherAdvisory>>{};
+    for (final a in seen.values) {
+      final k = '${a.scheduleId}|${a.rainDate}';
+      (byScheduleDate[k] ??= []).add(a);
+    }
+    final groups = byScheduleDate.values.toList();
+    if (groups.isEmpty) {
       return SteesCard(
         active: false,
         child: Row(
@@ -471,65 +504,99 @@ class _WeatherPageState extends State<WeatherPage> {
     }
     return Column(
       children: [
-        for (final a in w.advisories) ...[
-          SteesCard(
-            active: a.isOverlap,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                        a.isOverlap
-                            ? Icons.warning_amber_rounded
-                            : Icons.cloud_outlined,
-                        size: 18,
-                        color: a.isOverlap
-                            ? colors.sunlight
-                            : colors.stream),
-                    const SizedBox(width: AppSpacing.sm),
-                    Expanded(
-                      child: Text(
-                        a.isOverlap
-                            ? 'Rain overlaps irrigation'
-                            : 'Rain near irrigation',
-                        style: GoogleFonts.sora(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: colors.foam),
+        for (final group in groups) ...[
+          Builder(builder: (_) {
+            final overlaps = group.where((a) => a.isOverlap).toList();
+            final nears = group.where((a) => !a.isOverlap).toList();
+            final primary = overlaps.isNotEmpty ? overlaps.first : group.first;
+            return SteesCard(
+              active: primary.isOverlap,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                          primary.isOverlap
+                              ? Icons.warning_amber_rounded
+                              : Icons.cloud_outlined,
+                          size: 18,
+                          color: primary.isOverlap
+                              ? colors.sunlight
+                              : colors.stream),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          primary.isOverlap
+                              ? 'Rain overlaps irrigation'
+                              : 'Rain near irrigation',
+                          style: GoogleFonts.sora(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: colors.foam),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: colors.stream.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(99),
+                          border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
+                        ),
+                        child: Text(
+                          _dayLabel(primary.rainDate),
+                          style: GoogleFonts.jetBrainsMono(
+                              fontSize: 10, fontWeight: FontWeight.w700, color: colors.stream),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    'Schedule ${primary.scheduleStart}–${primary.scheduleEnd}'
+                    '${primary.scheduleName.isNotEmpty ? ' · ${primary.scheduleName}' : ''}'
+                    '${primary.channels.isNotEmpty ? ' · CH${primary.channels.join(', CH')}' : ''}\n'
+                    'Rain ${primary.rainStart}–${primary.rainEnd} · ${primary.precipitationMm.toStringAsFixed(1)} mm · ${primary.probability}%\n'
+                    'Consider reviewing today\'s irrigation schedule.',
+                    style: GoogleFonts.inter(
+                        fontSize: 12.5, height: 1.5, color: colors.mist),
+                  ),
+                  if (nears.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Also near: ${nears.map((n) => '${n.rainStart}–${n.rainEnd}').join(', ')}',
+                      style: GoogleFonts.inter(
+                          fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                    ),
+                  ],
+                  if (overlaps.length > 1) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '+${overlaps.length - 1} more overlap${overlaps.length - 1 == 1 ? '' : 's'} same day',
+                      style: GoogleFonts.inter(
+                          fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                    ),
+                  ],
+                  if (widget.onNavigateToTab != null) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: () => widget.onNavigateToTab!(2),
+                        icon: Icon(Icons.schedule_outlined,
+                            size: 15, color: colors.stream),
+                        label: Text('Review Schedule',
+                            style: GoogleFonts.inter(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: colors.stream)),
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  'Schedule ${a.scheduleStart}–${a.scheduleEnd}'
-                  '${a.scheduleName.isNotEmpty ? ' · ${a.scheduleName}' : ''}'
-                  '${a.channels.isNotEmpty ? ' · CH${a.channels.join(', CH')}' : ''}\n'
-                  'Rain ${a.rainStart}–${a.rainEnd} · ${a.precipitationMm.toStringAsFixed(1)} mm · ${a.probability}%\n'
-                  'Consider reviewing today\'s irrigation schedule.',
-                  style: GoogleFonts.inter(
-                      fontSize: 12.5, height: 1.5, color: colors.mist),
-                ),
-                if (widget.onNavigateToTab != null) ...[
-                  const SizedBox(height: AppSpacing.sm),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: () => widget.onNavigateToTab!(2),
-                      icon: Icon(Icons.schedule_outlined,
-                          size: 15, color: colors.stream),
-                      label: Text('Review Schedule',
-                          style: GoogleFonts.inter(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w600,
-                              color: colors.stream)),
-                    ),
-                  ),
                 ],
-              ],
-            ),
-          ),
+              ),
+            );
+          }),
           const SizedBox(height: AppSpacing.sm),
         ],
       ],
