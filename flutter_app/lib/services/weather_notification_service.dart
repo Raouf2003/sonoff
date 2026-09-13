@@ -21,14 +21,23 @@ const String kWeatherAdvisoryType = 'weather_advisory';
 const AndroidNotificationChannel _weatherChannel = AndroidNotificationChannel(
   kWeatherChannelId,
   kWeatherChannelName,
-  importance: Importance.high,
+  description: 'Rain overlap advisories — alerts when irrigation overlaps forecast rain',
+  importance: Importance.max,
+  playSound: true,
+  enableVibration: true,
 );
 
 Future<void> _ensureWeatherChannel(FlutterLocalNotificationsPlugin local) async {
-  await local
-      .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>()
-      ?.createNotificationChannel(_weatherChannel);
+  final android = local.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  if (android == null) return;
+  // Existing installs created this channel without an explicit sound — Android
+  // persists channel settings forever, so an update alone is ignored. Delete
+  // then recreate to force default sound + max importance. Safe to run every
+  // launch (re-creating an existing channel is a no-op after the first fix).
+  try {
+    await android.deleteNotificationChannel(channelId: kWeatherChannelId);
+  } catch (_) {}
+  await android.createNotificationChannel(_weatherChannel);
 }
 
 String _dataString(Map<String, dynamic> data, String key, String fallback) {
@@ -70,18 +79,31 @@ Future<void> weatherBackgroundMessageHandler(RemoteMessage message) async {
       ),
     );
     await _ensureWeatherChannel(local);
+    final title = _dataString(data, 'title', 'Rain expected');
+    final body = _dataString(data, 'body', 'Check your irrigation schedule');
     await local.show(
       id: DateTime.now().millisecondsSinceEpoch % 100000,
-      title: _dataString(data, 'title', 'Rain expected'),
-      body: _dataString(data, 'body', 'Check your irrigation schedule'),
-      notificationDetails: const NotificationDetails(
+      title: title,
+      body: body,
+      notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           kWeatherChannelId,
           kWeatherChannelName,
-          importance: Importance.high,
+          importance: Importance.max,
           priority: Priority.high,
+          playSound: true,
+          enableVibration: true,
+          visibility: NotificationVisibility.public,
+          category: AndroidNotificationCategory.message,
+          styleInformation: BigTextStyleInformation(body, contentTitle: title),
+          ticker: title,
         ),
-        iOS: DarwinNotificationDetails(),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+          interruptionLevel: InterruptionLevel.active,
+        ),
       ),
       payload: _dataString(data, 'deviceId', ''),
     );
@@ -237,9 +259,25 @@ class WeatherNotificationService {
         id: DateTime.now().millisecondsSinceEpoch % 100000,
         title: title,
         body: body,
-        notificationDetails: const NotificationDetails(
-          android: AndroidNotificationDetails(kWeatherChannelId, kWeatherChannelName, importance: Importance.high, priority: Priority.high),
-          iOS: DarwinNotificationDetails(),
+        notificationDetails: NotificationDetails(
+          android: AndroidNotificationDetails(
+            kWeatherChannelId,
+            kWeatherChannelName,
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+            visibility: NotificationVisibility.public,
+            category: AndroidNotificationCategory.message,
+            styleInformation: BigTextStyleInformation(body, contentTitle: title),
+            ticker: title,
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+            interruptionLevel: InterruptionLevel.active,
+          ),
         ),
         payload: payload,
       );
