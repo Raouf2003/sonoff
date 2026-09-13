@@ -9,13 +9,16 @@ const { isValidCoords, APP_TIMEZONE } = require('../services/weatherConfig');
 
 const router = express.Router();
 
-function currentTemp(hourly, nowMs) {
+function currentHourRow(hourly, nowMs) {
   if (!Array.isArray(hourly) || hourly.length === 0) return null;
   const now = new Date(nowMs !== undefined ? nowMs : Date.now());
   const pad = (n) => String(n).padStart(2, '0');
   const prefix = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}`;
-  const hit = hourly.find((h) => typeof h.localTime === 'string' && h.localTime.startsWith(prefix));
-  const row = hit || hourly[0];
+  return hourly.find((h) => typeof h.localTime === 'string' && h.localTime.startsWith(prefix)) || hourly[0] || null;
+}
+
+function currentTemp(hourly, nowMs) {
+  const row = currentHourRow(hourly, nowMs);
   return row && typeof row.temperature === 'number' ? row.temperature : null;
 }
 
@@ -71,16 +74,16 @@ router.get('/:deviceId/today', async (req, res) => {
       hourly: forecast.hourly,
       device,
     });
-    const top = advisories.find((a) => a.type === 'overlap') || advisories[0] || null;
+    const cur = currentHourRow(forecast.hourly);
     res.json({
       deviceId: device.deviceId,
       timezone: device.timezone || APP_TIMEZONE,
       location: { farmName: device.farmName || null, lat: device.lat, lon: device.lon },
       fetchedAt: new Date().toISOString(),
       forecast: {
-        temperature: currentTemp(forecast.hourly),
-        rainProbability: top ? top.probability : 0,
-        precipitationMm: top ? top.precipitationMm : 0,
+        temperature: cur && typeof cur.temperature === 'number' ? cur.temperature : null,
+        rainProbability: cur ? cur.precipitationProbability ?? 0 : 0,
+        precipitationMm: cur ? cur.precipitationMm ?? 0 : 0,
       },
       hourly: forecast.hourly,
       schedules: schedules.map((s) => ({

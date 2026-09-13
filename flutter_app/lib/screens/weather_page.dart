@@ -27,6 +27,7 @@ class _WeatherPageState extends State<WeatherPage> {
   bool _loadError = false;
   String? _errorMessage;
   DateTime? _retrievedAt;
+  int _hourlyDay = 0;
 
   @override
   void initState() {
@@ -382,24 +383,35 @@ class _WeatherPageState extends State<WeatherPage> {
   }
 
   Widget _buildHourlySection(SteesColors colors, WeatherToday w) {
-    final today = DateTime.now();
+    final base = DateTime.now().add(Duration(days: _hourlyDay));
     String pad(int n) => n.toString().padLeft(2, '0');
-    final prefix =
-        '${today.year}-${pad(today.month)}-${pad(today.day)}';
+    final prefix = '${base.year}-${pad(base.month)}-${pad(base.day)}';
     var hours = w.hoursForDate(prefix);
-    hours = hours.isEmpty ? w.hourly.take(12).toList() : hours.take(24).toList();
-    if (hours.isEmpty) return const SizedBox.shrink();
+    if (_hourlyDay == 0 && hours.isEmpty) {
+      hours = w.hourly.take(12).toList();
+    } else {
+      hours = hours.take(24).toList();
+    }
+    if (hours.isEmpty) {
+      return SteesCard(
+        active: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildHourlyHeader(colors),
+            const SizedBox(height: AppSpacing.sm),
+            Text('No hourly data for this day.',
+                style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
+          ],
+        ),
+      );
+    }
     return SteesCard(
       active: false,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('HOURLY',
-              style: GoogleFonts.jetBrainsMono(
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.6,
-                  color: colors.stream)),
+          _buildHourlyHeader(colors),
           const SizedBox(height: AppSpacing.sm),
           SizedBox(
             height: 92,
@@ -413,6 +425,29 @@ class _WeatherPageState extends State<WeatherPage> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildHourlyHeader(SteesColors colors) {
+    const labels = ['Today', 'Tomorrow', 'Day +2'];
+    return Row(
+      children: [
+        Text('HOURLY',
+            style: GoogleFonts.jetBrainsMono(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.6,
+                color: colors.stream)),
+        const Spacer(),
+        for (var i = 0; i < 3; i++) ...[
+          if (i > 0) const SizedBox(width: 6),
+          _DayPill(
+            label: labels[i],
+            selected: _hourlyDay == i,
+            onTap: () => setState(() => _hourlyDay = i),
+          ),
+        ],
+      ],
     );
   }
 
@@ -626,6 +661,35 @@ class _HourCell extends StatelessWidget {
               style: GoogleFonts.jetBrainsMono(
                   fontSize: 8.5, color: colors.mist)),
         ],
+      ),
+    );
+  }
+}
+
+class _DayPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DayPill({required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.steesColors;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(99),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? colors.stream : colors.well,
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(color: selected ? colors.stream : colors.border),
+        ),
+        child: Text(label,
+            style: GoogleFonts.inter(
+                fontSize: 11,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                color: selected ? colors.well : colors.mist)),
       ),
     );
   }
