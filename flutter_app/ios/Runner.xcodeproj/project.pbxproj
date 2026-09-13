@@ -16,8 +16,6 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
-		AA33AA33AA33AA33AA33AA33 /* stees_rain.caf in Resources */ = {isa = PBXBuildFile; fileRef = AA11AA11AA11AA11AA11AA11 /* stees_rain.caf */; };
-		AA44AA44AA44AA44AA44AA44 /* stees_rain.wav in Resources */ = {isa = PBXBuildFile; fileRef = AA22AA22AA22AA22AA22AA22 /* stees_rain.wav */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,8 +59,6 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		AA11AA11AA11AA11AA11AA11 /* stees_rain.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "stees_rain.caf"; sourceTree = "<group>"; };
-		AA22AA22AA22AA22AA22AA22 /* stees_rain.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "stees_rain.wav"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -128,8 +124,6 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
-				AA11AA11AA11AA11AA11AA11 /* stees_rain.caf */,
-				AA22AA22AA22AA22AA22AA22 /* stees_rain.wav */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -235,8 +229,6 @@
 				3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
-				AA33AA33AA33AA33AA33AA33 /* stees_rain.caf in Resources */,
-				AA44AA44AA44AA44AA44AA44 /* stees_rain.wav in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
