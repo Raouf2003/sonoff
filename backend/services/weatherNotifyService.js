@@ -189,12 +189,11 @@ async function sendPush({ ownerId, title, body, data, io } = {}) {
       // banner arrives silently even when Firebase reports delivered:true.
       data: { ...Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)])), type: 'weather_advisory' },
       // System banner when app closed (like Facebook/TikTok): must be a
-      // `notification` payload so OS shows it without app code. Custom rain
-      // sound `stees_rain` — must match android res/raw/stees_rain.wav and
-      // ios/Runner/stees_rain.caf . Android 8+ uses channel sound, FCM sound
-      // is for pre-O fallback; iOS uses apns sound directly.
-      android: { priority: 'high', notification: { channelId: 'stees_weather', sound: 'stees_rain' } },
-      apns: { payload: { aps: { sound: 'stees_rain.caf', badge: 1 } } },
+      // `notification` payload so OS shows it without app code. `sound: default`
+      // restores default system tone (previous custom `stees_rain` caused silent
+      // delivery when file missing/bundling failed).
+      android: { priority: 'high', notification: { channelId: 'stees_weather', sound: 'default' } },
+      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
     });
     // Prune invalid tokens (NotRegistered / InvalidRegistration)
     const toDelete = [];
