@@ -7,6 +7,7 @@ const router = express.Router();
 
 const scheduleEngine = require('../services/scheduleEngine');
 const scheduleSyncTrigger = require('../services/scheduleSyncTrigger');
+const weatherNotifyScheduler = require('../services/weatherNotifyScheduler');
 
 const SYNC_FLAG_OFF_NOTE = 'TASMOTA_SCHEDULE_SYNC_ENABLED is disabled';
 
@@ -159,6 +160,8 @@ router.post('/', async (req, res) => {
 
     const schedule = await Schedule.create({ ownerId: req.userId, ...data });
     const sync = triggerDeviceSync(schedule.deviceId, 'schedule-create');
+    // Weather advisory: re-evaluate this device's advisories (fire-and-forget, never blocks sync)
+    try { weatherNotifyScheduler.trigger(schedule.deviceId, req.app.get('io')); } catch (_) {}
     res.status(201).json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Create schedule error:', err);
@@ -196,6 +199,7 @@ router.patch('/:id', async (req, res) => {
     scheduleEngine.invalidate(schedule._id);
 
     const sync = triggerDeviceSync(schedule.deviceId, 'schedule-update');
+    try { weatherNotifyScheduler.trigger(schedule.deviceId, req.app.get('io')); } catch (_) {}
     res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Update schedule error:', err);
@@ -228,6 +232,7 @@ router.patch('/:id/enable', async (req, res) => {
       });
     }
     const sync = triggerDeviceSync(schedule.deviceId, 'schedule-enable');
+    try { weatherNotifyScheduler.trigger(schedule.deviceId, req.app.get('io')); } catch (_) {}
     res.json({ schedule: schedule.toJSON(), sync });
   } catch (err) {
     console.error('Toggle schedule error:', err);
@@ -274,6 +279,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     const sync = triggerDeviceSync(deviceId, 'schedule-delete');
+    try { weatherNotifyScheduler.trigger(deviceId, req.app.get('io')); } catch (_) {}
     res.json({ ok: true, deferred: true, sync });
   } catch (err) {
     console.error('Delete schedule error:', err);

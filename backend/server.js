@@ -24,6 +24,7 @@ const mqttGateway = require('./services/mqttGateway');
 const ruleEngine = require('./services/ruleEngine');
 const scheduleEngine = require('./services/scheduleEngine');
 const scheduleSyncRetry = require('./services/scheduleSyncRetry');
+const weatherNotifyScheduler = require('./services/weatherNotifyScheduler');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -74,6 +75,13 @@ async function loadFromDb() {
   scheduleSyncRetry.startup().catch((err) =>
     console.error(`[server] schedule sync startup error: ${err.message}`),
   );
+  // Weather advisory sweep: periodic + startup, independent of Tasmota irrigation.
+  // setInterval not guaranteed on Render sleep — also triggered on schedule/location changes.
+  try {
+    weatherNotifyScheduler.start(io);
+  } catch (e) {
+    console.error(`[server] weather scheduler start error: ${e.message}`);
+  }
 }
 
 initRuntime();

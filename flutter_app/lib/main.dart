@@ -1,4 +1,5 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/material.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_controller.dart';
 import 'services/auth_service.dart';
@@ -8,7 +9,11 @@ import 'screens/main_shell.dart';
 const String kServerIp = 'sonoff-3na2.onrender.com';
 const String kProtocol = 'https';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp();
+  } catch (_) {}
   runApp(const SteesApp());
 }
 

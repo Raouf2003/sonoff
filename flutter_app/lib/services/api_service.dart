@@ -576,4 +576,11 @@ class ApiService {
     });
     return _checkObject(res, const [201], 'Failed to register push token');
   }
+
+  Future<void> deletePushToken(String token) async {
+    final headers = await _headers();
+    final uri = Uri.parse('$kBaseUrl/api/weather/push-tokens').replace(queryParameters: {'token': token});
+    final res = await _send(() => _client.delete(uri, headers: headers));
+    _checkObject(res, const [200], 'Failed to delete push token');
+  }
 }

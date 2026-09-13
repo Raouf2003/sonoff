@@ -155,6 +155,8 @@ router.patch('/:deviceId/location', async (req, res) => {
       device.timezone = timezone === null ? 'Africa/Algiers' : String(timezone).trim() || 'Africa/Algiers';
     }
     await device.save();
+    // Location changed: re-evaluate advisories for this device (fire-and-forget, keeps history via locationKey)
+    try { require('../services/weatherNotifyScheduler').trigger(device.deviceId, req.app.get('io')); } catch (_) {}
     res.json(device.toJSON());
   } catch (err) {
     console.error('Device location error:', err);

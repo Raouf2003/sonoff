@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../theme/app_theme.dart';
 import '../services/auth_service.dart';
 import '../services/api_service.dart';
+import '../services/weather_notification_service.dart';
 import 'devices_page.dart';
 import 'sensors_page.dart';
 import 'schedules_page.dart';
@@ -23,6 +24,8 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
   final _auth = AuthService();
+  final _api = ApiService();
+  final _weatherNotifs = WeatherNotificationService();
   final _schedulesKey = GlobalKey<SchedulesPageState>();
 
   late final List<Widget> _pages = [
@@ -39,6 +42,24 @@ class _MainShellState extends State<MainShell> {
     // Any API response with 401 (expired/invalid token) from any tab logs the
     // user out instead of leaving every page showing a generic failure.
     ApiService.onUnauthorized = _handleSessionExpired;
+    _initWeatherNotifs();
+  }
+
+  Future<void> _initWeatherNotifs() async {
+    try {
+      await _weatherNotifs.init(api: _api, onTap: (deviceId) {
+        if (!mounted) return;
+        setState(() => _currentIndex = 4);
+        // WeatherPage will pick up pendingDeviceId via service
+      });
+      await _weatherNotifs.requestPermissionAndRegister(_api);
+      final pending = _weatherNotifs.pendingDeviceId;
+      if (pending != null && pending.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() => _currentIndex = 4);
+        });
+      }
+    } catch (_) {}
   }
 
   @override
@@ -74,6 +95,9 @@ class _MainShellState extends State<MainShell> {
   }
 
   Future<void> _logout() async {
+    try {
+      await _weatherNotifs.unregister(_api);
+    } catch (_) {}
     await _auth.clear();
     if (mounted) _routeToLogin();
   }

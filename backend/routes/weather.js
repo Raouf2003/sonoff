@@ -132,7 +132,7 @@ router.post('/push-tokens', async (req, res) => {
 
 router.delete('/push-tokens', async (req, res) => {
   try {
-    const { token } = req.body || {};
+    const token = (req.body && req.body.token) || req.query.token;
     if (!token) return res.status(400).json({ error: 'token is required' });
     await PushToken.deleteOne({ ownerId: req.userId, token: String(token) });
     res.json({ ok: true });

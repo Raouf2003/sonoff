@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../models/weather.dart';
 import '../services/api_service.dart';
+import '../services/weather_notification_service.dart';
 import 'weather_location_picker_page.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
@@ -44,10 +45,16 @@ class _WeatherPageState extends State<WeatherPage> {
     try {
       final devices = await _api.getDevices();
       if (!mounted) return;
+      // If launched from notification, pre-select that device
+      final pending = WeatherNotificationService().pendingDeviceId;
+      final hasPending = pending != null && devices.any((d) => d['deviceId'] == pending);
       setState(() {
         _devices = devices.cast<Map<String, dynamic>>();
         _loadingDevices = false;
-        if (_devices.isNotEmpty) {
+        if (hasPending) {
+          _selectedDeviceId = pending;
+          WeatherNotificationService().consumePending();
+        } else if (_devices.isNotEmpty) {
           _selectedDeviceId ??= _devices.first['deviceId'] as String?;
         }
       });
