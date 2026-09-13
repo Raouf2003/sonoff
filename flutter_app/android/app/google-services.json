@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "234090666967",
+    "project_id": "stees-6c473",
+    "storage_bucket": "stees-6c473.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:234090666967:android:dfa923d6e0464baf9f8992",
+        "android_client_info": {
+          "package_name": "com.example.smart_home_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB43rXBtKr5CWG7N6Nx_kipwC3TwGij9AA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
