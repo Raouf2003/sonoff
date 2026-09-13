@@ -1,9 +1,94 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'api_service.dart';
+
+// Channel every weather notification is posted on — foreground, background and
+// system auto-display (the backend stamps the same id on the FCM
+// `android.notification` block). High importance so it always heads-ups.
+const String kWeatherChannelId = 'stees_weather';
+const String kWeatherChannelName = 'STEES Weather';
+
+// Discriminator stamped by the backend on every weather advisory FCM payload
+// (`data.type`). Handlers route on it explicitly instead of guessing from
+// payload shape.
+const String kWeatherAdvisoryType = 'weather_advisory';
+
+const AndroidNotificationChannel _weatherChannel = AndroidNotificationChannel(
+  kWeatherChannelId,
+  kWeatherChannelName,
+  importance: Importance.high,
+);
+
+Future<void> _ensureWeatherChannel(FlutterLocalNotificationsPlugin local) async {
+  await local
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(_weatherChannel);
+}
+
+String _dataString(Map<String, dynamic> data, String key, String fallback) {
+  final v = data[key];
+  if (v == null) return fallback;
+  final s = v.toString();
+  return s.isEmpty ? fallback : s;
+}
+
+/// Background/killed handler. MUST stay a top-level function and MUST be
+/// registered via `FirebaseMessaging.onBackgroundMessage()` before `runApp()`
+/// (see main.dart). Runs in its own isolate: it cannot touch
+/// [WeatherNotificationService] state, so it builds a throwaway
+/// local-notifications plugin and shows directly.
+///
+/// NOTE: on Android, messages that ALSO carry a `notification` payload are
+/// auto-displayed in the system tray while backgrounded, so this handler
+/// stays silent for those (showing again would double-banner). It displays
+/// data-only weather messages, which otherwise would arrive with no UI at all.
+@pragma('vm:entry-point')
+Future<void> weatherBackgroundMessageHandler(RemoteMessage message) async {
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint('[weather-notif] background Firebase init failed: $e');
+  }
+  try {
+    if (message.notification != null) return; // system tray already shows it
+    final data = message.data;
+    final isWeather = data['type'] == kWeatherAdvisoryType ||
+        (data['deviceId'] is String &&
+            (data['deviceId'] as String).isNotEmpty);
+    if (!isWeather) return; // not ours — stay silent
+    final local = FlutterLocalNotificationsPlugin();
+    await local.initialize(
+      settings: const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: DarwinInitializationSettings(),
+      ),
+    );
+    await _ensureWeatherChannel(local);
+    await local.show(
+      id: DateTime.now().millisecondsSinceEpoch % 100000,
+      title: _dataString(data, 'title', 'Rain expected'),
+      body: _dataString(data, 'body', 'Check your irrigation schedule'),
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          kWeatherChannelId,
+          kWeatherChannelName,
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      payload: _dataString(data, 'deviceId', ''),
+    );
+  } catch (e) {
+    debugPrint('[weather-notif] background show failed: $e');
+  }
+}
 
 // Centralizes FCM + local display + Socket.IO is handled in weather_page via
 // Socket.IO 'weather_advisory' (live). This service owns FCM lifecycle only.
@@ -13,7 +98,8 @@ class WeatherNotificationService {
   WeatherNotificationService._();
 
   final FirebaseMessaging _fcm = FirebaseMessaging.instance;
-  final FlutterLocalNotificationsPlugin _local = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _local =
+      FlutterLocalNotificationsPlugin();
   StreamSubscription<String>? _tokenSub;
   bool _inited = false;
   String? _pendingDeviceId;
@@ -25,6 +111,9 @@ class WeatherNotificationService {
   Future<void> init({required ApiService api, void Function(String deviceId)? onTap}) async {
     if (_inited) return;
     onNotificationTap = onTap;
+    // Local-notification setup must NEVER prevent the FCM listeners below
+    // from registering: a failed plugin init used to silently kill ALL
+    // foreground display. Failures are now logged, listeners always attach.
     try {
       await _local.initialize(
         settings: const InitializationSettings(
@@ -40,16 +129,44 @@ class WeatherNotificationService {
         },
       );
       // Create channel
-      const channel = AndroidNotificationChannel('stees_weather', 'STEES Weather', importance: Importance.high);
-      await _local.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.createNotificationChannel(channel);
-    } catch (_) {}
+      await _ensureWeatherChannel(_local);
+      // Cold start from a tapped LOCALLY-shown notification (e.g. posted by
+      // the background handler while the app was dead): route like a tap.
+      try {
+        final launch =
+            await _local.getNotificationAppLaunchDetails();
+        final payload = launch?.notificationResponse?.payload;
+        if ((launch?.didNotificationLaunchApp ?? false) &&
+            payload != null &&
+            payload.isNotEmpty) {
+          _pendingDeviceId = payload;
+        }
+      } catch (e) {
+        debugPrint('[weather-notif] launch-details check failed: $e');
+      }
+    } catch (e) {
+      debugPrint('[weather-notif] local-notifications init failed: $e');
+    }
     _inited = true;
-    // Listen foreground FCM -> local show
+    // Foreground FCM -> local show. Handles EVERY message type: weather
+    // advisories (data.type == weather_advisory), the diagnostic test ping,
+    // and anything else carrying a notification or device payload. Title/body
+    // prefer the FCM notification part, falling back to data fields so
+    // data-only messages still render.
     FirebaseMessaging.onMessage.listen((msg) async {
-      final title = msg.notification?.title ?? 'Rain expected';
-      final body = msg.notification?.body ?? 'Check your irrigation schedule';
-      final deviceId = msg.data['deviceId'] as String? ?? '';
-      await _showLocal(title, body, deviceId);
+      try {
+        final data = msg.data;
+        final title = msg.notification?.title ??
+            _dataString(data, 'title', 'Rain expected');
+        final body = msg.notification?.body ??
+            _dataString(data, 'body', 'Check your irrigation schedule');
+        final deviceId = _dataString(data, 'deviceId', '');
+        debugPrint(
+            '[weather-notif] foreground msg type=${data['type'] ?? 'none'} device=$deviceId');
+        await _showLocal(title, body, deviceId);
+      } catch (e) {
+        debugPrint('[weather-notif] foreground handler failed: $e');
+      }
     });
     FirebaseMessaging.onMessageOpenedApp.listen((msg) {
       final d = msg.data['deviceId'] as String?;
@@ -63,7 +180,9 @@ class WeatherNotificationService {
       final initial = await _fcm.getInitialMessage();
       final d = initial?.data['deviceId'] as String?;
       if (d != null && d.isNotEmpty) _pendingDeviceId = d;
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[weather-notif] getInitialMessage failed: $e');
+    }
   }
 
   Future<void> requestPermissionAndRegister(ApiService api) async {
@@ -77,9 +196,13 @@ class WeatherNotificationService {
       _tokenSub = _fcm.onTokenRefresh.listen((t) async {
         try {
           await api.registerPushToken(t);
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('[weather-notif] token re-register failed: $e');
+        }
       });
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[weather-notif] permission/register failed: $e');
+    }
   }
 
   Future<void> unregister(ApiService api) async {
@@ -88,28 +211,40 @@ class WeatherNotificationService {
       if (token != null) {
         try {
           await api.deletePushToken(token);
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('[weather-notif] token delete failed: $e');
+        }
       }
       await _tokenSub?.cancel();
       _tokenSub = null;
       try {
         await _fcm.deleteToken();
-      } catch (_) {}
-    } catch (_) {}
+      } catch (e) {
+        debugPrint('[weather-notif] deleteToken failed: $e');
+      }
+    } catch (e) {
+      debugPrint('[weather-notif] unregister failed: $e');
+    }
   }
 
   Future<void> _showLocal(String title, String body, String payload) async {
     try {
+      // Belt-and-suspenders: re-creating an existing channel is a no-op, and
+      // this repairs the case where init()'s channel step failed but FCM
+      // listeners still attached.
+      await _ensureWeatherChannel(_local);
       await _local.show(
         id: DateTime.now().millisecondsSinceEpoch % 100000,
         title: title,
         body: body,
         notificationDetails: const NotificationDetails(
-          android: AndroidNotificationDetails('stees_weather', 'STEES Weather', importance: Importance.high, priority: Priority.high),
+          android: AndroidNotificationDetails(kWeatherChannelId, kWeatherChannelName, importance: Importance.high, priority: Priority.high),
           iOS: DarwinNotificationDetails(),
         ),
         payload: payload,
       );
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[weather-notif] showLocal failed: $e');
+    }
   }
 }

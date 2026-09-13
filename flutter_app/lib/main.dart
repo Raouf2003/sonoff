@@ -1,8 +1,10 @@
 ﻿import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_controller.dart';
 import 'services/auth_service.dart';
+import 'services/weather_notification_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_shell.dart';
 
@@ -13,6 +15,12 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     await Firebase.initializeApp();
+  } catch (_) {}
+  // Background/killed FCM handler. MUST be registered before runApp() and
+  // MUST stay a top-level function (see weather_notification_service.dart).
+  // Without this, data-only messages arriving while backgrounded render no UI.
+  try {
+    FirebaseMessaging.onBackgroundMessage(weatherBackgroundMessageHandler);
   } catch (_) {}
   runApp(const SteesApp());
 }

@@ -181,8 +181,12 @@ async function sendPush({ ownerId, title, body, data, io } = {}) {
     const res = await admin.messaging().sendEachForMulticast({
       tokens: tokenStrings,
       notification: { title, body },
-      data: Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)])),
-      android: { priority: 'high' },
+      // `type` lets the client route explicitly (foreground / background /
+      // data-only) and always wins over caller data. channelId pins system
+      // auto-display (background/killed) to the app's high-importance channel
+      // so it heads-ups instead of landing on the FCM fallback channel.
+      data: { ...Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)])), type: 'weather_advisory' },
+      android: { priority: 'high', notification: { channelId: 'stees_weather' } },
     });
     // Prune invalid tokens (NotRegistered / InvalidRegistration)
     const toDelete = [];
