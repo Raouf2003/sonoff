@@ -12,6 +12,7 @@ const sensorRoutes = require('./routes/sensors');
 const ruleRoutes = require('./routes/rules');
 const scheduleRoutes = require('./routes/schedules');
 const weatherRoutes = require('./routes/weather');
+const debugPushRoutes = require('./routes/debugPush');
 const devSyncRoutes = require('./routes/devSync');
 const { authMiddleware, JWT_SECRET } = require('./middleware/auth');
 const { normalizeMac } = require('./services/macIdentity');
@@ -199,6 +200,13 @@ app.use('/api/schedules', authMiddleware, scheduleRoutes);
 app.use('/api/weather', authMiddleware, weatherRoutes);
 app.use('/api', authMiddleware, controlRoutes);
 
+// DIAGNOSTIC (FCM rain-advisory investigation): direct test-send endpoint that
+// bypasses analyzer + dedup. POST /debug/test-push?deviceId=<id> (mirrored at
+// /api/debug/test-push). Auth: owner JWT or x-service-key == WEATHER_CRON_KEY.
+// Returns the RAW Firebase response/error per token — never paraphrased.
+app.use('/debug', debugPushRoutes);
+app.use('/api/debug', debugPushRoutes);
+
 // DEVELOPMENT-ONLY manual sync trigger (Phase 6.5). Never exposed in
 // production; in every other environment it is protected by the same JWT auth
 // as the control routes. It only invokes the schedule sync service for a device
@@ -213,4 +221,11 @@ if (
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Backend server running on port ${PORT}`);
+  // DIAGNOSTIC (step 3): confirm FIREBASE_SERVICE_ACCOUNT_* loaded and print
+  // the project_id it initialized with. Never prints the secret itself.
+  try {
+    require('./services/weatherNotifyService').logFirebaseInitStatus(console);
+  } catch (e) {
+    console.warn(`[weather][firebase] status check failed at startup: ${e.message}`);
+  }
 });

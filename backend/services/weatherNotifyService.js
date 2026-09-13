@@ -26,13 +26,34 @@ function advisoryText({ farmName, advisory }) {
 }
 
 let _admin = null;
+let _firebaseStatus = null;
+
+function firebaseEnvSource() {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) return 'FIREBASE_SERVICE_ACCOUNT_JSON';
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) return 'FIREBASE_SERVICE_ACCOUNT_BASE64';
+  return null;
+}
+
+function parseFirebaseCreds() {
+  const b64 = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+  if (!b64) return { creds: null, source: null, parseError: null };
+  const source = firebaseEnvSource();
+  const jsonStr = b64.trim().startsWith('{') ? b64 : Buffer.from(b64, 'base64').toString('utf8');
+  try {
+    return { creds: JSON.parse(jsonStr), source, parseError: null };
+  } catch (e) {
+    return { creds: null, source, parseError: e.message };
+  }
+}
+
 function getAdmin() {
   if (_admin) return _admin;
-  const b64 = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-  const jsonStr = b64 ? (b64.trim().startsWith('{') ? b64 : Buffer.from(b64, 'base64').toString('utf8')) : null;
-  if (!jsonStr) return null;
+  const { creds, parseError } = parseFirebaseCreds();
+  if (!creds) {
+    if (parseError) console.warn(`[weather] Firebase Admin init failed: ${parseError}`);
+    return null;
+  }
   try {
-    const creds = JSON.parse(jsonStr);
     const admin = require('firebase-admin');
     if (admin.apps.length === 0) {
       admin.initializeApp({ credential: admin.credential.cert(creds) });
@@ -43,6 +64,80 @@ function getAdmin() {
     console.warn(`[weather] Firebase Admin init failed: ${e.message}`);
     return null;
   }
+}
+
+// DIAGNOSTIC (step 3): report Firebase Admin init status without leaking the
+// service-account secret. Safe to call at server startup and from debug routes.
+// Never throws; returns a plain object and logs one summary line.
+function getFirebaseInitStatus() {
+  if (_firebaseStatus) return _firebaseStatus;
+  const source = firebaseEnvSource();
+  const rawLen = source ? String(process.env[source] || '').length : 0;
+  const { creds, parseError } = parseFirebaseCreds();
+  const status = {
+    configured: !!creds,
+    source,
+    envPresent: !!source,
+    envLength: rawLen,
+    projectId: (creds && creds.project_id) || null,
+    clientEmail: (creds && creds.client_email) || null,
+    parseError,
+    initialized: false,
+    appsCount: 0,
+    initError: null,
+  };
+  if (!creds) {
+    _firebaseStatus = status;
+    return status;
+  }
+  try {
+    const admin = require('firebase-admin');
+    if (admin.apps.length === 0) {
+      admin.initializeApp({ credential: admin.credential.cert(creds) });
+    }
+    _admin = admin;
+    status.initialized = true;
+    status.appsCount = admin.apps.length;
+    try {
+      status.projectId = status.projectId || admin.apps[0].options.projectId || null;
+    } catch (_) {}
+  } catch (e) {
+    status.initError = e.message;
+  }
+  _firebaseStatus = status;
+  return status;
+}
+
+function logFirebaseInitStatus(logger) {
+  const log = logger || console;
+  try {
+    const s = getFirebaseInitStatus();
+    if (!s.configured) {
+      log.warn(
+        `[weather][firebase] NOT CONFIGURED source=${s.source || 'none'} ` +
+          `parseError=${s.parseError || 'none'} — FCM sends will return FCM_NOT_CONFIGURED`,
+      );
+    } else if (s.initError) {
+      log.warn(`[weather][firebase] INIT FAILED source=${s.source} project_id=${s.projectId || 'unknown'} error=${s.initError}`);
+    } else {
+      log.log(
+        `[weather][firebase] OK source=${s.source} project_id=${s.projectId || 'unknown'} ` +
+          `client_email=${s.clientEmail || 'unknown'} apps=${s.appsCount}`,
+      );
+    }
+    return s;
+  } catch (e) {
+    log.warn(`[weather][firebase] status check failed: ${e.message}`);
+    return { configured: false, initError: e.message };
+  }
+}
+
+// DIAGNOSTIC (step 4): truncated token preview for logs/responses — never
+// print a full FCM registration token to stdout or JSON responses.
+function tokenPreview(token) {
+  const t = String(token || '');
+  if (t.length <= 20) return `${t.slice(0, 6)}...(${t.length})`;
+  return `${t.slice(0, 12)}...${t.slice(-4)}(${t.length})`;
 }
 
 // Server-side push hook. FCM via Firebase Admin SDK HTTP v1, credentials stay backend-only.
@@ -62,6 +157,18 @@ async function sendPush({ ownerId, title, body, data, io } = {}) {
       at: new Date().toISOString(),
     });
   }
+  // DIAGNOSTIC (step 4): token freshness — which tokens exist for this owner
+  // and how old they are. Preview only, never full tokens. Diagnostic-only;
+  // does not change send behavior.
+  try {
+    const freshness = (tokens || []).map((t) => ({
+      preview: tokenPreview(t.token),
+      platform: t.platform || 'unknown',
+      createdAt: t.createdAt ? new Date(t.createdAt).toISOString() : null,
+      updatedAt: t.updatedAt ? new Date(t.updatedAt).toISOString() : null,
+    }));
+    console.log(`[weather][push] owner=${String(ownerId)} tokens=${tokens.length} freshness=${JSON.stringify(freshness)}`);
+  } catch (_) {}
   if (tokens.length === 0) {
     return { delivered: false, reason: 'NO_TOKENS', tokens: 0, socketEmitted: !!io };
   }
@@ -171,6 +278,16 @@ async function runWeatherNotify({ ownerId, deviceId, io, deviceModel, scheduleMo
         result.errors.push(err.message);
         continue;
       }
+      // DIAGNOSTIC (step 2): print the REAL dedup key string + whether an
+      // entry already exists, right before the send-or-skip decision. Do not
+      // assume the key changed when location changed — this line proves it.
+      // Diagnostic-only; the skip logic below is unchanged.
+      const dedupKey = `${adv.deviceId}|${adv.scheduleId}|${adv.rainDate}|${locKey}`;
+      console.log(
+        `[weatherScheduler][dedup] key="${dedupKey}" exists=${!!existing} ` +
+          `status=${existing ? existing.status : 'none'} -> ` +
+          `${existing && existing.status === 'sent' ? 'SKIP (already sent)' : 'SEND path'}`,
+      );
       if (existing && existing.status === 'sent') continue;
       const payload = { ...adv, farmName: device.farmName || null, timezone: device.timezone || APP_TIMEZONE, locationKey: locKey };
       try {
@@ -225,4 +342,4 @@ async function runWeatherNotify({ ownerId, deviceId, io, deviceModel, scheduleMo
   return result;
 }
 
-module.exports = { runWeatherNotify, sendPush, advisoryText, locationKeyFor, getAdmin };
+module.exports = { runWeatherNotify, sendPush, advisoryText, locationKeyFor, getAdmin, getFirebaseInitStatus, logFirebaseInitStatus, tokenPreview };
