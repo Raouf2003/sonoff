@@ -188,27 +188,11 @@ async function sendPush({ ownerId, title, body, data, io } = {}) {
       // sound/default is required on BOTH android + apns — without it the
       // banner arrives silently even when Firebase reports delivered:true.
       data: { ...Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)])), type: 'weather_advisory' },
-      // Facebook/TikTok-style system banner when app is closed: notification
-      // payload guarantees OS shows it without app code running. High priority
-      // + PRIORITY_MAX + default sound + PUBLIC visibility = heads-up with
-      // sound that lingers in the shade like other popular apps.
-      android: {
-        priority: 'high',
-        ttl: 3600 * 1000,
-        notification: {
-          channelId: 'stees_weather',
-          priority: 'PRIORITY_MAX',
-          visibility: 'PUBLIC',
-          sound: 'default',
-          defaultSound: true,
-          defaultVibrateTimings: false,
-          sticky: false,
-        },
-      },
-      apns: {
-        headers: { 'apns-priority': '10' },
-        payload: { aps: { sound: 'default', badge: 1, 'mutable-content': 1 } },
-      },
+      // System banner when app closed (like Facebook/TikTok): must be a
+      // `notification` payload so OS shows it without app code. Keep android
+      // block minimal — extra fields broke delivery entirely in last attempt.
+      android: { priority: 'high', notification: { channelId: 'stees_weather', sound: 'default' } },
+      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
     });
     // Prune invalid tokens (NotRegistered / InvalidRegistration)
     const toDelete = [];
