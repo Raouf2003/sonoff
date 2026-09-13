@@ -76,11 +76,13 @@ router.get('/:deviceId/today', async (req, res) => {
       deviceId: device.deviceId,
       timezone: device.timezone || APP_TIMEZONE,
       location: { farmName: device.farmName || null, lat: device.lat, lon: device.lon },
+      fetchedAt: new Date().toISOString(),
       forecast: {
         temperature: currentTemp(forecast.hourly),
         rainProbability: top ? top.probability : 0,
         precipitationMm: top ? top.precipitationMm : 0,
       },
+      hourly: forecast.hourly,
       schedules: schedules.map((s) => ({
         scheduleId: String(s._id),
         channels: s.channels,

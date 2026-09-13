@@ -7,6 +7,7 @@ import 'devices_page.dart';
 import 'sensors_page.dart';
 import 'schedules_page.dart';
 import 'rules_page.dart';
+import 'weather_page.dart';
 import 'login_screen.dart';
 import '../widgets/stees_nav_bar.dart';
 
@@ -28,6 +29,7 @@ class _MainShellState extends State<MainShell> {
     SensorsPage(onNavigateToTab: (i) => _switchTab(i)),
     const SchedulesPage(),
     const RulesPage(),
+    WeatherPage(onNavigateToTab: (i) => _switchTab(i)),
   ];
 
   @override
@@ -100,7 +102,7 @@ class _MainShellState extends State<MainShell> {
               const SizedBox(height: AppSpacing.sm),
               Expanded(
                 child: IndexedStack(
-                  index: _currentIndex,
+                  index: _currentIndex.clamp(0, _pages.length - 1),
                   children: _pages,
                 ),
               ),
@@ -131,6 +133,11 @@ class _MainShellState extends State<MainShell> {
             icon: Icons.schema_outlined,
             activeIcon: Icons.schema,
             label: 'Rules',
+          ),
+          SteesNavItem(
+            icon: Icons.cloud_outlined,
+            activeIcon: Icons.cloud,
+            label: 'Weather',
           ),
         ],
       ),
