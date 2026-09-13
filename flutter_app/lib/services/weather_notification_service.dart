@@ -18,12 +18,17 @@ const String kWeatherChannelName = 'STEES Weather';
 // payload shape.
 const String kWeatherAdvisoryType = 'weather_advisory';
 
+// Custom rain chime — file ios/Runner/stees_rain.caf + android/app/src/main/res/raw/stees_rain.wav
+// MUST stay in sync with backend weatherNotifyService.js `sound` fields.
+const AndroidNotificationSound _rainSound = RawResourceAndroidNotificationSound('stees_rain');
+
 const AndroidNotificationChannel _weatherChannel = AndroidNotificationChannel(
   kWeatherChannelId,
   kWeatherChannelName,
   description: 'Rain overlap advisories — alerts when irrigation overlaps forecast rain',
   importance: Importance.max,
   playSound: true,
+  sound: _rainSound,
   enableVibration: true,
 );
 
@@ -92,6 +97,7 @@ Future<void> weatherBackgroundMessageHandler(RemoteMessage message) async {
           importance: Importance.max,
           priority: Priority.high,
           playSound: true,
+          sound: _rainSound,
           enableVibration: true,
           visibility: NotificationVisibility.public,
           category: AndroidNotificationCategory.message,
@@ -102,6 +108,7 @@ Future<void> weatherBackgroundMessageHandler(RemoteMessage message) async {
           presentAlert: true,
           presentBadge: true,
           presentSound: true,
+          sound: 'stees_rain.caf',
           interruptionLevel: InterruptionLevel.active,
         ),
       ),
@@ -266,6 +273,7 @@ class WeatherNotificationService {
             importance: Importance.max,
             priority: Priority.high,
             playSound: true,
+            sound: _rainSound,
             enableVibration: true,
             visibility: NotificationVisibility.public,
             category: AndroidNotificationCategory.message,
@@ -276,6 +284,7 @@ class WeatherNotificationService {
             presentAlert: true,
             presentBadge: true,
             presentSound: true,
+            sound: 'stees_rain.caf',
             interruptionLevel: InterruptionLevel.active,
           ),
         ),
