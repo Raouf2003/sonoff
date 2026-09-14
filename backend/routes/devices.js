@@ -3,6 +3,7 @@ const Device = require('../models/Device');
 const Sensor = require('../models/Sensor');
 const Rule = require('../models/Rule');
 const Schedule = require('../models/Schedule');
+const WeatherAdvisory = require('../models/WeatherAdvisory');
 const deviceRegistry = require('../services/deviceRegistry');
 const runtimeState = require('../services/runtimeState');
 const ruleEngine = require('../services/ruleEngine');
@@ -140,6 +141,12 @@ router.patch('/:deviceId/location', async (req, res) => {
     if (lon !== undefined && lon !== null && (typeof lon !== 'number' || lon < -180 || lon > 180)) {
       return res.status(400).json({ error: 'lon must be between -180 and 180' });
     }
+    // Snapshot PRE-edit coordinates/timezone: they form the advisory dedup
+    // locationKey, so a material change means old-location history is stale.
+    const prevLat = typeof device.lat === 'number' ? device.lat.toFixed(4) : 'null';
+    const prevLon = typeof device.lon === 'number' ? device.lon.toFixed(4) : 'null';
+    const prevTz = device.timezone || 'Africa/Algiers';
+    const prevLocKey = `${prevLat},${prevLon},${prevTz}`;
     if (farmName !== undefined) {
       if (farmName !== null && (typeof farmName !== 'string' || farmName.length > 80)) {
         return res.status(400).json({ error: 'farmName must be a short string' });
@@ -155,6 +162,26 @@ router.patch('/:deviceId/location', async (req, res) => {
       device.timezone = timezone === null ? 'Africa/Algiers' : String(timezone).trim() || 'Africa/Algiers';
     }
     await device.save();
+    // Location change re-check: re-evaluate ALL schedules for this device
+    // against the NEW location's rain blocks. The advisory upsert keys on
+    // (device|schedule|rainDate|locationKey), but the legacy unique index
+    // (device|schedule|rainDate) makes any old-location row collide with the
+    // new-location insert (11000 -> silently skipped, no push). Clearing the
+    // device's advisory rows on a material location change mirrors the
+    // schedule-edit fix: fresh keys, no false SKIP, no false positives —
+    // schedules whose time doesn't overlap the new rain blocks simply
+    // produce no advisory. farmName-only edits keep history (no re-spam).
+    if (`${typeof device.lat === 'number' ? device.lat.toFixed(4) : 'null'},${typeof device.lon === 'number' ? device.lon.toFixed(4) : 'null'},${device.timezone || 'Africa/Algiers'}` !== prevLocKey) {
+      try {
+        const cleared = await WeatherAdvisory.deleteMany({ deviceId: device.deviceId });
+        console.log(
+          `[weatherScheduler][dedup-reset] device=${device.deviceId} ` +
+            `cleared=${cleared && cleared.deletedCount !== undefined ? cleared.deletedCount : '?'} reason=location-changed`,
+        );
+      } catch (err) {
+        console.error(`[weatherScheduler][dedup-reset] device=${device.deviceId} failed: ${err.message}`);
+      }
+    }
     // Location changed: re-evaluate advisories for this device (fire-and-forget, keeps history via locationKey)
     try { require('../services/weatherNotifyScheduler').trigger(device.deviceId, req.app.get('io')); } catch (_) {}
     res.json(device.toJSON());
