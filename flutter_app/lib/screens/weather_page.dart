@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import '../models/weather.dart';
+import 'package:google_fonts/google_fonts.dart';import '../models/weather.dart';
 import '../services/api_service.dart';
 import '../services/weather_notification_service.dart';
 import 'weather_location_picker_page.dart';
@@ -13,6 +12,12 @@ class WeatherPage extends StatefulWidget {
   final ApiService? api;
 
   const WeatherPage({super.key, this.onNavigateToTab, this.api});
+
+  /// Test-only override for the notification-tap device handoff. The real
+  /// reader touches Firebase (unavailable in widget tests); when set, it is
+  /// used exclusively. Null in production — behavior unchanged.
+  @visibleForTesting
+  static String? Function()? pendingDeviceReader;
 
   @override
   State<WeatherPage> createState() => _WeatherPageState();
@@ -46,7 +51,9 @@ class _WeatherPageState extends State<WeatherPage> {
       final devices = await _api.getDevices();
       if (!mounted) return;
       // If launched from notification, pre-select that device
-      final pending = WeatherNotificationService().pendingDeviceId;
+      final pending = WeatherPage.pendingDeviceReader != null
+          ? WeatherPage.pendingDeviceReader!()
+          : WeatherNotificationService().pendingDeviceId;
       final hasPending = pending != null && devices.any((d) => d['deviceId'] == pending);
       setState(() {
         _devices = devices.cast<Map<String, dynamic>>();
@@ -197,58 +204,92 @@ class _WeatherPageState extends State<WeatherPage> {
 
   Widget _buildDeviceSelector(SteesColors colors) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.sm),
       decoration: BoxDecoration(
         color: colors.submerged,
         borderRadius: BorderRadius.circular(AppRadius.md),
         border: Border.all(color: colors.border),
       ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: _selectedDeviceId,
-          isExpanded: true,
-          dropdownColor: colors.submerged,
-          icon: Icon(Icons.keyboard_arrow_down, color: colors.mist),
-          items: [
-            for (final d in _devices)
-              DropdownMenuItem<String>(
-                value: '${d['deviceId']}',
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '${d['name'] ?? d['deviceId']}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: colors.foam),
-                      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: _selectedDeviceId,
+              isExpanded: true,
+              dropdownColor: colors.submerged,
+              icon: Icon(Icons.keyboard_arrow_down, color: colors.mist),
+              items: [
+                for (final d in _devices)
+                  DropdownMenuItem<String>(
+                    value: '${d['deviceId']}',
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${d['farmName'] ?? d['name'] ?? d['deviceId']}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: colors.foam),
+                              ),
+                              Text(
+                                _deviceSubline(d),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.jetBrainsMono(
+                                    fontSize: 10, color: colors.mist),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (d['lat'] == null || d['lon'] == null)
+                          Icon(Icons.location_off_outlined,
+                              size: 14,
+                              color: colors.mist.withValues(alpha: 0.6))
+                        else
+                          Icon(Icons.cloud_outlined,
+                              size: 14,
+                              color: colors.stream.withValues(alpha: 0.7)),
+                      ],
                     ),
-                    if (d['lat'] == null || d['lon'] == null)
-                      Icon(Icons.location_off_outlined,
-                          size: 14,
-                          color: colors.mist.withValues(alpha: 0.6))
-                    else
-                      Icon(Icons.cloud_outlined,
-                          size: 14,
-                          color: colors.stream.withValues(alpha: 0.7)),
-                  ],
-                ),
-              ),
+                  ),
+              ],
+              onChanged: (v) {
+                if (v == null || v == _selectedDeviceId) return;
+                setState(() {
+                  _selectedDeviceId = v;
+                  _weather = null;
+                });
+                _loadWeather();
+              },
+            ),
+          ),
+          if (_weather != null && !_weather!.weatherDisabled) ...[
+            Divider(color: colors.border, height: AppSpacing.lg),
+            _buildLocationLine(colors, _weather!),
           ],
-          onChanged: (v) {
-            if (v == null || v == _selectedDeviceId) return;
-            setState(() {
-              _selectedDeviceId = v;
-              _weather = null;
-            });
-            _loadWeather();
-          },
-        ),
+        ],
       ),
     );
+  }
+
+  /// Second selector line: device name + id, unless the name is already shown
+  /// as the primary (farm) line.
+  String _deviceSubline(Map<String, dynamic> d) {
+    final id = '${d['deviceId']}';
+    final name = d['name'] != null ? '${d['name']}' : null;
+    final primary = '${d['farmName'] ?? d['name'] ?? id}';
+    if (name == null || name.isEmpty || name == primary) return id;
+    return '$name · $id';
   }
 
   List<Widget> _buildWeatherBody(SteesColors colors) {
@@ -272,49 +313,80 @@ class _WeatherPageState extends State<WeatherPage> {
     }
     if (w.weatherUnavailable) {
       return [
-        SteesError(
-          title: 'Weather temporarily unavailable',
-          subtitle:
-              'STEES could not retrieve the weather forecast. Your irrigation schedules are unaffected.',
-          onRetry: _loadWeather,
-        ),
+        _buildUnavailableCard(colors),
         const SizedBox(height: AppSpacing.md),
         _buildScheduleSection(colors, w),
       ];
     }
+    // Hierarchy: CURRENT CONDITIONS → RAIN FORECAST → IRRIGATION IMPACT.
+    // Keeps the page irrigation-first: what is happening → what is
+    // expected → will it affect irrigation → today's schedule list.
     return [
-      _buildLocationLine(colors, w),
-      const SizedBox(height: AppSpacing.md),
-      _buildCurrentSection(colors, w),
+      _buildNowSection(colors, w),
       const SizedBox(height: AppSpacing.md),
       _buildHourlySection(colors, w),
       const SizedBox(height: AppSpacing.md),
-      _buildAdvisorySection(colors, w),
-      const SizedBox(height: AppSpacing.md),
+      ..._buildAdvisoryCards(colors, w),
       _buildScheduleSection(colors, w),
-      if (_retrievedAt != null || w.fetchedAt != null) ...[
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          _retrievedLabel(w),
-          style: GoogleFonts.jetBrainsMono(
-            fontSize: 10,
-            color: colors.mist.withValues(alpha: 0.6),
-          ),
-        ),
-      ],
     ];
   }
 
-  String _retrievedLabel(WeatherToday w) {
-    if (_retrievedAt == null) return 'Forecast · ${w.timezone}';
-    final mins = DateTime.now().difference(_retrievedAt!).inMinutes;
-    if (mins < 1) return 'Retrieved just now · ${w.timezone}';
-    if (mins == 1) return 'Retrieved 1 minute ago · ${w.timezone}';
-    return 'Retrieved $mins minutes ago · ${w.timezone}';
+  /// Compact unavailable notice (the only verdict-style card kept): the
+  /// forecast failed, schedules are unaffected, retry is one tap away.
+  Widget _buildUnavailableCard(SteesColors colors) {
+    return SteesCard(
+      active: false,
+      borderColor: colors.mist.withValues(alpha: 0.45),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.cloud_off_outlined, size: 22, color: colors.mist),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Forecast unavailable',
+                        style: GoogleFonts.sora(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: colors.foam)),
+                    const SizedBox(height: 2),
+                    Text(
+                        'Your irrigation schedules are unaffected and will run as programmed.',
+                        style: GoogleFonts.inter(
+                            fontSize: 12.5,
+                            height: 1.45,
+                            color: colors.mist)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _loadingWeather ? null : _loadWeather,
+              icon: Icon(Icons.refresh, size: 15, color: colors.stream),
+              label: Text('Retry',
+                  style: GoogleFonts.inter(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: colors.stream)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildLocationLine(SteesColors colors, WeatherToday w) {
-    final loc = w.farmName ?? 'Device ${w.deviceId}';
+    // Coordinates only: the farm/device name already heads the selector
+    // above, so repeating it here duplicated the same name twice.
     final coords = w.lat != null && w.lon != null
         ? '${w.lat!.toStringAsFixed(2)}, ${w.lon!.toStringAsFixed(2)}'
         : w.timezone;
@@ -323,7 +395,7 @@ class _WeatherPageState extends State<WeatherPage> {
         Icon(Icons.location_on_outlined, size: 14, color: colors.mist),
         const SizedBox(width: 6),
         Expanded(
-          child: Text('$loc · $coords',
+          child: Text(coords,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
@@ -332,7 +404,7 @@ class _WeatherPageState extends State<WeatherPage> {
           onTap: _openLocationPicker,
           borderRadius: BorderRadius.circular(AppRadius.sm),
           child: Padding(
-            padding: const EdgeInsets.all(4),
+            padding: const EdgeInsets.all(8),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -351,39 +423,91 @@ class _WeatherPageState extends State<WeatherPage> {
     );
   }
 
-  Widget _buildCurrentSection(SteesColors colors, WeatherToday w) {
+  /// Current conditions: temperature dominant, precipitation secondary with
+  /// honest forecast wording. Probability is intentionally omitted here —
+  /// it belongs to future forecast cells only. Open-Meteo hourly
+  /// precipitation is an accumulated hourly amount, so wording is
+  /// "Precipitation · Last hour" rather than an instantaneous sensor claim.
+  Widget _buildNowSection(SteesColors colors, WeatherToday w) {
+    // Updated line uses the existing fetched/retrieved timestamps already on
+    // the model — no new data source, just surfaced in-card as spec requests.
+    final updated = _retrievedAt ?? (w.fetchedAt != null ? DateTime.tryParse(w.fetchedAt!) : null);
+    String updatedLabel = w.timezone;
+    if (updated != null) {
+      String pad(int n) => n.toString().padLeft(2, '0');
+      updatedLabel = 'Updated ${pad(updated.hour)}:${pad(updated.minute)} · ${w.timezone}';
+    }
+    final precipLabel = w.precipitationMm > 0 ? 'Precipitation' : 'Precipitation';
+    final precipSubtitle = 'Last hour';
     return SteesCard(
-      active: true,
+      active: false,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('CURRENT',
+          Text('CURRENT CONDITIONS',
               style: GoogleFonts.jetBrainsMono(
                   fontSize: 10.5,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 1.6,
                   color: colors.stream)),
-          const SizedBox(height: AppSpacing.sm),
+          const SizedBox(height: AppSpacing.md),
+          // Temperature: dominant numeric value.
           Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
             children: [
-              _Stat(
-                  icon: Icons.thermostat_outlined,
-                  label: 'Temp',
-                  value: w.temperature == null
+              Text(
+                  w.temperature == null
                       ? '—'
-                      : '${w.temperature!.toStringAsFixed(0)}°C'),
-              const SizedBox(width: AppSpacing.lg),
-              _Stat(
-                  icon: Icons.water_drop_outlined,
-                  label: 'Rain',
-                  value: '${w.precipitationMm.toStringAsFixed(1)} mm'),
-              const SizedBox(width: AppSpacing.lg),
-              _Stat(
-                  icon: Icons.umbrella_outlined,
-                  label: 'Chance',
-                  value: '${w.rainProbability}%'),
+                      : '${w.temperature!.toStringAsFixed(0)}°',
+                  style: GoogleFonts.sora(
+                      fontSize: 42,
+                      fontWeight: FontWeight.w700,
+                      height: 1,
+                      color: colors.foam)),
+              const SizedBox(width: AppSpacing.sm),
+              Text('Temperature',
+                  style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: colors.mist)),
             ],
           ),
+          const SizedBox(height: AppSpacing.md),
+          // Precipitation: second most important, with honest period wording.
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: colors.stream.withValues(alpha: 0.10),
+                  border: Border.all(color: colors.stream.withValues(alpha: 0.22)),
+                ),
+                child: Icon(Icons.water_drop_outlined, size: 18, color: colors.stream),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${w.precipitationMm.toStringAsFixed(1)} mm',
+                        style: GoogleFonts.sora(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: colors.foam)),
+                    Text('$precipLabel · $precipSubtitle',
+                        style: GoogleFonts.inter(fontSize: 11.5, color: colors.mist)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Text(updatedLabel,
+              style: GoogleFonts.jetBrainsMono(
+                  fontSize: 9.5, color: colors.mist.withValues(alpha: 0.7))),
         ],
       ),
     );
@@ -421,7 +545,7 @@ class _WeatherPageState extends State<WeatherPage> {
           _buildHourlyHeader(colors),
           const SizedBox(height: AppSpacing.sm),
           SizedBox(
-            height: 92,
+            height: 98,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: hours.length,
@@ -430,33 +554,50 @@ class _WeatherPageState extends State<WeatherPage> {
               itemBuilder: (_, i) => _HourCell(hour: hours[i]),
             ),
           ),
+          const SizedBox(height: AppSpacing.sm),
+          Text('Significant rain: ≥2 mm with ≥50% chance',
+              style: GoogleFonts.jetBrainsMono(
+                  fontSize: 9.5,
+                  color: colors.mist.withValues(alpha: 0.7))),
         ],
       ),
     );
   }
 
   Widget _buildHourlyHeader(SteesColors colors) {
-    const labels = ['Today', 'Tomorrow', 'Day +2'];
     return Row(
       children: [
-        Text('HOURLY',
+        Text('FORECAST',
             style: GoogleFonts.jetBrainsMono(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 1.6,
                 color: colors.stream)),
-        const Spacer(),
-        for (var i = 0; i < 3; i++) ...[
-          if (i > 0) const SizedBox(width: 6),
-          _DayPill(
-            label: labels[i],
-            selected: _hourlyDay == i,
-            onTap: () => setState(() => _hourlyDay = i),
+        const SizedBox(width: AppSpacing.sm),
+        Expanded(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < 3; i++) ...[
+                  if (i > 0) const SizedBox(width: 6),
+                  _DayPill(
+                    label: _pillLabel(i),
+                    selected: _hourlyDay == i,
+                    onTap: () => setState(() => _hourlyDay = i),
+                  ),
+                ],
+              ],
+            ),
           ),
-        ],
+        ),
       ],
     );
   }
+
+  static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
   String _dayLabel(String rainDate) {
     final now = DateTime.now();
@@ -471,14 +612,25 @@ class _WeatherPageState extends State<WeatherPage> {
       if (parts.length == 3) {
         final m = int.parse(parts[1]);
         final d = int.parse(parts[2]);
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        if (m >= 1 && m <= 12) return '${months[m - 1]} $d';
+        if (m >= 1 && m <= 12) return '${_months[m - 1]} $d';
       }
     } catch (_) {}
     return rainDate;
   }
 
-  Widget _buildAdvisorySection(SteesColors colors, WeatherToday w) {
+  /// Day-pill labels: Today / Tomorrow / real date (never "Day +2").
+  String _pillLabel(int index) {
+    if (index == 0) return 'Today';
+    if (index == 1) return 'Tomorrow';
+    final d = DateTime.now().add(const Duration(days: 2));
+    return '${_months[d.month - 1]} ${d.day}';
+  }
+
+  /// Per-conflict detail cards. Grouping/dedup logic is unchanged; only the
+  /// presentation is irrigation-first: irrigation window, rain window (amount
+  /// always paired with its time range), and the overlap duration the API
+  /// already provides. Advisory-only wording throughout.
+  List<Widget> _buildAdvisoryCards(SteesColors colors, WeatherToday w) {
     // Always render ALL deduped advisories for all 3 days — never filter by _hourlyDay.
     final seen = <String, WeatherAdvisory>{};
     for (final a in w.advisories) {
@@ -492,122 +644,166 @@ class _WeatherPageState extends State<WeatherPage> {
       (byScheduleDate[k] ??= []).add(a);
     }
     final groups = byScheduleDate.values.toList();
-    if (groups.isEmpty) {
-      return SteesCard(
-        active: false,
-        child: Row(
-          children: [
-            Icon(Icons.check_circle_outline,
-                size: 18, color: colors.leaf),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text('No significant rain overlap.\nYour irrigation schedules have no significant forecast rain overlap today.',
-                  style: GoogleFonts.inter(
-                      fontSize: 12.5, height: 1.45, color: colors.mist)),
-            ),
-          ],
-        ),
-      );
-    }
-    return Column(
-      children: [
-        for (final group in groups) ...[
-          Builder(builder: (_) {
-            final overlaps = group.where((a) => a.isOverlap).toList();
-            final nears = group.where((a) => !a.isOverlap).toList();
-            final primary = overlaps.isNotEmpty ? overlaps.first : group.first;
-            return SteesCard(
-              active: primary.isOverlap,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                          primary.isOverlap
-                              ? Icons.warning_amber_rounded
-                              : Icons.cloud_outlined,
-                          size: 18,
-                          color: primary.isOverlap
-                              ? colors.sunlight
-                              : colors.stream),
-                      const SizedBox(width: AppSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          primary.isOverlap
-                              ? 'Rain overlaps irrigation'
-                              : 'Rain near irrigation',
-                          style: GoogleFonts.sora(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: colors.foam),
-                        ),
+    if (groups.isEmpty) return [];
+    return [
+      for (final group in groups) ...[
+        Builder(builder: (_) {
+          final overlaps = group.where((a) => a.isOverlap).toList();
+          final nears = group.where((a) => !a.isOverlap).toList();
+          final primary = overlaps.isNotEmpty ? overlaps.first : group.first;
+          final accent =
+              primary.isOverlap ? colors.danger : colors.sunlight;
+          final channels = primary.channels.isEmpty
+              ? ''
+              : ' · CH${primary.channels.join(' · CH')}';
+          // Auto-named schedules repeat the window as their name — show the
+          // name only when it genuinely differs from the irrigation window.
+          final window =
+              '${primary.scheduleStart}–${primary.scheduleEnd}';
+          final showName = primary.scheduleName.isNotEmpty &&
+              primary.scheduleName != window;
+          return SteesCard(
+            active: false,
+            borderColor: accent.withValues(alpha: 0.45),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                        primary.isOverlap
+                            ? Icons.warning_amber_rounded
+                            : Icons.cloud_outlined,
+                        size: 18,
+                        color: accent),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        primary.isOverlap
+                            ? 'Rain during irrigation'
+                            : 'Rain near irrigation',
+                        style: GoogleFonts.sora(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: colors.foam),
                       ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: colors.stream.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(99),
-                          border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
-                        ),
-                        child: Text(
-                          _dayLabel(primary.rainDate),
-                          style: GoogleFonts.jetBrainsMono(
-                              fontSize: 10, fontWeight: FontWeight.w700, color: colors.stream),
-                        ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: colors.stream.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(99),
+                        border: Border.all(color: colors.stream.withValues(alpha: 0.25)),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Text(
-                    'Schedule ${primary.scheduleStart}–${primary.scheduleEnd}'
-                    '${primary.scheduleName.isNotEmpty ? ' · ${primary.scheduleName}' : ''}'
-                    '${primary.channels.isNotEmpty ? ' · CH${primary.channels.join(', CH')}' : ''}\n'
-                    'Rain ${primary.rainStart}–${primary.rainEnd} · ${primary.precipitationMm.toStringAsFixed(1)} mm · ${primary.probability}%\n'
-                    'Consider reviewing today\'s irrigation schedule.',
-                    style: GoogleFonts.inter(
-                        fontSize: 12.5, height: 1.5, color: colors.mist),
-                  ),
-                  if (nears.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      'Also near: ${nears.map((n) => '${n.rainStart}–${n.rainEnd}').join(', ')}',
+                      child: Text(
+                        _dayLabel(primary.rainDate),
+                        style: GoogleFonts.jetBrainsMono(
+                            fontSize: 10, fontWeight: FontWeight.w700, color: colors.stream),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Text('Irrigation',
+                    style: GoogleFonts.jetBrainsMono(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                        color: colors.mist)),
+                const SizedBox(height: 2),
+                Text('$window$channels',
+                    style: GoogleFonts.sora(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: colors.foam)),
+                if (showName) ...[
+                  const SizedBox(height: 2),
+                  Text(primary.scheduleName,
                       style: GoogleFonts.inter(
-                          fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
-                    ),
-                  ],
-                  if (overlaps.length > 1) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      '+${overlaps.length - 1} more overlap${overlaps.length - 1 == 1 ? '' : 's'} same day',
-                      style: GoogleFonts.inter(
-                          fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
-                    ),
-                  ],
-                  if (widget.onNavigateToTab != null) ...[
-                    const SizedBox(height: AppSpacing.sm),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        onPressed: () => widget.onNavigateToTab!(2),
-                        icon: Icon(Icons.schedule_outlined,
-                            size: 15, color: colors.stream),
-                        label: Text('Review Schedule',
-                            style: GoogleFonts.inter(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
-                                color: colors.stream)),
-                      ),
-                    ),
-                  ],
+                          fontSize: 12, height: 1.4, color: colors.mist)),
                 ],
-              ),
-            );
-          }),
-          const SizedBox(height: AppSpacing.sm),
-        ],
+                const SizedBox(height: AppSpacing.sm),
+                Text('Rain',
+                    style: GoogleFonts.jetBrainsMono(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                        color: colors.mist)),
+                const SizedBox(height: 2),
+                Text(
+                  '${primary.rainStart}–${primary.rainEnd} · ${primary.precipitationMm.toStringAsFixed(1)} mm · ${primary.probability}%',
+                  style: GoogleFonts.sora(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: colors.foam),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(99),
+                    border: Border.all(color: accent.withValues(alpha: 0.28)),
+                  ),
+                  child: Text(
+                    primary.isOverlap
+                        ? (primary.overlapMinutes > 0
+                            ? 'Direct overlap · ${_overlapLabel(primary.overlapMinutes)}'
+                            : 'Direct overlap')
+                        : 'Close to irrigation window',
+                    style: GoogleFonts.inter(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: accent),
+                  ),
+                ),
+                if (nears.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Also near: ${nears.map((n) => '${n.rainStart}–${n.rainEnd}').join(', ')}',
+                    style: GoogleFonts.inter(
+                        fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                  ),
+                ],
+                if (overlaps.length > 1) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '+${overlaps.length - 1} more overlap${overlaps.length - 1 == 1 ? '' : 's'} same day',
+                    style: GoogleFonts.inter(
+                        fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
+                  ),
+                ],
+                if (widget.onNavigateToTab != null) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () => widget.onNavigateToTab!(2),
+                      icon: Icon(Icons.schedule_outlined,
+                          size: 15, color: colors.stream),
+                      label: Text('Review Schedule',
+                          style: GoogleFonts.inter(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: colors.stream)),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        }),
+        const SizedBox(height: AppSpacing.sm),
       ],
-    );
+    ];
+  }
+
+  /// Display form for the overlap duration the API already provides.
+  String _overlapLabel(int minutes) {
+    if (minutes < 60) return '~$minutes min';
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return m == 0 ? '~$h h' : '~$h h $m min';
   }
 
   Widget _buildScheduleSection(SteesColors colors, WeatherToday w) {
@@ -657,84 +853,113 @@ class _WeatherPageState extends State<WeatherPage> {
   }
 }
 
-class _Stat extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  const _Stat({required this.icon, required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.steesColors;
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 14, color: colors.mist),
-              const SizedBox(width: 4),
-              Text(label,
-                  style: GoogleFonts.inter(
-                      fontSize: 10.5, color: colors.mist)),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(value,
-              style: GoogleFonts.sora(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: colors.foam)),
-        ],
-      ),
-    );
-  }
-}
-
 class _HourCell extends StatelessWidget {
   final WeatherHour hour;
   const _HourCell({required this.hour});
 
+  /// Backend significance rule, mirrored for display only (never redefined):
+  /// precipitationMm >= 2 AND rainProbability >= 50.
+  static bool isSignificant(WeatherHour h) =>
+      h.precipitationMm >= 2 && h.precipitationProbability >= 50;
+
+  static bool _isCurrentHour(WeatherHour h) {
+    final now = DateTime.now();
+    String pad(int n) => n.toString().padLeft(2, '0');
+    if (h.date != '${now.year}-${pad(now.month)}-${pad(now.day)}') {
+      return false;
+    }
+    final m = RegExp(r'T(\d{2}):').firstMatch(h.localTime);
+    return m != null && int.parse(m.group(1)!) == now.hour;
+  }
+
+  static bool _isPastHour(WeatherHour h) {
+    final now = DateTime.now();
+    String pad(int n) => n.toString().padLeft(2, '0');
+    if (h.date != '${now.year}-${pad(now.month)}-${pad(now.day)}') {
+      return false;
+    }
+    final m = RegExp(r'T(\d{2}):').firstMatch(h.localTime);
+    return m != null && int.parse(m.group(1)!) < now.hour;
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
-    final rainy = hour.precipitationMm >= 0.5;
-    return Container(
-      width: 64,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      decoration: BoxDecoration(
-        color: rainy
-            ? colors.stream.withValues(alpha: 0.10)
-            : colors.well,
-        borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(color: colors.border),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(hour.hhmm,
-              style: GoogleFonts.jetBrainsMono(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  color: colors.mist)),
-          const SizedBox(height: 2),
-          Icon(rainy ? Icons.umbrella_outlined : Icons.wb_sunny_outlined,
-              size: 15,
-              color: rainy ? colors.stream : colors.sunlight),
-          const SizedBox(height: 2),
-          Text(
-              hour.temperature == null
-                  ? '—'
-                  : '${hour.temperature!.toStringAsFixed(0)}°',
-              style: GoogleFonts.sora(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: colors.foam)),
-          Text(
-              '${hour.precipitationMm.toStringAsFixed(1)}mm · ${hour.precipitationProbability}%',
-              style: GoogleFonts.jetBrainsMono(
-                  fontSize: 8.5, color: colors.mist)),
-        ],
+    final significant = isSignificant(hour);
+    final trace = !significant && hour.precipitationMm > 0;
+    final now = _isCurrentHour(hour);
+    final past = !now && _isPastHour(hour);
+    final isFuture = !now && !past;
+    final border = significant || now ? colors.stream : colors.border;
+    // Probability is a forecast field: show only for future hours; current
+    // and past are dimmed/observation-oriented and omit it entirely.
+    final showProbability = isFuture;
+    return Opacity(
+      opacity: past ? 0.42 : 1,
+      child: Container(
+        width: 64,
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        decoration: BoxDecoration(
+          color: significant
+              ? colors.stream.withValues(alpha: 0.10)
+              : colors.well,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          border: Border.all(
+              color: border, width: significant || now ? 1.5 : 1),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (now)
+              Text('NOW',
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 7,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.1,
+                      color: colors.stream))
+            else
+              Text(hour.hhmm,
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                      color: colors.mist)),
+            if (now)
+              Text(hour.hhmm,
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      color: colors.stream)),
+            const SizedBox(height: 1),
+            Icon(
+                significant || trace
+                    ? Icons.umbrella_outlined
+                    : Icons.wb_sunny_outlined,
+                size: 13,
+                color: significant
+                    ? colors.stream
+                    : trace
+                        ? colors.mist
+                        : colors.sunlight),
+            const SizedBox(height: 1),
+            // Rain-first: mm is primary; probability is a forecast qualifier
+            // shown only for future hours directly beneath it.
+            Text('${hour.precipitationMm.toStringAsFixed(1)} mm',
+                style: GoogleFonts.sora(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: colors.foam)),
+            if (showProbability)
+              Text('${hour.precipitationProbability}%',
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 8, color: colors.mist)),
+            Text(
+                hour.temperature == null
+                    ? '—'
+                    : '${hour.temperature!.toStringAsFixed(0)}°',
+                style: GoogleFonts.jetBrainsMono(
+                    fontSize: 8, color: colors.mist)),
+          ],
+        ),
       ),
     );
   }
@@ -753,7 +978,7 @@ class _DayPill extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(99),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: selected ? colors.stream : colors.well,
           borderRadius: BorderRadius.circular(99),

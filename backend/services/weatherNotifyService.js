@@ -13,14 +13,63 @@ function locationKeyFor(device) {
   return `${lat},${lon},${tz}`;
 }
 
+function toMinutes(hhmm) {
+  if (typeof hhmm !== 'string') return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hhmm);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+function formatOverlap(minutes) {
+  if (!minutes || minutes <= 0) return 'Direct overlap';
+  if (minutes < 60) return `Direct overlap \u00b7 ~${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `Direct overlap \u00b7 ~${h} h` : `Direct overlap \u00b7 ~${h} h ${m} min`;
+}
+
+function nearRelation(advisory) {
+  const s = toMinutes(advisory.scheduleStart);
+  const e = toMinutes(advisory.scheduleEnd);
+  const rs = toMinutes(advisory.rainStart);
+  const re = toMinutes(advisory.rainEnd);
+  if (s == null || e == null || rs == null || re == null) return null;
+  if (re <= s) {
+    const gap = s - re;
+    return { dir: 'before', gap, title: 'Rain before irrigation', detail: `Rain ends ~${gap} min before irrigation` };
+  }
+  if (rs >= e) {
+    const gap = rs - e;
+    return { dir: 'after', gap, title: 'Rain after irrigation', detail: `Rain starts ~${gap} min after irrigation` };
+  }
+  return null;
+}
+
 function advisoryText({ farmName, advisory }) {
   const farm = farmName ? `${farmName}\n` : '';
+  if (advisory.type === 'adjacent') {
+    const rel = nearRelation(advisory);
+    const title = rel ? rel.title : 'Rain near irrigation';
+    const detail = rel ? rel.detail : 'Close to irrigation window';
+    return (
+      `\u{1F327} ${title}\n\n${farm}` +
+      `Schedule: ${advisory.scheduleStart}\u2013${advisory.scheduleEnd}\n` +
+      `Rain: ${advisory.rainStart}\u2013${advisory.rainEnd} (${advisory.rainDate})\n` +
+      `Expected: ${advisory.precipitationMm} mm\n` +
+      `Probability: ${advisory.probability}%\n` +
+      `${detail}\n\n` +
+      `Consider reviewing today's irrigation schedule.`
+    );
+  }
+  // overlap (HIGH) — default
+  const overlapLine = formatOverlap(advisory.overlapMinutes);
   return (
-    `\u{1F327} Rain expected during irrigation\n\n${farm}` +
+    `\u{1F327} Rain during irrigation\n\n${farm}` +
     `Schedule: ${advisory.scheduleStart}\u2013${advisory.scheduleEnd}\n` +
     `Rain: ${advisory.rainStart}\u2013${advisory.rainEnd} (${advisory.rainDate})\n` +
     `Expected: ${advisory.precipitationMm} mm\n` +
-    `Probability: ${advisory.probability}%\n\n` +
+    `Probability: ${advisory.probability}%\n` +
+    `${overlapLine}\n\n` +
     `Consider reviewing today's irrigation schedule.`
   );
 }
@@ -262,7 +311,6 @@ async function runWeatherNotify({ ownerId, deviceId, io, deviceModel, scheduleMo
     result.checked++;
     const locKey = locationKeyFor(device);
     for (const adv of advisories) {
-      if (adv.type !== 'overlap') continue;
       result.advisories++;
       let existing = null;
       try {
@@ -336,12 +384,18 @@ async function runWeatherNotify({ ownerId, deviceId, io, deviceModel, scheduleMo
         }
       }
       const body = advisoryText({ farmName: device.farmName, advisory: adv });
+      let title = '\u{1F327} Rain during irrigation';
+      if (adv.type === 'adjacent') {
+        const rel = nearRelation(adv);
+        if (rel && rel.title) title = `\u{1F327} ${rel.title}`;
+        else title = '\u{1F327} Rain near irrigation';
+      }
       try {
         await sendPush({
           ownerId: device.ownerId,
-          title: '\u{1F327} Rain expected during irrigation',
+          title,
           body,
-          data: { deviceId: adv.deviceId, scheduleId: adv.scheduleId, rainDate: adv.rainDate, locationKey: locKey },
+          data: { deviceId: adv.deviceId, scheduleId: adv.scheduleId, rainDate: adv.rainDate, locationKey: locKey, type: adv.type },
           io,
         });
         result.notified++;

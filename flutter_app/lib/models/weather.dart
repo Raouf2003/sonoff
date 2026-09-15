@@ -44,6 +44,11 @@ class WeatherAdvisory {
   final String rainEnd;
   final double precipitationMm;
   final int probability;
+  // Overlap detail already served by the API (may be absent on older
+  // payloads); parsed for display only, never reinterpreted.
+  final String? overlapStart;
+  final String? overlapEnd;
+  final int overlapMinutes;
 
   const WeatherAdvisory({
     required this.type,
@@ -58,6 +63,9 @@ class WeatherAdvisory {
     required this.rainEnd,
     required this.precipitationMm,
     required this.probability,
+    this.overlapStart,
+    this.overlapEnd,
+    this.overlapMinutes = 0,
   });
 
   bool get isOverlap => type == 'overlap';
@@ -80,6 +88,9 @@ class WeatherAdvisory {
       precipitationMm:
           (json['precipitationMm'] as num?)?.toDouble() ?? 0,
       probability: (json['probability'] as num?)?.toInt() ?? 0,
+      overlapStart: json['overlapStart'] as String?,
+      overlapEnd: json['overlapEnd'] as String?,
+      overlapMinutes: (json['overlapMinutes'] as num?)?.toInt() ?? 0,
     );
   }
 }

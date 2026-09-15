@@ -10,38 +10,49 @@ import '../widgets/weather_advisory_chip.dart';
 import '../widgets/window_timeline.dart';
 import 'schedule_form_screen.dart';
 
+/// Page-level offline notice. Shown at the top of the schedules page while
+/// any listed device reports offline; schedules converge automatically once
+/// the device reconnects (backend retry sweep), so no per-card sync state is
+/// tracked here.
+const kOfflineBannerText =
+    'Device offline — schedules will sync automatically once it reconnects.';
+
 class SchedulesPage extends StatefulWidget {
-  const SchedulesPage({super.key});
+  const SchedulesPage({super.key, this.api});
+
+  /// Injectable transport (widget tests). Defaults to a live [ApiService].
+  final ApiService? api;
 
   @override
   State<SchedulesPage> createState() => SchedulesPageState();
 }
 
 class SchedulesPageState extends State<SchedulesPage> {
-  final _api = ApiService();
+  late final ApiService _api;
   List<Map<String, dynamic>> _devices = [];
   List<Map<String, dynamic>> _schedules = [];
   bool _loading = true;
   bool _loadError = false;
 
-  // Deferred-sync visual flow, shared by every CRUD action: cards/chips
-  // linger while the device-side sync catches up. The backend cannot tell
-  // clients when the sweep physically finalizes (rows leave GET at soft-
-  // delete), so liveness is polled from the existing /api/status endpoint and
-  // drives an online/offline state machine per watched action.
-  //   kind=create/delete -> full-card dim treatment (nothing/something is
-  //                         materially appearing/vanishing on the device)
-  //   kind=edit/toggle   -> non-blocking corner chip (old config stays valid
-  //                         until the new sync lands)
-  final List<_SyncWatch> _syncWatches = [];
-  Timer? _removalTimer;
+  // Single page-level presence flag driving the offline banner. Sourced from
+  // GET /api/status on a fixed interval plus after every load/CRUD round
+  // trip — one sweep for the whole page, never per card. Reflects the latest
+  // reported state directly: no grace period, no fallback timers.
+  bool _deviceOffline = false;
+  Timer? _presenceTimer;
   Timer? _weatherTimer;
+  bool _presenceBusy = false;
   final Map<String, Map<String, dynamic>> _weatherBySchedule = {};
+
+  static const _presenceInterval = Duration(seconds: 15);
 
   @override
   void initState() {
     super.initState();
+    _api = widget.api ?? ApiService();
     _load();
+    _presenceTimer =
+        Timer.periodic(_presenceInterval, (_) => _pollPresence());
     _weatherTimer = Timer.periodic(const Duration(minutes: 2), (_) {
       if (mounted) _loadWeather();
     });
@@ -49,102 +60,41 @@ class SchedulesPageState extends State<SchedulesPage> {
 
   @override
   void dispose() {
-    _removalTimer?.cancel();
+    _presenceTimer?.cancel();
     _weatherTimer?.cancel();
     super.dispose();
   }
 
   void refreshWeather() => _loadWeather();
 
-  void _upsertWatch(_SyncWatch watch) {
-    _syncWatches.removeWhere((w) => w.scheduleId == watch.scheduleId);
-    _syncWatches.add(watch);
-    _startSyncSweeper();
-  }
-
-  void _clearWatch(String? scheduleId) {
-    if (scheduleId == null) return;
-    final before = _syncWatches.length;
-    _syncWatches.removeWhere((w) => w.scheduleId == scheduleId);
-    if (_syncWatches.length != before && mounted) setState(() {});
-  }
-
-  /// Lazily started ticker: one /api/status poll per affected device per tick
-  /// (LWT-authoritative, via ApiService.getStatus) advances every watch:
-  ///   ONLINE   -> short 12 s grace (delete-time sync + sweep finalize), then
-  ///               the watch settles (chip clears / dim card finalizes).
-  ///   OFFLINE  -> latched: dim card / chip persists indefinitely with the
-  ///               reconnect label until an online transition starts the grace.
-  /// Poll failures leave watches untouched; a blind 90 s fallback bounds the
-  /// worst case so a broken API can never pin UI forever.
-  static const _onlineGrace = Duration(seconds: 12);
-  static const _blindFallback = Duration(seconds: 90);
-  bool _presencePollBusy = false;
-
-  void _startSyncSweeper() {
-    _removalTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
-      _sweepSyncWatches();
-    });
-  }
-
-  Future<void> _sweepSyncWatches() async {
-    if (!mounted || _syncWatches.isEmpty || _presencePollBusy) return;
-    _presencePollBusy = true;
-    final now = DateTime.now();
-    var changed = false;
+  /// One status sweep for the whole page: the banner is on while any listed
+  /// device reports offline. A failed poll leaves the previous state
+  /// untouched — it is "unknown", not evidence of offline.
+  Future<void> _pollPresence() async {
+    if (!mounted || _presenceBusy || _devices.isEmpty) return;
+    _presenceBusy = true;
     try {
-      final deviceIds = _syncWatches
-          .map((w) => w.schedule['deviceId'] as String?)
-          .whereType<String>()
-          .toSet();
-      final onlineByDevice = <String, bool>{};
-      for (final deviceId in deviceIds) {
+      var anyOffline = false;
+      for (final d in _devices) {
+        final deviceId = d['deviceId'] as String?;
+        if (deviceId == null) continue;
+        late final Map<String, dynamic> status;
         try {
-          final status = await _api.getStatus(deviceId);
-          onlineByDevice[deviceId] = status['online'] == true;
+          status = await _api.getStatus(deviceId);
         } catch (_) {
-          onlineByDevice[deviceId] = false; // unknown: treated as no-transition
+          return;
+        }
+        if (status['online'] != true) {
+          anyOffline = true;
+          break;
         }
       }
       if (!mounted) return;
-      final settled = <_SyncWatch>[];
-      for (final w in _syncWatches) {
-        final deviceId = w.schedule['deviceId'] as String?;
-        final online = deviceId != null ? onlineByDevice[deviceId] : false;
-        if (online == false) {
-          // Went (or stayed) offline: latch the indefinite waiting state.
-          if (w.phase != 'offline' || w.dismissAt != null) changed = true;
-          w.phase = 'offline';
-          w.dismissAt = null;
-          continue;
-        }
-        if (online == null) {
-          // Status unknown (poll failed): keep current state, but never let a
-          // watch stick forever on a broken API.
-          if (now.difference(w.startedAt) > _blindFallback &&
-              w.startedAt.add(_blindFallback).isBefore(now)) {
-            settled.add(w);
-            changed = true;
-          }
-          continue;
-        }
-        // Device is online: first observation opens the grace window.
-        w.dismissAt ??= now.add(_onlineGrace);
-        if (now.isAfter(w.dismissAt!)) {
-          settled.add(w);
-          changed = true;
-        }
+      if (anyOffline != _deviceOffline) {
+        setState(() => _deviceOffline = anyOffline);
       }
-      for (final s in settled) {
-        _syncWatches.remove(s);
-      }
-      if (_syncWatches.isEmpty) {
-        _removalTimer?.cancel();
-        _removalTimer = null;
-      }
-      if (changed || settled.isNotEmpty) setState(() {});
     } finally {
-      _presencePollBusy = false;
+      _presenceBusy = false;
     }
   }
 
@@ -162,6 +112,7 @@ class SchedulesPageState extends State<SchedulesPage> {
           _loading = false;
         });
         _loadWeather();
+        await _pollPresence();
       }
     } catch (e) {
       if (mounted) {
@@ -240,7 +191,7 @@ class SchedulesPageState extends State<SchedulesPage> {
       ),
     );
     await _load();
-    _watchFromResult(result, 'create');
+    _confirmSaved(result);
   }
 
   Future<void> _edit(Map<String, dynamic> schedule) async {
@@ -260,23 +211,16 @@ class SchedulesPageState extends State<SchedulesPage> {
       ),
     );
     await _load();
-    _watchFromResult(result, 'edit');
+    _confirmSaved(result);
   }
 
-  // The form pops the saved schedule payload (or legacy `true`). A payload
-  // means a real device sync was triggered server-side: open a watch so the
-  // card reflects convergence (dim for create, chip for edit).
-  void _watchFromResult(Object? result, String kind) {
+  // The form pops the saved schedule payload (or legacy `true`) on success.
+  // This is immediate feedback that the API call succeeded — independent of
+  // device online status, which the top banner already covers.
+  void _confirmSaved(Object? result) {
     if (!mounted) return;
-    if (result is Map && result['_id'] != null) {
-      final schedule = Map<String, dynamic>.from(result);
-      _upsertWatch(_SyncWatch(
-        kind: kind,
-        scheduleId: schedule['_id'] as String?,
-        schedule: schedule,
-      ));
-    } else if (result == true) {
-      // Legacy/unknown payload: nothing to key on — plain reload only.
+    if ((result is Map && result['_id'] != null) || result == true) {
+      _showInfo('Schedule saved');
     }
   }
 
@@ -286,18 +230,12 @@ class SchedulesPageState extends State<SchedulesPage> {
     setState(() => schedule['enabled'] = target);
     try {
       await _api.toggleSchedule(id);
-      // Old enabled-state stays valid on the device until the new sync lands:
-      // non-blocking "Updating…" chip driven by the shared presence watcher.
-      _upsertWatch(_SyncWatch(
-        kind: 'toggle',
-        scheduleId: id,
-        schedule: Map<String, dynamic>.from(schedule),
-      ));
+      if (!mounted) return;
+      _showInfo('Schedule saved');
       setState(() {});
     } catch (e) {
       if (!mounted) return;
       setState(() => schedule['enabled'] = !target);
-      _clearWatch(id);
       _showError(e is ApiException ? e.message : 'Could not update the schedule');
     }
   }
@@ -319,35 +257,18 @@ class SchedulesPageState extends State<SchedulesPage> {
       ),
     );
     if (ok != true) return;
-    // "Pending then confirmed" flow: the card moves out of the live list into
-    // a dimmed watch immediately (no network wait), and stays visible while
-    // the device-side removal catches up.
+    // Optimistic removal for a snappy list; restored below on hard failure.
     final previousIndex = _schedules.indexOf(schedule);
-    final watch = _SyncWatch(
-      kind: 'delete',
-      scheduleId: schedule['_id'] as String?,
-      schedule: schedule,
-    );
     setState(() {
       if (previousIndex >= 0) _schedules.removeAt(previousIndex);
-      _syncWatches.add(watch);
     });
-    _startSyncSweeper();
     try {
-      final res = await _api.deleteSchedule(id);
+      await _api.deleteSchedule(id);
       if (!mounted) return;
-      if (res['deferred'] == true) {
-        // Device offline / removal not yet confirmed on hardware: latch the
-        // offline phase (indefinite dimmed card + reconnect label). The
-        // presence sweeper settles it once /api/status reports online again.
-        setState(() => watch.phase = 'offline');
-      } else {
-        // Degraded/immediate path (native sync off): already gone server-side.
-        _clearWatch(watch.scheduleId);
-      }
+      _showInfo('Schedule deleted');
+      await _load();
     } catch (e) {
       // Hard failure: restore the card to its original slot, normal look.
-      _clearWatch(watch.scheduleId);
       if (!mounted) return;
       setState(() {
         if (previousIndex >= 0 && previousIndex <= _schedules.length) {
@@ -360,19 +281,52 @@ class SchedulesPageState extends State<SchedulesPage> {
     }
   }
 
-  void _showError(String msg) {
+  void _showInfo(String msg) => _showToast(msg, isError: false);
+
+  void _showError(String msg) => _showToast(msg, isError: true);
+
+  /// Toast matching the page's card/banner language: tinted fill with an
+  /// accent border and a leading icon instead of the default solid blocks.
+  /// Success uses `leaf`, errors use `danger`.
+  void _showToast(String msg, {required bool isError}) {
     if (!mounted) return;
     final colors = context.steesColors;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg, style: const TextStyle(fontSize: 13)),
-        backgroundColor: colors.danger,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-        margin: const EdgeInsets.all(AppSpacing.lg),
-        duration: const Duration(seconds: 3),
-      ),
-    );
+    final accent = isError ? colors.danger : colors.leaf;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(
+                isError ? Icons.error_outline : Icons.check_circle_outline,
+                size: 18,
+                color: accent,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  msg,
+                  style: GoogleFonts.inter(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: colors.foam,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: accent.withValues(alpha: 0.16),
+          elevation: 0,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.xl),
+            side: BorderSide(color: accent.withValues(alpha: 0.45)),
+          ),
+          margin: const EdgeInsets.all(AppSpacing.lg),
+          duration: Duration(seconds: isError ? 3 : 2),
+        ),
+      );
   }
 
   @override
@@ -401,14 +355,19 @@ class SchedulesPageState extends State<SchedulesPage> {
         padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, AppSpacing.xxxl),
         itemCount: _devices.length + 1,
         itemBuilder: (_, i) {
-          if (i == 0) return _buildPageTitle(context.steesColors);
+          if (i == 0) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildPageTitle(context.steesColors),
+                if (_deviceOffline) _buildOfflineBanner(context.steesColors),
+              ],
+            );
+          }
           final deviceId = _devices[i - 1]['deviceId'] as String;
           return _DeviceSection(
             device: _devices[i - 1],
             schedules: _schedulesOf(deviceId),
-            watches: _syncWatches
-                .where((w) => w.schedule['deviceId'] == deviceId)
-                .toList(),
             weatherFor: _weatherFor,
             onAdd: () => _add(deviceId),
             onEdit: _edit,
@@ -419,6 +378,7 @@ class SchedulesPageState extends State<SchedulesPage> {
       ),
     );
   }
+
   Widget _buildPageTitle(SteesColors colors) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -438,19 +398,46 @@ class SchedulesPageState extends State<SchedulesPage> {
       ),
     );
   }
-}
 
-_SyncWatch? _watchById(List<_SyncWatch> watches, String? id) {  if (id == null) return null;
-  for (final w in watches) {
-    if (w.scheduleId == id) return w;
+  /// The single page-level offline notice. Visible while any listed device
+  /// reports offline; hidden again as soon as status reports online.
+  Widget _buildOfflineBanner(SteesColors colors) {
+    return Container(
+      key: const ValueKey('offlineBanner'),
+      margin: const EdgeInsets.fromLTRB(
+        AppSpacing.xs,
+        0,
+        AppSpacing.xs,
+        AppSpacing.md,
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: colors.sunlight.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(color: colors.sunlight.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off_outlined, size: 14, color: colors.sunlight),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              kOfflineBannerText,
+              style: GoogleFonts.inter(fontSize: 12, color: colors.foam),
+            ),
+          ),
+        ],
+      ),
+    );
   }
-  return null;
 }
 
 class _DeviceSection extends StatelessWidget {
   final Map<String, dynamic> device;
   final List<Map<String, dynamic>> schedules;
-  final List<_SyncWatch> watches;
   final VoidCallback onAdd;
   final void Function(Map<String, dynamic>) onEdit;
   final void Function(Map<String, dynamic>) onToggle;
@@ -460,7 +447,6 @@ class _DeviceSection extends StatelessWidget {
   const _DeviceSection({
     required this.device,
     required this.schedules,
-    required this.watches,
     required this.onAdd,
     required this.onEdit,
     required this.onToggle,
@@ -507,8 +493,8 @@ class _DeviceSection extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         schedules.isEmpty
-                            ? 'CH1\u2013CH$channels'
-                            : 'CH1\u2013CH$channels  \u00b7  ${schedules.length} ${schedules.length == 1 ? 'schedule' : 'schedules'}',
+                            ? 'CH1–CH$channels'
+                            : 'CH1–CH$channels  ·  ${schedules.length} ${schedules.length == 1 ? 'schedule' : 'schedules'}',
                         style: GoogleFonts.jetBrainsMono(
                           fontSize: 9.5,
                           fontWeight: FontWeight.w500,
@@ -535,7 +521,7 @@ class _DeviceSection extends StatelessWidget {
             ),
           ),
           const SizedBox(height: AppSpacing.md),
-          if (schedules.isEmpty && watches.isEmpty)
+          if (schedules.isEmpty)
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: onAdd,
@@ -565,39 +551,15 @@ class _DeviceSection extends StatelessWidget {
             Column(
               children: [
                 for (final (i, schedule) in schedules.indexed) ...[
-                  Builder(builder: (ctx) {
-                    final watch = _watchById(watches, schedule['_id'] as String?);
-                    final advisory = weatherFor?.call(schedule['_id'] as String?);
-                    if (watch == null) {
-                      return _ScheduleTile(
-                        schedule: schedule,
-                        onEdit: () => onEdit(schedule),
-                        onToggle: () => onToggle(schedule),
-                        onDelete: () => onDelete(schedule),
-                        advisory: advisory,
-                      );
-                    }
-                    if (watch.isDim) {
-                      // create: nothing existed before — full dim card.
-                      return _buildDimmedWatchCard(ctx, watch);
-                    }
-                    // edit/toggle: old config stays valid — normal
-                    // interactive card with an inline sync tag.
-                    return _ScheduleTile(
-                      schedule: schedule,
-                      onEdit: () => onEdit(schedule),
-                      onToggle: () => onToggle(schedule),
-                      onDelete: () => onDelete(schedule),
-                      watch: watch,
-                      advisory: advisory,
-                    );
-                  }),
-                  if (i < schedules.length - 1 || watches.any((w) => w.kind == 'delete'))
+                  _ScheduleTile(
+                    schedule: schedule,
+                    onEdit: () => onEdit(schedule),
+                    onToggle: () => onToggle(schedule),
+                    onDelete: () => onDelete(schedule),
+                    advisory: weatherFor?.call(schedule['_id'] as String?),
+                  ),
+                  if (i < schedules.length - 1)
                     const SizedBox(height: AppSpacing.sm),
-                ],
-                for (final (i, w) in watches.where((w) => w.kind == 'delete').indexed) ...[
-                  _buildDimmedWatchCard(context, w),
-                  if (i < watches.length - 1) const SizedBox(height: AppSpacing.sm),
                 ],
               ],
             ),
@@ -612,10 +574,6 @@ class _ScheduleTile extends StatefulWidget {
   final VoidCallback onEdit;
   final VoidCallback onToggle;
   final VoidCallback onDelete;
-
-  /// Non-null while an edit/toggle sync is converging: the tile renders an
-  /// inline sync tag in its header instead of an external corner overlay.
-  final _SyncWatch? watch;
   final Map<String, dynamic>? advisory;
 
   const _ScheduleTile({
@@ -623,7 +581,6 @@ class _ScheduleTile extends StatefulWidget {
     required this.onEdit,
     required this.onToggle,
     required this.onDelete,
-    this.watch,
     this.advisory,
   });
 
@@ -694,10 +651,6 @@ class _ScheduleTileState extends State<_ScheduleTile> {
                       ),
                     ),
                   ],
-                  if (widget.watch != null) ...[
-                    const SizedBox(width: AppSpacing.sm),
-                    _SyncTag(watch: widget.watch!),
-                  ],
                   const SizedBox(width: AppSpacing.sm),
                   SteesActiveTag(active: enabled),
                 ],
@@ -755,7 +708,7 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     if (r is! Map) return '--:--';
     final start = r['start'] as String? ?? '--:--';
     final end = r['end'] as String? ?? '--:--';
-    return '$start\u2013$end';
+    return '$start–$end';
   }
 
   /// Meta readout under the hero time: name (when present), channels,
@@ -766,7 +719,7 @@ class _ScheduleTileState extends State<_ScheduleTile> {
       channels,
       _recurrenceSummary(s),
     ];
-    return parts.join('  \u00b7  ');
+    return parts.join('  ·  ');
   }
 
   String _recurrenceSummary(Map<String, dynamic> schedule) {
@@ -796,144 +749,5 @@ class _ScheduleTileState extends State<_ScheduleTile> {
     final m = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(hhmm);
     if (m == null) return 0;
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
-  }
-}
-
-/// A CRUD action awaiting device-side convergence. The backend hides
-/// soft-deleted rows immediately and cannot report sweep finalization, so
-/// liveness is polled (/api/status) and drives phase 'active' -> 'offline'
-/// with a bounded grace before the watch settles.
-class _SyncWatch {
-  /// create | edit | toggle | delete — picks the visual treatment + wording.
-  final String kind;
-  final String? scheduleId;
-  final Map<String, dynamic> schedule;
-  final DateTime startedAt = DateTime.now();
-  String phase = 'active'; // 'active' | 'offline'
-  DateTime? dismissAt;
-
-  _SyncWatch({required this.kind, required this.scheduleId, required this.schedule});
-
-  bool get isDim => kind == 'create' || kind == 'delete';
-}
-
-/// Status-line / chip wording per kind and phase. Null return = no label yet.
-String? _syncWatchLabel(_SyncWatch w) {
-  if (w.phase == 'offline') {
-    switch (w.kind) {
-      case 'create':
-        return 'Device offline \u2014 will finish syncing once it reconnects.';
-      case 'delete':
-        return 'Device offline \u2014 will finish removing once it reconnects.';
-      default:
-        return 'Device offline \u2014 will update once it reconnects.';
-    }
-  }
-  switch (w.kind) {
-    case 'delete':
-      return 'Removing\u2026';
-    case 'create':
-      return 'Syncing to device\u2026';
-    default:
-      return 'Updating\u2026';
-  }
-}
-
-IconData _syncWatchIcon(_SyncWatch w) {
-  if (w.phase == 'offline') return Icons.cloud_off_outlined;
-  switch (w.kind) {
-    case 'create':
-      return Icons.sync_outlined;
-    default:
-      return Icons.hourglass_top;
-  }
-}
-
-/// Dimmed full-card treatment for create/delete: nothing/something is
-/// materially appearing or vanishing on the device, so the card reads as
-/// not-yet-real until the sync lands.
-Widget _buildDimmedWatchCard(
-  BuildContext context,
-  _SyncWatch watch,
-) {
-  final colors = context.steesColors;
-  final label = _syncWatchLabel(watch);
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      IgnorePointer(
-        child: Opacity(
-          opacity: 0.45,
-          child: _ScheduleTile(
-            schedule: watch.schedule,
-            onEdit: () {},
-            onToggle: () {},
-            onDelete: () {},
-          ),
-        ),
-      ),
-      const SizedBox(height: 4),
-      Row(
-        children: [
-          Icon(_syncWatchIcon(watch), size: 12, color: colors.mist.withValues(alpha: 0.8)),
-          const SizedBox(width: 4),
-          Expanded(
-            child: Text(
-              label ?? '',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.inter(
-                fontSize: 11,
-                color: colors.mist.withValues(alpha: 0.85),
-              ),
-            ),
-          ),
-        ],
-      ),
-    ],
-  );
-}
-
-/// Inline sync tag for edit/toggle convergence: lives in the tile's own
-/// header row (next to the Active/Off tag) instead of a corner overlay.
-/// Long-form wording stays available through the tooltip.
-class _SyncTag extends StatelessWidget {
-  final _SyncWatch watch;
-
-  const _SyncTag({required this.watch});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.steesColors;
-    final offline = watch.phase == 'offline';
-    final color = offline ? colors.mist : colors.sunlight;
-    return Tooltip(
-      message: _syncWatchLabel(watch) ?? '',
-      preferBelow: false,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: color.withValues(alpha: 0.4)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_syncWatchIcon(watch), size: 9, color: color),
-            const SizedBox(width: 4),
-            Text(
-              offline ? 'OFFLINE' : 'UPDATING\u2026',
-              style: GoogleFonts.jetBrainsMono(
-                fontSize: 9,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.8,
-                color: color,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
