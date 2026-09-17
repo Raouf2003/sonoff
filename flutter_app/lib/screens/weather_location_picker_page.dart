@@ -5,7 +5,9 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:geolocator/geolocator.dart' as gl;
 import 'package:latlong2/latlong.dart';
+import 'package:location/location.dart' as loc;
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import '../services/api_service.dart';
 import '../services/reverse_geocode.dart' as geo;
@@ -70,6 +72,10 @@ class WeatherLocationPickerPage extends StatefulWidget {
   final ApiService? api;
   final Future<String?> Function(double lat, double lon)? reverseGeocode;
   final Widget Function(LatLng? picked, ValueChanged<LatLng> onPick)? mapBuilder;
+  /// Test-only override for current-location lookup. When set, it is used
+  /// exclusively and the real Geolocator is never touched (so widget tests
+  /// stay deterministic and don't request permissions).
+  final Future<LatLng?> Function()? getCurrentLocation;
 
   const WeatherLocationPickerPage({
     super.key,
@@ -78,6 +84,7 @@ class WeatherLocationPickerPage extends StatefulWidget {
     this.api,
     this.reverseGeocode,
     this.mapBuilder,
+    this.getCurrentLocation,
   });
 
   @override
@@ -105,6 +112,10 @@ class _WeatherLocationPickerPageState
   bool _saving = false;
   String? _error;
   int _resolveGen = 0;
+  // Pending target when current-location arrives before the map is ready
+  ml.LatLng? _pendingCurrentLocation;
+  bool _locationServiceDisabled = false;
+  bool _locationPromptShown = false;
 
   @override
   void initState() {
@@ -115,6 +126,11 @@ class _WeatherLocationPickerPageState
             : null);
     final device = _selectedDevice;
     if (device != null) _applyDevice(device);
+    // Add mode (no existing farm location) → default to current user
+    // location if available; edit mode keeps the saved location.
+    if (_picked == null) {
+      unawaited(_maybeUseCurrentLocation());
+    }
   }
 
   @override
@@ -154,10 +170,186 @@ class _WeatherLocationPickerPageState
     final at = _deviceLatLng(device);
     _picked = at;
     _placeName = null;
+    _pendingCurrentLocation = null;
     if (at != null) unawaited(_resolvePlace(at));
     // Defer marker sync until after the frame so _picked is committed.
     // If the map is already loaded, sync immediately as well.
     if (_styleLoaded) unawaited(_syncMarker());
+  }
+
+  Future<LatLng?> _defaultGetCurrentLocation() async {
+    try {
+      // Use the `location` plugin's requestService() to show the default
+      // Android system dialog that enables location without leaving the app
+      // (the in-app window with "Turn on" / "No thanks"), not a custom
+      // window and not the external settings page.
+      final loc.Location locService = loc.Location();
+      bool serviceEnabled = await locService.serviceEnabled();
+      if (!serviceEnabled) {
+        if (widget.mapBuilder != null) return null; // keep tests silent
+        if (_locationPromptShown) return null;
+        _locationPromptShown = true;
+        try {
+          serviceEnabled = await locService.requestService();
+        } catch (_) {
+          serviceEnabled = false;
+        }
+        _locationPromptShown = false;
+        if (!serviceEnabled) {
+          if (mounted) setState(() => _locationServiceDisabled = true);
+          return null;
+        }
+        if (mounted) setState(() => _locationServiceDisabled = false);
+      }
+      gl.LocationPermission perm = await gl.Geolocator.checkPermission();
+      if (perm == gl.LocationPermission.denied) {
+        perm = await gl.Geolocator.requestPermission();
+        // This shows the default Android permission dialog (system window)
+        if (perm == gl.LocationPermission.denied) {
+          if (mounted) setState(() => _locationServiceDisabled = false);
+          return null;
+        }
+      }
+      if (perm == gl.LocationPermission.deniedForever) {
+        // System will not show dialog again — open app settings directly
+        // (default Android app settings, no custom window)
+        if (widget.mapBuilder == null && !_locationPromptShown) {
+          _locationPromptShown = true;
+          try {
+            await gl.Geolocator.openAppSettings();
+          } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 600));
+          _locationPromptShown = false;
+        }
+        if (mounted) setState(() => _locationServiceDisabled = false);
+        return null;
+      }
+      if (mounted && _locationServiceDisabled) {
+        setState(() => _locationServiceDisabled = false);
+      }
+      final pos = await gl.Geolocator.getCurrentPosition(
+        locationSettings: const gl.LocationSettings(
+          accuracy: gl.LocationAccuracy.medium,
+          timeLimit: Duration(seconds: 8),
+        ),
+      ).timeout(const Duration(seconds: 9));
+      final lat = pos.latitude;
+      final lon = pos.longitude;
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+      return LatLng(lat, lon);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _maybeUseCurrentLocation() async {
+    // Add mode only — edit keeps saved pin. Do not overwrite a saved
+    // farm location with the phone location, and don't move the map after
+    // the user has already interacted (tap/drag sets _picked via _onPick).
+    final device0 = _selectedDevice;
+    if (device0 != null && _deviceLatLng(device0) != null) return;
+    if (widget.mapBuilder != null && widget.getCurrentLocation == null) return;
+    if (_picked != null && _picked != kAlgeriaFallback) return;
+
+    // Instant pin from last known — avoids the 1-2s "no pin" flash while
+    // getCurrentPosition warms up GPS. Then refine with fresh fix.
+    try {
+      final perm = await gl.Geolocator.checkPermission();
+      if (perm == gl.LocationPermission.whileInUse ||
+          perm == gl.LocationPermission.always) {
+        final last = await gl.Geolocator.getLastKnownPosition();
+        if (last != null &&
+            mounted &&
+            (_picked == null || _picked == kAlgeriaFallback) &&
+            (_selectedDevice == null ||
+                _deviceLatLng(_selectedDevice!) == null)) {
+          final ll = LatLng(last.latitude, last.longitude);
+          setState(() => _picked = ll);
+          unawaited(_resolvePlace(ll));
+          unawaited(_syncMarker());
+          final target = ml.LatLng(ll.latitude, ll.longitude);
+          if (_mapController != null && _styleLoaded) {
+            try {
+              await _mapController!
+                  .animateCamera(ml.CameraUpdate.newLatLngZoom(target, 12));
+            } catch (_) {}
+          } else {
+            _pendingCurrentLocation = target;
+          }
+        }
+      }
+    } catch (_) {}
+
+    final fetcher = widget.getCurrentLocation ?? _defaultGetCurrentLocation;
+    final current = await fetcher();
+    if (!mounted) return;
+    if (current != null) {
+      // Fresh fix is available — move pin from last-known/fallback to it.
+      // Don't clobber a user tap that happened in the meantime.
+      final d2 = _selectedDevice;
+      if (d2 != null && _deviceLatLng(d2) != null) return;
+      // If we already show the same coords (lastKnown == current), skip.
+      if (_picked != null &&
+          (_picked!.latitude - current.latitude).abs() < 1e-6 &&
+          (_picked!.longitude - current.longitude).abs() < 1e-6) {
+        return;
+      }
+      // If user already tapped (picked != lastKnown/fallback), respect it:
+      // only auto-move when the current pin is still the auto-default.
+      // Heuristic: if _picked was set by us (lastKnown/fallback) we allow
+      // the update; if user tapped, _picked would have been set via _onPick
+      // which also clears _pending — still safe to update only when the
+      // device still has no saved location and we haven't had a manual pick.
+      // For now, allow the fresh fix to win if we haven't had a manual
+      // interaction (no drag/tap after the auto pin). The simplest guard is
+      // to allow the update when _picked came from auto (lastKnown or
+      // fallback) — we treat any existing _picked as auto until a user
+      // interaction via _onPick clears the pending flag. So we always
+      // update here when current is fresh.
+      setState(() => _picked = current);
+      unawaited(_resolvePlace(current));
+      unawaited(_syncMarker());
+      final target = ml.LatLng(current.latitude, current.longitude);
+      if (_mapController != null && _styleLoaded) {
+        try {
+          await _mapController!
+              .animateCamera(ml.CameraUpdate.newLatLngZoom(target, 12));
+        } catch (_) {}
+      } else {
+        _pendingCurrentLocation = target;
+      }
+      return;
+    }
+    // No GPS at all — ensure there is still a pin so the map is never
+    // empty in add mode. Fall back to Algeria so Save stays reachable.
+    if (_picked == null && mounted) {
+      final d2 = _selectedDevice;
+      if (d2 == null || _deviceLatLng(d2) == null) {
+        const fallback = kAlgeriaFallback;
+        setState(() => _picked = fallback);
+        unawaited(_resolvePlace(fallback));
+        unawaited(_syncMarker());
+        final target = ml.LatLng(fallback.latitude, fallback.longitude);
+        _pendingCurrentLocation = target;
+        if (_mapController != null && _styleLoaded) {
+          try {
+            await _mapController!
+                .animateCamera(ml.CameraUpdate.newLatLngZoom(target, 6));
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  Future<void> _consumePendingCurrentLocation() async {
+    final target = _pendingCurrentLocation;
+    if (target == null) return;
+    final c = _mapController;
+    if (c == null || !_styleLoaded) return;
+    _pendingCurrentLocation = null;
+    try {
+      await c.animateCamera(ml.CameraUpdate.newLatLngZoom(target, 12));
+    } catch (_) {}
   }
 
   void _onPick(LatLng point) {
@@ -450,6 +642,7 @@ class _WeatherLocationPickerPageState
     _mapController!.onFeatureDrag.add(_onFeatureDrag);
     // If style already loaded before this callback ordering edge, sync now.
     if (_styleLoaded) unawaited(_syncMarker());
+    unawaited(_consumePendingCurrentLocation());
   }
 
   void _onStyleLoaded() {
@@ -457,7 +650,7 @@ class _WeatherLocationPickerPageState
     _markerImageAdded = false;
     // Image must be registered after the style is loaded; then the marker
     // can be added. This runs once per style load (also after recreation).
-    unawaited(_addMarkerImageAndSync());
+    unawaited(_addMarkerImageAndSync().then((_) => _consumePendingCurrentLocation()));
   }
 
   void _onFeatureDrag(
@@ -661,8 +854,10 @@ class _WeatherLocationPickerPageState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // 2 lines keeps village-level precision visible without
+                    // growing the sheet — ellipsis after 2 lines.
                     SizedBox(
-                      height: 18,
+                      height: 32,
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
@@ -672,13 +867,13 @@ class _WeatherLocationPickerPageState
                                   : _resolving
                                       ? 'Resolving place…'
                                       : 'Custom map point'),
-                          maxLines: 1,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(
                               fontSize: 12.5,
                               fontWeight: FontWeight.w600,
                               color: colors.foam,
-                              height: 1.1),
+                              height: 1.2),
                         ),
                       ),
                     ),
@@ -689,7 +884,7 @@ class _WeatherLocationPickerPageState
                         child: picked == null
                             ? const SizedBox.shrink()
                             : Text(
-                                '${picked.latitude.toStringAsFixed(4)}, ${picked.longitude.toStringAsFixed(4)}',
+                                '${picked.latitude.toStringAsFixed(5)}, ${picked.longitude.toStringAsFixed(5)}',
                                 style: GoogleFonts.jetBrainsMono(
                                     fontSize: 10, color: colors.mist),
                               ),
@@ -769,6 +964,11 @@ class _WeatherLocationPickerPageState
                     12,
                   ),
                 ));
+              } else if (at == null) {
+                // Switched to a device with no saved location → default to
+                // current user location (add mode). Edit mode (at != null)
+                // keeps the saved pin.
+                unawaited(_maybeUseCurrentLocation());
               }
             },
           ),

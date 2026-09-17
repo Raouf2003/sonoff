@@ -1,5 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';import '../models/weather.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:location/location.dart' as loc;
+import '../models/weather.dart';
 import '../services/api_service.dart';
 import '../services/weather_notification_service.dart';
 import 'weather_location_picker_page.dart';
@@ -113,6 +116,38 @@ class _WeatherPageState extends State<WeatherPage> {
   }
 
   Future<void> _openLocationPicker() async {
+    // Native Android prompt when Location is disabled — requested on the
+    // existing Set Location action, not on picker init. Uses the maintained
+    // `location` plugin which on Android delegates to Google Play Services
+    // SettingsClient / LocationSettingsRequest / ResolvableApiException and
+    // shows the native system resolution dialog ("Turn on location?") without
+    // leaving the app. If the dialog is unavailable, falls back to allowing
+    // the picker to open with its safe fallback behavior.
+    if (!kIsWeb) {
+      try {
+        final loc.Location locService = loc.Location();
+        bool serviceEnabled = await locService.serviceEnabled();
+        if (!serviceEnabled) {
+          // This shows the native Android system dialog when supported
+          // (in-app window, not an external settings page).
+          final requested = await locService.requestService();
+          // Re-check after user interaction; if still disabled, continue
+          // to picker with fallback — do not save or change location.
+          if (!requested) {
+            serviceEnabled = await locService.serviceEnabled();
+          } else {
+            serviceEnabled = true;
+          }
+          // If native dialog unavailable, `requestService` returns false
+          // but does not throw — picker will open with fallback and remain
+          // usable. No external settings page is opened as normal flow.
+        }
+      } catch (_) {
+        // Plugin unavailable / no Play Services — graceful fallback: open
+        // picker with safe fallback center.
+      }
+    }
+    if (!mounted) return;
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => WeatherLocationPickerPage(
@@ -296,17 +331,98 @@ class _WeatherPageState extends State<WeatherPage> {
     final w = _weather!;
     if (w.weatherDisabled) {
       return [
-        SteesEmpty(
-          icon: Icons.location_off_outlined,
-          title: 'Weather location not configured',
-          subtitle:
-              'This device does not have a farm location yet. Select a location on the map to enable weather for this device.',
-          action: FilledButton.tonalIcon(
-            onPressed: _openLocationPicker,
-            icon: const Icon(Icons.location_on_outlined, size: 18),
-            label: Text('Set Location',
-                style: GoogleFonts.sora(
-                    fontSize: 13, fontWeight: FontWeight.w600)),
+        SteesCard(
+          active: false,
+          child: Column(
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: colors.stream.withValues(alpha: 0.12),
+                  border: Border.all(
+                      color: colors.stream.withValues(alpha: 0.22), width: 1.2),
+                ),
+                child: Icon(Icons.location_off_outlined,
+                    size: 30, color: colors.stream),
+              ),
+              const SizedBox(height: 16),
+              Text('Weather location not configured',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.sora(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      height: 1.25,
+                      color: colors.foam)),
+              const SizedBox(height: 8),
+              Text(
+                  'This device does not have a farm location yet. Select a location on the map to enable weather for this device.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                      fontSize: 13, height: 1.5, color: colors.mist)),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 10),
+                decoration: BoxDecoration(
+                  color: colors.well.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(12),
+                  border:
+                      Border.all(color: colors.border.withValues(alpha: 0.6)),
+                ),
+                child: Row(
+                  children: [
+                    _WeatherEmptyFeature(
+                        icon: Icons.cloud_outlined,
+                        label: 'Local\nforecast',
+                        colors: colors),
+                    Container(
+                        width: 1,
+                        height: 32,
+                        color: colors.border.withValues(alpha: 0.7)),
+                    _WeatherEmptyFeature(
+                        icon: Icons.umbrella_outlined,
+                        label: 'Rain\nadvisories',
+                        colors: colors),
+                    Container(
+                        width: 1,
+                        height: 32,
+                        color: colors.border.withValues(alpha: 0.7)),
+                    _WeatherEmptyFeature(
+                        icon: Icons.schedule_outlined,
+                        label: 'Schedules\nunaffected',
+                        colors: colors),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: FilledButton.icon(
+                  onPressed: _openLocationPicker,
+                  icon: const Icon(Icons.map_outlined, size: 18),
+                  label: Text('Set Location',
+                      style: GoogleFonts.sora(
+                          fontSize: 14, fontWeight: FontWeight.w700)),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.stream,
+                    foregroundColor: colors.well,
+                    elevation: 2,
+                    shadowColor: colors.stream.withValues(alpha: 0.3),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.md)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text('Pin defaults to your current location • Africa/Algiers',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.jetBrainsMono(
+                      fontSize: 9.5,
+                      color: colors.mist.withValues(alpha: 0.65))),
+            ],
           ),
         ),
       ];
@@ -385,10 +501,10 @@ class _WeatherPageState extends State<WeatherPage> {
   }
 
   Widget _buildLocationLine(SteesColors colors, WeatherToday w) {
-    // Coordinates only: the farm/device name already heads the selector
-    // above, so repeating it here duplicated the same name twice.
+    // Coordinates at 1m precision (5 decimals) so the badge matches the
+    // picker's 5-decimal display and the saved PATCH payload.
     final coords = w.lat != null && w.lon != null
-        ? '${w.lat!.toStringAsFixed(2)}, ${w.lon!.toStringAsFixed(2)}'
+        ? '${w.lat!.toStringAsFixed(5)}, ${w.lon!.toStringAsFixed(5)}'
         : w.timezone;
     return Row(
       children: [
@@ -847,6 +963,34 @@ class _WeatherPageState extends State<WeatherPage> {
             ),
             const SizedBox(height: 4),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _WeatherEmptyFeature extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final SteesColors colors;
+  const _WeatherEmptyFeature(
+      {required this.icon, required this.label, required this.colors});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18, color: colors.stream),
+          const SizedBox(height: 4),
+          Text(label,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  color: colors.foam)),
         ],
       ),
     );

@@ -27,6 +27,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>STEES finds your irrigation controllers on your local network so relays keep working when the cloud is unreachable.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>STEES uses your current location as the default farm location when adding a new weather location. You can adjust it on the map.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
