@@ -9,14 +9,17 @@ import 'rule_form_screen.dart';
 import 'sensor_rules_screen.dart';
 
 class RulesPage extends StatefulWidget {
-  const RulesPage({super.key});
+  const RulesPage({super.key, this.api});
+
+  /// Injectable transport (widget tests). Defaults to a live [ApiService].
+  final ApiService? api;
 
   @override
   State<RulesPage> createState() => _RulesPageState();
 }
 
 class _RulesPageState extends State<RulesPage> {
-  final _api = ApiService();
+  late final ApiService _api;
   List<Map<String, dynamic>> _rules = [];
   List<Map<String, dynamic>> _sensors = [];
   bool _loading = true;
@@ -25,6 +28,7 @@ class _RulesPageState extends State<RulesPage> {
   @override
   void initState() {
     super.initState();
+    _api = widget.api ?? ApiService();
     _load();
   }
 
@@ -353,20 +357,24 @@ class _RulesPageState extends State<RulesPage> {
       padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
       child: Row(
         children: [
-          Text(
-            l10n.ruleSection,
-            style: GoogleFonts.sora(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.8,
-              color: colors.mist,
+          Flexible(
+            child: Text(
+              l10n.ruleSection,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.sora(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.8,
+                color: colors.mist,
+              ),
             ),
           ),
-          const Spacer(),
+          const SizedBox(width: AppSpacing.sm),
           FilledButton.icon(
             onPressed: _addRule,
             icon: const Icon(Icons.add, size: 16),
-            label: Text(l10n.ruleAdd, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
+            label: Text(l10n.ruleAdd, maxLines: 1, overflow: TextOverflow.ellipsis, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
             style: FilledButton.styleFrom(
               backgroundColor: colors.stream,
               foregroundColor: colors.well,
@@ -479,8 +487,8 @@ class _RuleCardState extends State<_RuleCard> {
                   children: [
                     Row(
                       children: [
-                        _LogicPill(label: l10n.ruleWhen(condWord, thresholdLabel), color: colors.stream),
-                        const Spacer(),
+                        Flexible(child: _LogicPill(label: l10n.ruleWhen(condWord, thresholdLabel), color: colors.stream)),
+                        const SizedBox(width: AppSpacing.xs),
                         Icon(
                           Directionality.of(context) == TextDirection.rtl
                               ? Icons.arrow_back_rounded
@@ -488,8 +496,8 @@ class _RuleCardState extends State<_RuleCard> {
                           size: 14,
                           color: colors.mist.withValues(alpha: 0.4),
                         ),
-                        const Spacer(),
-                        _LogicPill(label: l10n.ruleActionTarget(chLabel, action), color: colors.leaf),
+                        const SizedBox(width: AppSpacing.xs),
+                        Flexible(child: _LogicPill(label: l10n.ruleActionTarget(chLabel, actionDisplayLabel(action, l10n)), color: colors.leaf)),
                       ],
                     ),
                     const SizedBox(height: AppSpacing.sm),
@@ -499,7 +507,7 @@ class _RuleCardState extends State<_RuleCard> {
                         const SizedBox(width: AppSpacing.xs),
                         Flexible(
                           child: Text(
-                            l10n.ruleOtherwise(chLabel, opposite),
+                            l10n.ruleOtherwise(chLabel, actionDisplayLabel(opposite, l10n)),
                             overflow: TextOverflow.ellipsis,
                             style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.6)),
                           ),
@@ -557,6 +565,9 @@ class _LogicPill extends StatelessWidget {
       ),
       child: Text(
         label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
         style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: color),
       ),
     );

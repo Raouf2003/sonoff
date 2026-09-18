@@ -220,6 +220,54 @@ void main() {
         'fallback',
       );
     });
+
+    test('backend error bodies map to localized messages', () {
+      for (final code in ['en', 'ar', 'fr']) {
+        final l10n = _l10n(code);
+        expect(
+          friendlyError(
+              const ApiException('Invalid username or password'), l10n),
+          l10n.apiInvalidCredentials,
+        );
+        expect(
+          friendlyError(const ApiException('username already taken'), l10n),
+          l10n.apiUsernameTaken,
+        );
+        expect(
+          friendlyError(
+              const ApiException('You do not own this device'), l10n),
+          l10n.apiNotOwner,
+        );
+        expect(
+          friendlyError(const ApiException('Internal server error'), l10n),
+          l10n.apiServerError,
+        );
+        expect(
+          friendlyError(const ApiException('This Sensor ID is already added'),
+              l10n),
+          l10n.apiSensorIdTaken,
+        );
+        expect(
+          friendlyError(
+              const ApiException(
+                  'Sensor not found. Make sure the ESP32 is online and the Sensor ID is correct.'),
+              l10n),
+          l10n.apiSensorNotFoundDetail,
+        );
+        // Unknown future backend wording still surfaces (verbatim fallback).
+        expect(
+          friendlyError(const ApiException('quorum not reached'), l10n),
+          'quorum not reached',
+        );
+      }
+    });
+
+    test('rule action display labels preserve protocol, localize UI', () {
+      expect(actionDisplayLabel('ON', _l10n('en')), 'ON');
+      expect(actionDisplayLabel('OFF', _l10n('en')), 'OFF');
+      expect(actionDisplayLabel('ON', _l10n('ar')), isNot('ON'));
+      expect(actionDisplayLabel('OFF', _l10n('fr')), isNot('OFF'));
+    });
   });
 
   group('widgets: locale display, RTL and switching', () {

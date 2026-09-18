@@ -925,6 +925,9 @@ class _WeatherLocationPickerPageState
             value: _selectedDeviceId,
             dropdownColor: colors.submerged,
             isDense: true,
+            // Long device names must ellipsize inside the field instead of
+            // forcing the button wider than the sheet (320px phones).
+            isExpanded: true,
             decoration: InputDecoration(
               labelText: AppLocalizations.of(context)!.pkUseFor,
               isDense: true,

@@ -1047,6 +1047,18 @@ abstract class AppLocalizations {
   /// **'Turn OFF'**
   String get rfTurnOff;
 
+  /// No description provided for @actionOn.
+  ///
+  /// In en, this message translates to:
+  /// **'ON'**
+  String get actionOn;
+
+  /// No description provided for @actionOff.
+  ///
+  /// In en, this message translates to:
+  /// **'OFF'**
+  String get actionOff;
+
   /// No description provided for @rfCreate.
   ///
   /// In en, this message translates to:
@@ -2858,6 +2870,114 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Failed to delete push token'**
   String get apiDeleteToken;
+
+  /// No description provided for @apiAuthRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'username and password are required'**
+  String get apiAuthRequired;
+
+  /// No description provided for @apiUsernameShort.
+  ///
+  /// In en, this message translates to:
+  /// **'username must be at least 3 characters'**
+  String get apiUsernameShort;
+
+  /// No description provided for @apiPasswordShort.
+  ///
+  /// In en, this message translates to:
+  /// **'password must be at least 6 characters'**
+  String get apiPasswordShort;
+
+  /// No description provided for @apiUsernameTaken.
+  ///
+  /// In en, this message translates to:
+  /// **'username already taken'**
+  String get apiUsernameTaken;
+
+  /// No description provided for @apiInvalidCredentials.
+  ///
+  /// In en, this message translates to:
+  /// **'Invalid username or password'**
+  String get apiInvalidCredentials;
+
+  /// No description provided for @apiAuthHeader.
+  ///
+  /// In en, this message translates to:
+  /// **'Missing or invalid Authorization header'**
+  String get apiAuthHeader;
+
+  /// No description provided for @apiTokenExpired.
+  ///
+  /// In en, this message translates to:
+  /// **'Invalid or expired token'**
+  String get apiTokenExpired;
+
+  /// No description provided for @apiServerError.
+  ///
+  /// In en, this message translates to:
+  /// **'Internal server error'**
+  String get apiServerError;
+
+  /// No description provided for @apiNotOwner.
+  ///
+  /// In en, this message translates to:
+  /// **'You do not own this device'**
+  String get apiNotOwner;
+
+  /// No description provided for @apiDeviceNotOwned.
+  ///
+  /// In en, this message translates to:
+  /// **'Device not found or not owned by you'**
+  String get apiDeviceNotOwned;
+
+  /// No description provided for @apiDeviceNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Device not found'**
+  String get apiDeviceNotFound;
+
+  /// No description provided for @apiRuleNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Rule not found'**
+  String get apiRuleNotFound;
+
+  /// No description provided for @apiScheduleNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Schedule not found'**
+  String get apiScheduleNotFound;
+
+  /// No description provided for @apiSensorNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Sensor not found'**
+  String get apiSensorNotFound;
+
+  /// No description provided for @apiSensorIdTaken.
+  ///
+  /// In en, this message translates to:
+  /// **'This Sensor ID is already added'**
+  String get apiSensorIdTaken;
+
+  /// No description provided for @apiSensorNotFoundDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Sensor not found. Make sure the ESP32 is online and the Sensor ID is correct.'**
+  String get apiSensorNotFoundDetail;
+
+  /// No description provided for @apiSensorIdInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'sensorId must be 1-40 characters (letters, numbers, _ . -)'**
+  String get apiSensorIdInvalid;
+
+  /// No description provided for @apiSensorRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'name, sensorId, and deviceId are required'**
+  String get apiSensorRequired;
 
   /// No description provided for @ntChannel.
   ///

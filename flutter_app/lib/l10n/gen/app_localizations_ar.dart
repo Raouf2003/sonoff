@@ -535,6 +535,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get rfTurnOff => 'إيقاف';
 
   @override
+  String get actionOn => 'تشغيل';
+
+  @override
+  String get actionOff => 'إيقاف';
+
+  @override
   String get rfCreate => 'إنشاء القاعدة';
 
   @override
@@ -686,7 +692,14 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String wMoreOverlaps(int n) {
-    return '+$n تداخلات أخرى في نفس اليوم';
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n تداخلات أخرى',
+      two: 'تداخلان آخران',
+      one: 'تداخل آخر',
+    );
+    return '+$_temp0 في نفس اليوم';
   }
 
   @override
@@ -1538,6 +1551,63 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get apiDeleteToken => 'فشل حذف رمز الدفع';
+
+  @override
+  String get apiAuthRequired => 'اسم المستخدم وكلمة المرور مطلوبان';
+
+  @override
+  String get apiUsernameShort =>
+      'يجب أن يتكون اسم المستخدم من 3 أحرف على الأقل';
+
+  @override
+  String get apiPasswordShort => 'يجب أن تتكون كلمة المرور من 6 أحرف على الأقل';
+
+  @override
+  String get apiUsernameTaken => 'اسم المستخدم مستخدم بالفعل';
+
+  @override
+  String get apiInvalidCredentials => 'اسم المستخدم أو كلمة المرور غير صحيحة';
+
+  @override
+  String get apiAuthHeader => 'ترويسة التفويض مفقودة أو غير صالحة';
+
+  @override
+  String get apiTokenExpired => 'الرمز غير صالح أو منتهي الصلاحية';
+
+  @override
+  String get apiServerError => 'خطأ داخلي في الخادم';
+
+  @override
+  String get apiNotOwner => 'أنت لا تملك هذا الجهاز';
+
+  @override
+  String get apiDeviceNotOwned => 'الجهاز غير موجود أو لا تملكه';
+
+  @override
+  String get apiDeviceNotFound => 'الجهاز غير موجود';
+
+  @override
+  String get apiRuleNotFound => 'القاعدة غير موجودة';
+
+  @override
+  String get apiScheduleNotFound => 'الجدول غير موجود';
+
+  @override
+  String get apiSensorNotFound => 'الحساس غير موجود';
+
+  @override
+  String get apiSensorIdTaken => 'معرف الحساس هذا مضاف بالفعل';
+
+  @override
+  String get apiSensorNotFoundDetail =>
+      'الحساس غير موجود. تأكد من اتصال ESP32 وصحة معرف الحساس.';
+
+  @override
+  String get apiSensorIdInvalid =>
+      'يجب أن يتكون معرف الحساس من 1-40 حرفًا (أحرف، أرقام، _ . -)';
+
+  @override
+  String get apiSensorRequired => 'الاسم ومعرف الحساس ومعرف الجهاز مطلوبة';
 
   @override
   String get ntChannel => 'طقس STEES';

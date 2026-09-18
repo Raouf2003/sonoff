@@ -72,6 +72,14 @@ String wifiTestMessageL10n(WifiTestResult result, AppLocalizations l10n) {
   }
 }
 
+/// Display word for a rule action wire value (`ON`/`OFF`).
+///
+/// The contract values are never changed — only the rendered label is
+/// localized (English renders the identical `ON`/`OFF` as before).
+String actionDisplayLabel(String action, AppLocalizations l10n) {
+  return action == 'ON' ? l10n.actionOn : l10n.actionOff;
+}
+
 /// Localized signal-strength word for a 0..3 bar bucket (see `rssiBars`).
 String signalStrengthLabel(int bars, AppLocalizations l10n) {
   return switch (bars) {
@@ -190,6 +198,30 @@ String? _localizedFallback(String message, AppLocalizations l10n) {
     'Failed to register push token' => l10n.apiRegisterToken,
     'Failed to delete push token' => l10n.apiDeleteToken,
     'Something went wrong. Please try again.' => l10n.sharedSomethingWrong,
+    // Exact backend `error` bodies (backend/routes/*.js, middleware/auth.js).
+    // Matched verbatim and only as a whole string: any wording the backend
+    // changes (or any other server text) still falls through to the raw
+    // message below, so the API contract is never reinterpreted.
+    'username and password are required' => l10n.apiAuthRequired,
+    'username must be at least 3 characters' => l10n.apiUsernameShort,
+    'password must be at least 6 characters' => l10n.apiPasswordShort,
+    'username already taken' => l10n.apiUsernameTaken,
+    'Invalid username or password' => l10n.apiInvalidCredentials,
+    'Missing or invalid Authorization header' => l10n.apiAuthHeader,
+    'Invalid or expired token' => l10n.apiTokenExpired,
+    'Internal server error' => l10n.apiServerError,
+    'You do not own this device' => l10n.apiNotOwner,
+    'Device not found or not owned by you' => l10n.apiDeviceNotOwned,
+    'Device not found' => l10n.apiDeviceNotFound,
+    'Rule not found' => l10n.apiRuleNotFound,
+    'Schedule not found' => l10n.apiScheduleNotFound,
+    'Sensor not found' => l10n.apiSensorNotFound,
+    'This Sensor ID is already added' => l10n.apiSensorIdTaken,
+    'Sensor not found. Make sure the ESP32 is online and the Sensor ID is correct.' =>
+      l10n.apiSensorNotFoundDetail,
+    'sensorId must be 1-40 characters (letters, numbers, _ . -)' =>
+      l10n.apiSensorIdInvalid,
+    'name, sensorId, and deviceId are required' => l10n.apiSensorRequired,
     _ => null,
   };
 }

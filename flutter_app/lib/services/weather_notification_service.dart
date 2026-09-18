@@ -110,8 +110,11 @@ Future<void> weatherBackgroundMessageHandler(RemoteMessage message) async {
       ),
     );
     await _ensureWeatherChannel(local);
-    final title = _dataString(data, 'title', 'Rain expected');
-    final body = _dataString(data, 'body', 'Check your irrigation schedule');
+    // Fallbacks stay English here by necessity: this handler runs in its own
+    // isolate without access to app state. The backend always stamps
+    // notification.title/body (server English takes precedence when present).
+    final title = _dataString(data, 'title', kWeatherFallbackTitle);
+    final body = _dataString(data, 'body', kWeatherFallbackBody);
     await local.show(
       id: DateTime.now().millisecondsSinceEpoch % 100000,
       title: title,
@@ -150,7 +153,11 @@ class WeatherNotificationService {
   factory WeatherNotificationService() => _i;
   WeatherNotificationService._();
 
-  final FirebaseMessaging _fcm = FirebaseMessaging.instance;
+  /// Lazily resolves [FirebaseMessaging.instance] on first use (inside the
+  /// existing try/catch call sites) instead of at construction, so creating
+  /// the singleton never throws when Firebase is unavailable (widget tests,
+  /// permission-restricted contexts).
+  FirebaseMessaging get _fcm => FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _local =
       FlutterLocalNotificationsPlugin();
   StreamSubscription<String>? _tokenSub;

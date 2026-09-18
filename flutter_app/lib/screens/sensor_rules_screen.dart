@@ -257,7 +257,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                               ],
                             ),
                             const SizedBox(height: 6),
-                            _LogicPill(label: l10n.ruleActionTarget(chLabel, action), color: actionColor),
+                            _LogicPill(label: l10n.ruleActionTarget(chLabel, actionDisplayLabel(action, l10n)), color: actionColor),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -267,7 +267,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                             const SizedBox(width: 5),
                             Flexible(
                               child: Text(
-                                l10n.srElse(chLabel, opposite),
+                                l10n.srElse(chLabel, actionDisplayLabel(opposite, l10n)),
                                 overflow: TextOverflow.ellipsis,
                                 style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
                               ),

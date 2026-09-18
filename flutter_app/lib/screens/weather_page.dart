@@ -594,11 +594,15 @@ class _WeatherPageState extends State<WeatherPage> {
                       height: 1,
                       color: colors.foam)),
               const SizedBox(width: AppSpacing.sm),
-              Text(l10n.wTemperature,
-                  style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: colors.mist)),
+              Flexible(
+                child: Text(l10n.wTemperature,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: colors.mist)),
+              ),
             ],
           ),
           const SizedBox(height: AppSpacing.md),

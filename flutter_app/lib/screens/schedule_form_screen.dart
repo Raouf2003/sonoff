@@ -824,12 +824,17 @@ class _ModeChip extends StatelessWidget {
           children: [
             Icon(icon, size: 15, color: selected ? colors.stream : colors.mist),
             const SizedBox(width: 6),
-            Text(
-              label,
-              style: GoogleFonts.inter(
-                fontSize: 12.5,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                color: selected ? colors.stream : colors.mist,
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  color: selected ? colors.stream : colors.mist,
+                ),
               ),
             ),
           ],

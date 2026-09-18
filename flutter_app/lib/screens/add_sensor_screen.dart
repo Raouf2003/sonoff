@@ -160,7 +160,9 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
             children: [
               Icon(Icons.sensors, size: 18, color: colors.stream),
               const SizedBox(width: 10),
-              Text(l10n.asLink, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: colors.mist)),
+              Flexible(
+                child: Text(l10n.asLink, maxLines: 2, overflow: TextOverflow.ellipsis, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: colors.mist)),
+              ),
             ],
           ),
           const SizedBox(height: 10),

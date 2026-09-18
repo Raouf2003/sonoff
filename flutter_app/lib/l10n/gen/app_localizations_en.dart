@@ -537,6 +537,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get rfTurnOff => 'Turn OFF';
 
   @override
+  String get actionOn => 'ON';
+
+  @override
+  String get actionOff => 'OFF';
+
+  @override
   String get rfCreate => 'Create Rule';
 
   @override
@@ -1548,6 +1554,62 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get apiDeleteToken => 'Failed to delete push token';
+
+  @override
+  String get apiAuthRequired => 'username and password are required';
+
+  @override
+  String get apiUsernameShort => 'username must be at least 3 characters';
+
+  @override
+  String get apiPasswordShort => 'password must be at least 6 characters';
+
+  @override
+  String get apiUsernameTaken => 'username already taken';
+
+  @override
+  String get apiInvalidCredentials => 'Invalid username or password';
+
+  @override
+  String get apiAuthHeader => 'Missing or invalid Authorization header';
+
+  @override
+  String get apiTokenExpired => 'Invalid or expired token';
+
+  @override
+  String get apiServerError => 'Internal server error';
+
+  @override
+  String get apiNotOwner => 'You do not own this device';
+
+  @override
+  String get apiDeviceNotOwned => 'Device not found or not owned by you';
+
+  @override
+  String get apiDeviceNotFound => 'Device not found';
+
+  @override
+  String get apiRuleNotFound => 'Rule not found';
+
+  @override
+  String get apiScheduleNotFound => 'Schedule not found';
+
+  @override
+  String get apiSensorNotFound => 'Sensor not found';
+
+  @override
+  String get apiSensorIdTaken => 'This Sensor ID is already added';
+
+  @override
+  String get apiSensorNotFoundDetail =>
+      'Sensor not found. Make sure the ESP32 is online and the Sensor ID is correct.';
+
+  @override
+  String get apiSensorIdInvalid =>
+      'sensorId must be 1-40 characters (letters, numbers, _ . -)';
+
+  @override
+  String get apiSensorRequired => 'name, sensorId, and deviceId are required';
 
   @override
   String get ntChannel => 'STEES Weather';

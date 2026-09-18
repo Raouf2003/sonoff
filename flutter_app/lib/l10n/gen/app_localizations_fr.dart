@@ -544,6 +544,12 @@ class AppLocalizationsFr extends AppLocalizations {
   String get rfTurnOff => 'Éteindre';
 
   @override
+  String get actionOn => 'Marche';
+
+  @override
+  String get actionOff => 'Arrêt';
+
+  @override
   String get rfCreate => 'Créer la règle';
 
   @override
@@ -1567,6 +1573,68 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get apiDeleteToken => 'Échec de la suppression du jeton push';
+
+  @override
+  String get apiAuthRequired =>
+      'Le nom d\'utilisateur et le mot de passe sont requis';
+
+  @override
+  String get apiUsernameShort =>
+      'Le nom d\'utilisateur doit comporter au moins 3 caractères';
+
+  @override
+  String get apiPasswordShort =>
+      'Le mot de passe doit comporter au moins 6 caractères';
+
+  @override
+  String get apiUsernameTaken => 'Ce nom d\'utilisateur est déjà pris';
+
+  @override
+  String get apiInvalidCredentials =>
+      'Nom d\'utilisateur ou mot de passe incorrect';
+
+  @override
+  String get apiAuthHeader => 'En-tête d\'autorisation manquant ou invalide';
+
+  @override
+  String get apiTokenExpired => 'Jeton invalide ou expiré';
+
+  @override
+  String get apiServerError => 'Erreur interne du serveur';
+
+  @override
+  String get apiNotOwner => 'Vous ne possédez pas cet appareil';
+
+  @override
+  String get apiDeviceNotOwned =>
+      'Appareil introuvable ou ne vous appartenant pas';
+
+  @override
+  String get apiDeviceNotFound => 'Appareil introuvable';
+
+  @override
+  String get apiRuleNotFound => 'Règle introuvable';
+
+  @override
+  String get apiScheduleNotFound => 'Programme introuvable';
+
+  @override
+  String get apiSensorNotFound => 'Capteur introuvable';
+
+  @override
+  String get apiSensorIdTaken => 'Cet identifiant de capteur est déjà ajouté';
+
+  @override
+  String get apiSensorNotFoundDetail =>
+      'Capteur introuvable. Vérifiez que l\'ESP32 est en ligne et que l\'identifiant est correct.';
+
+  @override
+  String get apiSensorIdInvalid =>
+      'L\'identifiant doit comporter 1 à 40 caractères (lettres, chiffres, _ . -)';
+
+  @override
+  String get apiSensorRequired =>
+      'Le nom et les identifiants du capteur et de l\'appareil sont requis';
 
   @override
   String get ntChannel => 'Météo STEES';

@@ -7,6 +7,8 @@
 //   1. ARB key parity across en/ar/fr (+ non-empty, no TODO placeholders).
 //   2. Remaining hardcoded user-facing literals in lib/ (heuristic allowlist).
 //   3. Locale registration in main.dart (delegates + supportedLocales).
+//   4. friendlyError() mapping covers every ApiService fallback literal, so
+//      no client-side error message can silently bypass localization.
 import 'dart:convert';
 import 'dart:io';
 
@@ -19,6 +21,13 @@ final _suspicious = <RegExp>[
   RegExp(r'''(hintText|helperText|labelText|semanticLabel|semanticsLabel)\s*:\s*['"][^'"]+['"]'''),
   RegExp(r'''\btooltip\s*:\s*'[^']{2,}'''),
   RegExp(r'''\btitle\s*:\s*Text\(\s*'[^']{2,}'''),
+  // Error/feedback helpers called with a raw literal instead of l10n.
+  RegExp(r'''\b_?(err|showError|setError|showInfo|showToast)\(\s*'[^']{2,}'''),
+  // Dialog/snackbar content with a raw literal.
+  RegExp(r'''\b(content|subtitle)\s*:\s*Text\(\s*'[^']{2,}'''),
+  // Throwing a user-facing ApiException literal that friendlyError() cannot
+  // map (must be added to _localizedFallback when intentional).
+  RegExp(r'''\bthrow\s+(const\s+)?ApiException\(\s*'[^']{3,}'''),
 ];
 
 /// Allowlisted findings: technical identifiers, not user-facing copy.
@@ -30,6 +39,11 @@ final _allowlist = <RegExp>[
   RegExp(r"Text\('\u2014'"),
   // Chart/timeline numerics and protocol-shaped strings.
   RegExp(r"Text\(\s*'\$"),
+  // Channel-code chips (technical identifiers, intentionally untranslated).
+  RegExp(r"label: 'CH"),
+  // Provision trace labels (log tags, never rendered).
+  RegExp(r'label: [A-Z][A-Z0-9_]+'),
+  RegExp(r"label: 'STA_|label: 'AP_|label: 'BROKER_|label: 'TOPIC_|label: 'FULLTOPIC_|label: 'MODULE_|label: 'ALL_|label: 'RESTART_|label: 'IDENTITY_|label: 'WIFI_TEST_|label: 'WIFI_TEST'"),
   // Emoji-only advisory markers.
   RegExp(r"Text\(isOverlap \? '"),
   // Log/trace/debug lines.
@@ -140,8 +154,7 @@ void _checkHardcoded() {
   if (suspects == 0) _ok('no hardcoded user-facing literals in lib/');
 }
 
-void _checkRegistration() {
-  final main = File('lib/main.dart').readAsStringSync();
+void _checkRegistration() {  final main = File('lib/main.dart').readAsStringSync();
   for (final token in [
     'AppLocalizations.delegate',
     'GlobalMaterialLocalizations.delegate',
@@ -157,10 +170,41 @@ void _checkRegistration() {
   _ok('locale wiring present in main.dart');
 }
 
+void _checkMappingCoverage() {
+  // Every English literal ApiService can surface as ApiException.message must
+  // have an exact-match entry in _localizedFallback (l10n_helpers.dart),
+  // otherwise it would reach the UI in English under ar/fr.
+  final api = File('lib/services/api_service.dart').readAsStringSync();
+  final helpers = File('lib/l10n/l10n_helpers.dart').readAsStringSync();
+  final literalRe = RegExp(
+      r'''(?:_checkObject\([^;]*?,\s*|_checkList\([^;]*?,\s*|ApiException\(\s*)'((?:[^'\\]|\\.)+)'\,?''');
+  final found = <String>{};
+  for (final m in literalRe.allMatches(api)) {
+    final lit = m.group(1)!;
+    // Skip JSON keys, codes, protocol fragments and short tokens.
+    if (lit.length < 4) continue;
+    if (!RegExp(r'[a-z]{3,}').hasMatch(lit)) continue;
+    if (lit.contains('\$') || lit.contains('/') || lit.contains(':')) {
+      continue;
+    }
+    if (RegExp(r'^[A-Z0-9_]+$').hasMatch(lit)) continue; // codes like TIMEOUT
+    found.add(lit);
+  }
+  var missing = 0;
+  for (final lit in found.toList()..sort()) {
+    if (!helpers.contains("'$lit'")) {
+      _fail('friendlyError() has no mapping for ApiService message "$lit"');
+      missing++;
+    }
+  }
+  if (missing == 0) _ok('friendlyError() maps all ${found.length} ApiService messages');
+}
+
 void main() {
   _checkParity();
   _checkHardcoded();
   _checkRegistration();
+  _checkMappingCoverage();
   if (_failures > 0) {
     stdout.writeln('l10n audit: $_failures problem(s)');
     exit(1);
