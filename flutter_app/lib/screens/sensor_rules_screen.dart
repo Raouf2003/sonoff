@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
@@ -81,30 +83,32 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     if (_rule == null) return;
     final id = _rule!['_id'] as String;
     final target = !((_rule!['enabled'] as bool?) ?? false);
+    final l10n = AppLocalizations.of(context)!;
     setState(() => _rule!['enabled'] = target);
     try {
       await _api.toggleRule(id);
     } catch (e) {
       if (!mounted) return;
       setState(() => _rule!['enabled'] = !target);
-      _err(e is ApiException ? e.message : 'Failed to update rule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.srUpdateFailed);
     }
   }
 
   Future<void> _delete() async {
     if (_rule == null) return;
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final id = _rule!['_id'] as String;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: colors.submerged,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Text('Delete rule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
-        content: Text('"${_rule!['name']}" will be removed permanently.', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+        title: Text(l10n.ruleDeleteTitle, style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text(l10n.ruleDeleteConfirm('${_rule!['name']}'), style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(l10n.sharedCancel, style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text(l10n.sharedDelete, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -113,7 +117,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
       await _api.deleteRule(id);
       _load();
     } catch (e) {
-      _err('Failed to delete rule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.srDeleteFailed);
     }
   }
 
@@ -156,9 +160,10 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(l10n.srTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -174,8 +179,8 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
               ? Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.stream)))
               : _loadError
                   ? SteesError(
-                      title: 'Could not load the rule',
-                      subtitle: 'Check your connection and try again.',
+                      title: l10n.srLoadFailed,
+                      subtitle: l10n.sharedCheckConnection,
                       onRetry: _load,
                     )
                   : _hasRule
@@ -188,6 +193,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 
   Widget _buildRuleView() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final rule = _rule!;
     final enabled = (rule['enabled'] as bool?) ?? false;
     final channels = _channelsOf(rule);
@@ -195,7 +201,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
     final condition = (rule['condition'] as String?) ?? 'below';
     final action = (rule['action'] as String?) ?? 'ON';
     final opposite = action == 'ON' ? 'OFF' : 'ON';
-    final condWord = condition == 'above' ? 'above' : 'below';
+    final condWord = condition == 'above' ? l10n.ruleAbove : l10n.ruleBelow;
     final actionColor = action == 'ON' ? colors.leaf : colors.sunlight;
     final chLabel = channels.map((c) => 'CH$c').join(' + ');
 
@@ -245,13 +251,13 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
-                                _LogicPill(label: 'When $condWord $threshold', color: colors.stream),
+                                _LogicPill(label: l10n.ruleWhen(condWord, threshold), color: colors.stream),
                                 const SizedBox(height: 6),
                                 Icon(Icons.arrow_downward_rounded, size: 16, color: colors.mist.withValues(alpha: 0.4)),
                               ],
                             ),
                             const SizedBox(height: 6),
-                            _LogicPill(label: '$chLabel → $action', color: actionColor),
+                            _LogicPill(label: l10n.ruleActionTarget(chLabel, action), color: actionColor),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -261,7 +267,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                             const SizedBox(width: 5),
                             Flexible(
                               child: Text(
-                                'Else → $chLabel → $opposite',
+                                l10n.srElse(chLabel, opposite),
                                 overflow: TextOverflow.ellipsis,
                                 style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
                               ),
@@ -275,10 +281,10 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                 Container(height: 1, color: colors.border),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  child: Row(
+                  child:                 Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
+                      Text(enabled ? l10n.sharedEnabled : l10n.sharedDisabled, style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                       const SizedBox(width: 8),
                       Switch(
                         value: enabled,
@@ -290,12 +296,12 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
                       IconButton(
                         onPressed: _editRule,
                         icon: Icon(Icons.edit_outlined, size: 19, color: colors.stream),
-                        tooltip: 'Edit',
+                        tooltip: l10n.sharedEdit,
                       ),
                       IconButton(
                         onPressed: _delete,
                         icon: Icon(Icons.delete_outline, size: 19, color: colors.danger),
-                        tooltip: 'Delete',
+                        tooltip: l10n.sharedDelete,
                       ),
                     ],
                   ),
@@ -310,6 +316,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
 
   Widget _buildEmpty() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 40),
@@ -326,10 +333,10 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
               child: Icon(Icons.rule_outlined, size: 36, color: colors.stream.withValues(alpha: 0.5)),
             ),
             const SizedBox(height: 20),
-            Text('No rule yet', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+            Text(l10n.srEmptyTitle, style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
             const SizedBox(height: 8),
             Text(
-              'Create a rule to automatically control a relay based on this sensor\'s readings.',
+              l10n.srEmptyHint,
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(fontSize: 13, color: colors.mist.withValues(alpha: 0.7)),
             ),
@@ -339,7 +346,7 @@ class _SensorRulesScreenState extends State<SensorRulesScreen> {
               child: FilledButton.icon(
                 onPressed: _createRule,
                 icon: const Icon(Icons.add, size: 18),
-                label: Text('Create Rule', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+                label: Text(l10n.rfCreate, style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
                 style: FilledButton.styleFrom(
                   backgroundColor: colors.stream,
                   foregroundColor: colors.well,
@@ -414,6 +421,7 @@ class _ActiveTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -428,7 +436,7 @@ class _ActiveTag extends StatelessWidget {
           Icon(Icons.circle, size: 5, color: enabled ? colors.leaf : colors.mist),
           const SizedBox(width: 4),
           Text(
-            enabled ? 'Active' : 'Off',
+            enabled ? l10n.sharedActive : l10n.sharedOff,
             style: GoogleFonts.sora(
               fontSize: 10,
               fontWeight: FontWeight.w600,

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
 import '../theme/app_theme.dart';
 import 'provision_device_screen.dart';
 
@@ -33,28 +34,28 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
 
     if (wifiOff) {
       final colors = context.steesColors;
+      final l10n = AppLocalizations.of(context)!;
       final open = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: colors.surface,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Text('Wi-Fi is off',
+          title: Text(l10n.adWifiOff,
               style: GoogleFonts.sora(
                   fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
           content: Text(
-            'Your phone needs Wi-Fi turned on to find and join the device\u2019s '
-            'setup network.',
+            l10n.adWifiOffHint,
             style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(false),
-              child: Text('Cancel',
+              child: Text(l10n.sharedCancel,
                   style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
             ),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text('Turn on Wi-Fi',
+              child: Text(l10n.adTurnOn,
                   style: GoogleFonts.inter(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
@@ -85,9 +86,10 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Add Device', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(l10n.adTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -134,7 +136,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'Add a device',
+                                  l10n.adHeading,
                                   style: GoogleFonts.sora(
                                       fontSize: 16,
                                       fontWeight: FontWeight.w700,
@@ -142,7 +144,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  'GUIDED SETUP',
+                                  l10n.adGuided,
                                   style: GoogleFonts.jetBrainsMono(
                                     fontSize: 9,
                                     fontWeight: FontWeight.w500,
@@ -157,9 +159,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                       ),
                       const SizedBox(height: AppSpacing.md),
                       Text(
-                        'Wi-Fi must be turned on on your phone \u2014 the '
-                        'wizard needs it to find and join the device\u2019s '
-                        'setup network.',
+                        l10n.adWizardHint,
                         style: GoogleFonts.inter(
                             fontSize: 12.5, height: 1.5, color: colors.mist),
                       ),
@@ -169,7 +169,7 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                         child: FilledButton.icon(
                           onPressed: _openWizard,
                           icon: const Icon(Icons.bolt_outlined, size: 18),
-                          label: Text('Provision New Device', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                          label: Text(l10n.adProvision, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                           style: FilledButton.styleFrom(
                             backgroundColor: colors.stream,
                             foregroundColor: colors.well,

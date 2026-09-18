@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -20,16 +21,16 @@ void main() {
   });
 
   Map<String, dynamic> scheduleRow() => {
-        '_id': 's1',
-        'deviceId': 'dev1',
-        'name': 'Morning',
-        'channels': [1],
-        'enabled': true,
-        'recurrence': {'type': 'daily', 'daysOfWeek': []},
-        'timeRanges': [
-          {'start': '06:00', 'end': '06:30'},
-        ],
-      };
+    '_id': 's1',
+    'deviceId': 'dev1',
+    'name': 'Morning',
+    'channels': [1],
+    'enabled': true,
+    'recurrence': {'type': 'daily', 'daysOfWeek': []},
+    'timeRanges': [
+      {'start': '06:00', 'end': '06:30'},
+    ],
+  };
 
   ApiService apiWith({
     required bool online,
@@ -52,10 +53,7 @@ void main() {
         return http.Response(jsonEncode({'online': online}), 200);
       }
       if (request.method == 'DELETE' && path == '/api/schedules/s1') {
-        return http.Response(
-          jsonEncode({'ok': true, 'deferred': true}),
-          200,
-        );
+        return http.Response(jsonEncode({'ok': true, 'deferred': true}), 200);
       }
       return http.Response('not found', 404);
     });
@@ -65,14 +63,17 @@ void main() {
   Future<void> pumpPage(WidgetTester tester, ApiService api) async {
     await tester.pumpWidget(
       MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(body: SchedulesPage(api: api)),
       ),
     );
     await tester.pumpAndSettle();
   }
 
-  testWidgets('online device: no banner, normal card, no sync chips',
-      (WidgetTester tester) async {
+  testWidgets('online device: no banner, normal card, no sync chips', (
+    WidgetTester tester,
+  ) async {
     await pumpPage(tester, apiWith(online: true, schedules: [scheduleRow()]));
 
     expect(find.text(kOfflineBannerText), findsNothing);
@@ -86,8 +87,9 @@ void main() {
     expect(find.text('OFFLINE'), findsNothing);
   });
 
-  testWidgets('offline device: single top banner, card not dimmed',
-      (WidgetTester tester) async {
+  testWidgets('offline device: single top banner, card not dimmed', (
+    WidgetTester tester,
+  ) async {
     await pumpPage(tester, apiWith(online: false, schedules: [scheduleRow()]));
 
     expect(find.text(kOfflineBannerText), findsOneWidget);
@@ -98,8 +100,9 @@ void main() {
     expect(find.text('OFFLINE'), findsNothing);
   });
 
-  testWidgets('banner disappears once the device reports online again',
-      (WidgetTester tester) async {
+  testWidgets('banner disappears once the device reports online again', (
+    WidgetTester tester,
+  ) async {
     var online = false;
     final client = MockClient((http.Request request) async {
       final path = request.url.path;
@@ -132,8 +135,9 @@ void main() {
     expect(find.text(kOfflineBannerText), findsNothing);
   });
 
-  testWidgets('delete shows a toast and no dimmed pending card',
-      (WidgetTester tester) async {
+  testWidgets('delete shows a toast and no dimmed pending card', (
+    WidgetTester tester,
+  ) async {
     final schedules = [scheduleRow()];
     final client = MockClient((http.Request request) async {
       final path = request.url.path;

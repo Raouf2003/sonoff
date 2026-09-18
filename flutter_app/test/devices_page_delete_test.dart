@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:smart_home_app/screens/devices_page.dart';
@@ -44,8 +45,8 @@ class _FakeRepo extends DeviceRepositoryService {
 
   @override
   Future<List<Map<String, dynamic>>> getDevices() async => const [
-        {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
-      ];
+    {'deviceId': _deviceId, 'name': 'Controller', 'channels': 4},
+  ];
 
   @override
   Future<RelayStatusResult> getStatus(
@@ -88,6 +89,8 @@ Future<void> _pumpDevicesPage(
   _mockSecureStorage(tester);
   await tester.pumpWidget(
     MaterialApp(
+      localizationsDelegates: testDelegates,
+      supportedLocales: testLocales,
       theme: AppTheme.light(),
       home: Scaffold(
         body: DevicesPage.test(
@@ -128,8 +131,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('cancel leaves the device in place and calls nothing',
-      (tester) async {
+  testWidgets('cancel leaves the device in place and calls nothing', (
+    tester,
+  ) async {
     final api = _DeleteApi();
     await _pumpDevicesPage(tester, api: api);
 
@@ -147,8 +151,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('confirm deletes, drops the device, and shows the empty state',
-      (tester) async {
+  testWidgets('confirm deletes, drops the device, and shows the empty state', (
+    tester,
+  ) async {
     final api = _DeleteApi();
     await _pumpDevicesPage(tester, api: api);
 
@@ -168,8 +173,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('network failure keeps the device and shows an error',
-      (tester) async {
+  testWidgets('network failure keeps the device and shows an error', (
+    tester,
+  ) async {
     final api = _DeleteApi()
       ..failWith = const ApiException(
         'Could not reach the server',
@@ -186,10 +192,7 @@ void main() {
     // Device stays; the delete control is functional again for a retry.
     expect(find.text('Controller'), findsOneWidget);
     expect(find.byTooltip('Delete Device'), findsOneWidget);
-    expect(
-      find.textContaining('Could not delete the device'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Could not delete the device'), findsOneWidget);
 
     await _unmount(tester);
   });

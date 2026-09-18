@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/window_timeline.dart';
@@ -26,6 +28,7 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
 
   Future<void> _load() async {
     setState(() => _loading = true);
+    Object? cause;
     try {
       final results = await Future.wait([_api.getDevices(), _api.getSchedules()]);
       if (mounted) {
@@ -37,7 +40,12 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
-      _err('Failed to load schedules');
+      cause = e;
+    }
+    // Resolved after the async gap (loaders also run from initState, where
+    // Localizations cannot be read) and only while still mounted.
+    if (cause != null && mounted) {
+      _err(friendlyError(cause, AppLocalizations.of(context)!));
     }
   }
 
@@ -91,28 +99,30 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
   Future<void> _toggle(Map<String, dynamic> schedule) async {
     final id = schedule['_id'] as String;
     final target = !((schedule['enabled'] as bool?) ?? false);
+    final l10n = AppLocalizations.of(context)!;
     setState(() => schedule['enabled'] = target);
     try {
       await _api.toggleSchedule(id);
     } catch (e) {
       setState(() => schedule['enabled'] = !target);
-      _err('Failed to update schedule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.slUpdateFailed);
     }
   }
 
   Future<void> _delete(Map<String, dynamic> schedule) async {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final id = schedule['_id'] as String;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: colors.submerged,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Text('Delete schedule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
-        content: Text('"${schedule['name']}" will be removed.', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+        title: Text(l10n.schDeleteTitle, style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text(l10n.schDeleteConfirm('${schedule['name']}'), style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(l10n.sharedCancel, style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text(l10n.sharedDelete, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -121,7 +131,7 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
       await _api.deleteSchedule(id);
       _load();
     } catch (e) {
-      _err('Failed to delete schedule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.slDeleteFailed);
     }
   }
 
@@ -143,9 +153,10 @@ class _ScheduleListScreenState extends State<ScheduleListScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Schedules', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(l10n.slTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -205,6 +216,7 @@ class _DeviceSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final channels = device['channels'] as int? ?? 4;
     return Padding(
       padding: const EdgeInsets.only(bottom: 18),
@@ -217,10 +229,10 @@ class _DeviceSection extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(device['name'] as String? ?? 'Device', maxLines: 1, overflow: TextOverflow.ellipsis,
+                    Text(device['name'] as String? ?? l10n.sharedDevice, maxLines: 1, overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.sora(fontSize: 20, fontWeight: FontWeight.w700, color: colors.foam)),
                     const SizedBox(height: 2),
-                    Text('ID: ${device['deviceId']}', maxLines: 1, overflow: TextOverflow.ellipsis,
+                    Text(l10n.sharedIdValue('${device['deviceId']}'), maxLines: 1, overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                   ],
                 ),
@@ -231,7 +243,7 @@ class _DeviceSection extends StatelessWidget {
                 child: FilledButton.icon(
                   onPressed: canAdd ? onAdd : null,
                   icon: const Icon(Icons.add, size: 17),
-                  label: Text('Add', style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700)),
+                  label: Text(l10n.sharedAdd, style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w700)),
                   style: FilledButton.styleFrom(
                     backgroundColor: colors.stream,
                     foregroundColor: colors.well,
@@ -242,7 +254,7 @@ class _DeviceSection extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 2),
-          Text('CH1–CH$channels', style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
+          Text(l10n.sharedChannelRange(channels), style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
           const SizedBox(height: 12),
           if (schedules.isEmpty)
             Container(
@@ -253,7 +265,7 @@ class _DeviceSection extends StatelessWidget {
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: colors.border),
               ),
-              child: Text('No schedules for this device', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+              child: Text(l10n.schEmptyDevice, style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
             )
           else
             for (final (i, schedule) in schedules.indexed) ...[
@@ -287,11 +299,10 @@ class _ScheduleTile extends StatelessWidget {
     required this.onDelete,
   });
 
-  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final enabled = (schedule['enabled'] as bool?) ?? false;
     final channels = (schedule['channels'] as List<dynamic>? ?? [])
         .map((c) => 'CH$c')
@@ -330,7 +341,7 @@ class _ScheduleTile extends StatelessWidget {
                     Icon(Icons.tune, size: 12, color: colors.mist.withValues(alpha: 0.8)),
                     const SizedBox(width: 4),
                     Flexible(
-                      child: Text('Channels: $channels', maxLines: 1, overflow: TextOverflow.ellipsis,
+                      child: Text(l10n.slChannels(channels), maxLines: 1, overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                     ),
                   ],
@@ -343,7 +354,7 @@ class _ScheduleTile extends StatelessWidget {
                     Icon(Icons.event_repeat, size: 12, color: colors.sunlight),
                     const SizedBox(width: 5),
                     Expanded(
-                      child: Text(_recurrenceSummary(schedule), maxLines: 1, overflow: TextOverflow.ellipsis,
+                      child: Text(_recurrenceSummary(schedule, l10n), maxLines: 1, overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.9))),
                     ),
                   ],
@@ -355,7 +366,7 @@ class _ScheduleTile extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
+              Text(l10n.sharedEnabled, style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
               const SizedBox(width: 8),
               Switch(
                 value: enabled,
@@ -367,12 +378,12 @@ class _ScheduleTile extends StatelessWidget {
               IconButton(
                 onPressed: canEdit ? onEdit : null,
                 icon: Icon(Icons.edit_outlined, size: 19, color: colors.stream),
-                tooltip: 'Edit',
+                tooltip: l10n.sharedEdit,
               ),
               IconButton(
                 onPressed: onDelete,
                 icon: Icon(Icons.delete_outline, size: 19, color: colors.danger),
-                tooltip: 'Delete',
+                tooltip: l10n.sharedDelete,
               ),
             ],
           ),
@@ -399,15 +410,15 @@ class _ScheduleTile extends StatelessWidget {
     return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
   }
 
-  String _recurrenceSummary(Map<String, dynamic> schedule) {
+  String _recurrenceSummary(Map<String, dynamic> schedule, AppLocalizations l10n) {
     final recurrence = schedule['recurrence'] as Map<String, dynamic>? ?? {};
     if (recurrence['type'] == 'custom') {
       final days = (recurrence['daysOfWeek'] as List<dynamic>? ?? [])
-          .map((d) => _dayLabels[(d as int?) ?? 0])
+          .map((d) => weekdayLabel((d as int?) ?? 0, l10n.localeName))
           .join(', ');
-      return 'Custom: $days';
+      return l10n.sharedCustomDays(days);
     }
-    return 'Every day';
+    return l10n.sharedEveryDay;
   }
 }
 
@@ -417,15 +428,16 @@ class _EmptyDevices extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.devices_other, size: 48, color: colors.mist.withValues(alpha: 0.3)),
           const SizedBox(height: 12),
-          Text('No devices yet', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: colors.mist)),
+          Text(l10n.sharedNoDevices, style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: colors.mist)),
           const SizedBox(height: 4),
-          Text('Claim a device to start scheduling', style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6))),
+          Text(l10n.schEmptyDevicesHint, style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6))),
         ],
       ),
     );
@@ -439,6 +451,7 @@ class _ActiveTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final color = enabled ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -451,7 +464,7 @@ class _ActiveTag extends StatelessWidget {
         children: [
           Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
           const SizedBox(width: 5),
-          Text(enabled ? 'Active' : 'Off',
+          Text(enabled ? l10n.sharedActive : l10n.sharedOff,
             style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
         ],
       ),

@@ -1,0 +1,677 @@
+{
+  "@@locale": "fr",
+  "appTitle": "STEES",
+
+  "navDevices": "Appareils",
+  "navSensors": "Capteurs",
+  "navSchedules": "Programmes",
+  "navRules": "Règles",
+  "navWeather": "Météo",
+
+  "appTagline": "Irrigation intelligente",
+  "actionToggleTheme": "Changer de thème",
+  "actionLogout": "Déconnexion",
+  "actionLanguage": "Langue",
+  "languageEnglish": "English",
+  "languageArabic": "العربية",
+  "languageFrench": "Français",
+
+  "sharedCancel": "Annuler",
+  "sharedDelete": "Supprimer",
+  "sharedEdit": "Modifier",
+  "sharedRemove": "Retirer",
+  "sharedOk": "OK",
+  "sharedRetry": "Réessayer",
+  "sharedAdd": "Ajouter",
+  "sharedClose": "Fermer",
+  "sharedActive": "Actif",
+  "sharedOff": "Arrêt",
+  "sharedEnabled": "Activé",
+  "sharedDisabled": "Désactivé",
+  "sharedOnline": "En ligne",
+  "sharedOffline": "Hors ligne",
+  "sharedDevice": "Appareil",
+  "sharedChannel": "Canal",
+  "sharedCheckConnection": "Vérifiez votre connexion et réessayez.",
+  "sharedSomethingWrong": "Un problème est survenu. Veuillez réessayer.",
+  "sharedEveryDay": "Tous les jours",
+  "sharedEveryDayWord": "tous les jours",
+  "sharedToday": "Aujourd'hui",
+  "sharedTomorrow": "Demain",
+  "sharedSaveChanges": "Enregistrer",
+  "sharedSelectChannel": "Sélectionnez au moins un canal",
+  "sharedSignedOut": "Vous semblez déconnecté. Reconnectez-vous et réessayez.",
+  "sharedNoDevices": "Aucun appareil",
+
+  "@sharedScheduleCount": {
+    "description": "Device schedule subtitle: channel range plus schedule count",
+    "placeholders": {
+      "range": { "type": "String" },
+      "n": { "type": "int" }
+    }
+  },
+  "sharedScheduleCount": "{range}  ·  {n, plural, =1{1 programme} other{{n} programmes}}",
+  "@sharedCustomDays": {
+    "placeholders": { "days": { "type": "String" } }
+  },
+  "sharedCustomDays": "Personnalisé : {days}",
+  "@sharedIdValue": {
+    "placeholders": { "id": { "type": "String" } }
+  },
+  "sharedIdValue": "ID : {id}",
+  "@sharedDeviceValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedDeviceValue": "Appareil : {name}",
+  "@sharedSensorValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedSensorValue": "Capteur : {name}",
+  "@sharedChannelRange": {
+    "placeholders": { "channels": { "type": "int" } }
+  },
+  "sharedChannelRange": "CH1–CH{channels}",
+  "@zoneName": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "zoneName": "Zone {index}",
+  "@channelCode": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "channelCode": "CANAL {index}",
+
+  "authFillAll": "Remplissez tous les champs",
+  "authUsername": "Nom d'utilisateur",
+  "authPassword": "Mot de passe",
+  "authConfirmPassword": "Confirmer le mot de passe",
+  "authSignIn": "Se connecter",
+  "authSignUp": "S'inscrire",
+  "authCreateAccount": "Créer un compte",
+  "authJoinStees": "Rejoignez STEES",
+  "authHaveAccount": "Vous avez déjà un compte ?  ",
+  "authNoAccount": "Pas de compte ?  ",
+  "authPwdMismatch": "Les mots de passe ne correspondent pas",
+  "authPwdShort": "Le mot de passe doit comporter au moins 6 caractères",
+
+  "devRelayBusy": "Appareil occupé, réessayez",
+  "devRelayUnreachable": "Impossible de joindre l'appareil",
+  "@devNoResponse": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "devNoResponse": "{channels} n'a pas répondu",
+  "devFetchStatus": "Échec de la récupération du statut",
+  "devDeleteTitle": "Supprimer l'appareil",
+  "devDeleteConfirm": "Voulez-vous vraiment supprimer cet appareil ?\nVous pourrez le réclamer après suppression.",
+  "devDeleted": "Appareil supprimé.",
+  "devDeleteFailed": "Impossible de supprimer l'appareil. Vérifiez votre connexion et réessayez.",
+  "devLoadFailed": "Impossible de charger les appareils",
+  "devEmptyHint": "Réclamez un contrôleur Sonoff pour commencer\nà gérer vos zones d'irrigation.",
+  "devAdd": "Ajouter un appareil",
+  "devSectionTitle": "APPAREILS",
+  "devZonesTitle": "ZONES",
+  "devSchedulesBtn": "Programmes",
+  "devLan": "LAN",
+  "devLanOnly": "LAN UNIQUEMENT",
+  "devSyncing": "SYNCHRONISATION",
+  "devTurningOn": "ALLUMAGE…",
+  "devTurningOff": "EXTINCTION…",
+  "devTurning": "EN COURS…",
+  "devOfflineBadge": "HORS LIGNE",
+  "devFlowing": "EN COURS",
+  "devDry": "SEC",
+
+  "senLoadFailed": "Impossible de charger les capteurs",
+  "senEmptyTitle": "Aucun capteur",
+  "senEmptyHint": "Ajoutez un capteur d'humidité du sol pour\nsurveiller vos zones d'irrigation.",
+  "senAdd": "Ajouter un capteur",
+  "senSection": "CAPTEURS",
+  "senRuleBtn": "Règle",
+
+  "schOfflineBanner": "Appareil hors ligne — les programmes se synchroniseront automatiquement à la reconnexion.",
+  "schSaved": "Programme enregistré",
+  "schDeleted": "Programme supprimé",
+  "schUpdateFailed": "Impossible de mettre à jour le programme",
+  "schDeleteFailed": "Impossible de supprimer le programme",
+  "schDeleteTitle": "Supprimer le programme ?",
+  "@schDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "schDeleteConfirm": "« {name} » sera supprimé.",
+  "schLoadFailed": "Impossible de charger les programmes",
+  "schEmptyDevicesHint": "Réclamez un appareil pour commencer la programmation.",
+  "schSection": "PROGRAMMES",
+  "schEmptyDevice": "Aucun programme pour cet appareil",
+  "@schRangeInvalid": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schRangeInvalid": "Plage {index} : la fin doit être après le début (pas de nuit)",
+  "@schConflict": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" }
+    }
+  },
+  "schConflict": "Conflit de programme : {chans} est déjà programmé {windows} le {days}.",
+  "@schConflictNamed": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" },
+      "name": { "type": "String" }
+    }
+  },
+  "schConflictNamed": "Conflit de programme : {chans} est déjà programmé {windows} le {days} (« {name} »).",
+  "schPickDay": "Choisissez au moins un jour pour la récurrence personnalisée",
+  "schSaveFailed": "Impossible d'enregistrer le programme",
+  "schEditTitle": "Modifier le programme",
+  "schNewTitle": "Nouveau programme",
+  "schChannelsSection": "CANAUX",
+  "schChannelsDesc": "Les sorties pilotées par ce programme.",
+  "schRepeatsSection": "RÉPÉTITION",
+  "schRepeatsDesc": "Les jours de la semaine où ce programme s'exécute.",
+  "schDaily": "Quotidien",
+  "schCustomMode": "Jours personnalisés",
+  "schWindowsSection": "PLAGES",
+  "schWindowsDesc": "Les canaux sont actifs dans chaque plage, arrêtés sinon.",
+  "schAddWindow": "Ajouter une plage",
+  "schCreate": "Créer le programme",
+  "schStarts": "Début",
+  "schEnds": "Fin",
+  "schRemoveWindow": "Retirer la plage",
+  "@schWindowLabel": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schWindowLabel": "P{index}",
+
+  "ruleUpdateFailed": "Impossible de mettre à jour la règle",
+  "ruleDeleteFailed": "Impossible de supprimer la règle",
+  "ruleDeleteTitle": "Supprimer la règle ?",
+  "@ruleDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "ruleDeleteConfirm": "« {name} » sera définitivement supprimé.",
+  "ruleNoSensors": "Aucun capteur disponible. Ajoutez d'abord un capteur.",
+  "ruleChooseSensor": "Choisir un capteur",
+  "ruleChooseHint": "Les règles pilotent les relais selon les relevés de ce capteur.",
+  "ruleLoadFailed": "Impossible de charger les règles",
+  "ruleEmptyTitle": "Aucune règle",
+  "@ruleEmptyHint": {
+    "placeholders": { "action": { "type": "String" } }
+  },
+  "ruleEmptyHint": "Appuyez sur « {action} » pour piloter un relais\nselon les relevés d'un capteur.",
+  "ruleSection": "RÈGLES",
+  "ruleAdd": "Ajouter une règle",
+  "ruleAbove": "au-dessus de",
+  "ruleBelow": "en dessous de",
+  "@ruleWhen": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "ruleWhen": "Quand {cond} {threshold}",
+  "@ruleActionTarget": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleActionTarget": "{channels} → {action}",
+  "@ruleOtherwise": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleOtherwise": "Sinon → {channels} → {action}",
+
+  "rfEnterName": "Saisissez un nom de règle",
+  "rfEnterThreshold": "Saisissez un seuil numérique",
+  "rfSaveFailed": "Impossible d'enregistrer la règle",
+  "rfEditTitle": "Modifier la règle",
+  "rfNewTitle": "Nouvelle règle",
+  "rfIdentity": "IDENTITÉ",
+  "rfNameHint": "Nom de la règle",
+  "rfNameHelper": "ex. Arrosage auto si sec",
+  "rfChannelsSection": "CANAUX",
+  "rfChannelsDesc": "Choisissez chaque relais piloté par cette règle.",
+  "rfConditionSection": "CONDITION",
+  "rfConditionDesc": "Le relevé du capteur qui déclenche la règle.",
+  "rfBelow": "En dessous",
+  "rfAbove": "Au-dessus",
+  "rfThresholdHint": "Valeur du seuil",
+  "rfThresholdHelper": "ex. 30",
+  "rfActionSection": "ACTION",
+  "rfActionDesc": "Ce qui se passe quand la condition est vraie.",
+  "rfTurnOn": "Allumer",
+  "rfTurnOff": "Éteindre",
+  "rfCreate": "Créer la règle",
+  "rfLogic": "LOGIQUE",
+  "@rfIf": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "rfIf": "SI sol {cond} {threshold}",
+  "rfOtherwise": "SINON",
+
+  "srUpdateFailed": "Échec de la mise à jour de la règle",
+  "srDeleteFailed": "Échec de la suppression de la règle",
+  "srLoadFailed": "Impossible de charger la règle",
+  "srEmptyTitle": "Aucune règle",
+  "srEmptyHint": "Créez une règle pour piloter automatiquement un relais selon les relevés de ce capteur.",
+  "srTitle": "Règle",
+  "@srElse": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "srElse": "Sinon → {channels} → {action}",
+
+  "slLoadFailed": "Échec du chargement des programmes",
+  "slUpdateFailed": "Échec de la mise à jour du programme",
+  "slDeleteFailed": "Échec de la suppression du programme",
+  "slTitle": "Programmes",
+  "@slChannels": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "slChannels": "Canaux : {channels}",
+
+  "wLoadFailed": "Impossible de charger la météo.",
+  "wNoDevicesHint": "Réclamez un appareil pour activer les prévisions météo.",
+  "wLoadTitle": "Impossible de charger la météo",
+  "wSection": "MÉTÉO",
+  "wRefresh": "Actualiser",
+  "wNoLocation": "Emplacement météo non configuré",
+  "wNoLocationHint": "Cet appareil n'a pas encore d'emplacement de ferme. Sélectionnez un emplacement sur la carte pour activer la météo de cet appareil.",
+  "wFeatForecast": "Prévisions\nlocales",
+  "wFeatAdvisories": "Alertes\npluie",
+  "wFeatUnaffected": "Programmes\ninchangés",
+  "wSetLocation": "Définir l'emplacement",
+  "@wPinDefaults": {
+    "placeholders": { "tz": { "type": "String" } }
+  },
+  "wPinDefaults": "L'épingle part de votre position actuelle • {tz}",
+  "wForecastUnavailable": "Prévisions indisponibles",
+  "wForecastHint": "Vos programmes d'irrigation ne sont pas affectés et s'exécuteront comme prévu.",
+  "wPrecipitation": "Précipitations",
+  "wLastHour": "Dernière heure",
+  "wCurrent": "CONDITIONS ACTUELLES",
+  "wTemperature": "Température",
+  "wNoHourly": "Aucune donnée horaire pour ce jour.",
+  "wSignificantRain": "Pluie notable : ≥2 mm avec ≥50 % de probabilité",
+  "wForecast": "PRÉVISIONS",
+  "wRainDuring": "Pluie pendant l'irrigation",
+  "wRainNear": "Pluie proche de l'irrigation",
+  "wIrrigation": "Irrigation",
+  "wRain": "Pluie",
+  "wDirectOverlap": "Chevauchement direct",
+  "@wDirectOverlapWith": {
+    "placeholders": { "duration": { "type": "String" } }
+  },
+  "wDirectOverlapWith": "Chevauchement direct · {duration}",
+  "wCloseToWindow": "Proche de la plage d'irrigation",
+  "@wAlsoNear": {
+    "placeholders": { "windows": { "type": "String" } }
+  },
+  "wAlsoNear": "Aussi proche : {windows}",
+  "@wMoreOverlaps": {
+    "placeholders": { "n": { "type": "int" } }
+  },
+  "wMoreOverlaps": "+{n, plural, =1{1 autre chevauchement} other{{n} autres chevauchements}} le même jour",
+  "wReviewSchedule": "Voir le programme",
+  "hourNow": "MAINT.",
+  "unitMm": "mm",
+  "wNoSchedules": "Aucun programme d'irrigation pour cet appareil.",
+  "wTodayIrrigation": "IRRIGATION DU JOUR",
+  "@wDurationMin": {
+    "placeholders": { "minutes": { "type": "int" } }
+  },
+  "wDurationMin": "~{minutes} min",
+  "@wDurationHour": {
+    "placeholders": { "h": { "type": "int" } }
+  },
+  "wDurationHour": "~{h} h",
+  "@wDurationHourMin": {
+    "placeholders": {
+      "h": { "type": "int" },
+      "m": { "type": "int" }
+    }
+  },
+  "wDurationHourMin": "~{h} h {m} min",
+  "@wRainChip": {
+    "placeholders": {
+      "start": { "type": "String" },
+      "end": { "type": "String" },
+      "mm": { "type": "String" },
+      "prob": { "type": "String" }
+    }
+  },
+  "wRainChip": "Pluie {start}–{end} · {mm} mm · {prob} %",
+  "@wUpdated": {
+    "placeholders": {
+      "time": { "type": "String" },
+      "tz": { "type": "String" }
+    }
+  },
+  "wUpdated": "Mis à jour {time} · {tz}",
+
+  "pkRemoveTitle": "Retirer l'emplacement ?",
+  "pkRemoveConfirm": "Les prévisions météo seront désactivées pour cet appareil. Vos programmes d'irrigation ne sont pas affectés.",
+  "pkTitle": "Choisir l'emplacement météo",
+  "pkTapHint": "Touchez la carte ou déplacez l'épingle",
+  "pkTapChoose": "Touchez la carte pour choisir l'emplacement de la ferme",
+  "pkResolving": "Recherche du lieu…",
+  "pkCustom": "Point personnalisé",
+  "pkUseFor": "Utiliser pour l'appareil",
+  "pkSaving": "Enregistrement…",
+  "pkConfirm": "Confirmer l'emplacement",
+  "pkRemoveFailed": "Impossible de retirer l'emplacement.",
+  "pkChooseFirst": "Touchez d'abord la carte pour choisir un emplacement.",
+  "pkSaveFailed": "Impossible d'enregistrer l'emplacement.",
+
+  "pvTitle": "Configurer l'appareil",
+  "pvReconnect": "Reconnecter le Wi-Fi de l'appareil",
+  "pvJoinNetwork": "Rejoindre le réseau de l'appareil",
+  "pvStep1": "ÉTAPE 1 SUR 3",
+  "pvStep1a": "Allumez l'appareil — son réseau de configuration commence par « tasmota- » ou affiche son identifiant.",
+  "pvStep1bJoin": "Rejoignez tasmota-XXXX dans les réglages Wi-Fi.",
+  "pvStep1bPick": "Choisissez ce réseau dans la liste ci-dessous.",
+  "pvStep1bOpen": "Ouvrez les réglages Wi-Fi et rejoignez ce réseau.",
+  "pvStep1cRecovery": "Revenez ici — votre identifiant est conservé ; c'est une correction Wi-Fi, pas un nouvel enregistrement.",
+  "pvStep1cNormal": "Revenez ici et continuez.",
+  "pvSelectAp": "Choisir le Wi-Fi de l'appareil",
+  "pvContinue": "Continuer",
+  "pvDeviceNetwork": "Réseau de l'appareil",
+  "pvJoinAp": "Rejoindre le réseau",
+  "pvOpenSettings": "Ouvrir les réglages Wi-Fi",
+  "pvNotFoundHint": "Si vous ne trouvez pas l'appareil, éteignez puis rallumez le Wi-Fi et réessayez. Sinon, coupez puis remettez rapidement l'alimentation de l'appareil 6 à 7 fois pour le réinitialiser.",
+  "pvSearchAgain": "Rechercher à nouveau",
+  "pvRecoveryBtn": "Instructions de récupération",
+  "pvRecoveryTitle": "Étapes de récupération",
+  "pvRecoverySteps": "1. Redémarrez l'appareil et attendez 30 secondes que son point d'accès (tasmota-XXXX) apparaisse.\n\n2. Ouvrez les réglages Wi-Fi et connectez-vous au réseau tasmota-XXXX.\n\n3. Revenez ici et appuyez sur Continuer.\n\n4. Vérifiez le nom et le mot de passe du Wi-Fi domestique, puis appuyez sur Configurer l'appareil.",
+  "pvConfigure": "Configurer l'appareil",
+  "pvStep2": "ÉTAPE 2 SUR 3",
+  "pvHomeWifi": "WI-FI DOMESTIQUE",
+  "pvSsidHint": "Nom du réseau (SSID)",
+  "pvWifiPwdHint": "Mot de passe Wi-Fi",
+  "pvWrongPwd": "Mot de passe incorrect. Vérifiez-le et réessayez.",
+  "pvDeviceSection": "APPAREIL",
+  "pvDeviceNameHint": "Nom de l'appareil",
+  "pvDeviceIdLbl": "Identifiant de l'appareil",
+  "pvDeviceIdPending": "lu depuis l'appareil à sa connexion",
+  "pvMac": "MAC",
+  "pvWifiFailed": "Échec de la connexion Wi-Fi",
+  "pvWifiFailedGeneric": "L'appareil n'a pas pu se connecter à ce réseau Wi-Fi. Vérifiez le nom et le mot de passe, puis réessayez.",
+  "pvWifiFailedHint": "Votre appareil est toujours connecté au Wi-Fi de configuration, vous pouvez corriger les identifiants et retester.",
+  "pvTryAgain": "Réessayer",
+  "pvChangeWifi": "Changer de Wi-Fi",
+  "pvTestContinue": "Tester le Wi-Fi et continuer",
+  "pvTestingWifi": "Test de la connexion Wi-Fi…\nGardez votre téléphone connecté à l'appareil.",
+  "pvWifiNetworkLbl": "Réseau Wi-Fi",
+  "pvSelectWifi": "Choisir le réseau Wi-Fi",
+  "pvWaiting": "Attente de l'appareil",
+  "pvStep3": "ÉTAPE 3 SUR 3",
+  "pvWaitHint": "L'appareil rejoindra votre Wi-Fi et se connectera au cloud automatiquement.",
+  "pvReconfigure": "Reconfigurer le Wi-Fi",
+  "pvWaitLonger": "Attendre encore un peu",
+  "pvWaitLongerHint": "Vous pouvez aussi redémarrer l'appareil pour qu'il se reconnecte, puis continuer d'attendre ici.",
+  "pvLocalNotReady": "Contrôle local indisponible",
+  "pvPreparingLocal": "Préparation du contrôle local…",
+  "pvLocalSection": "CONTRÔLE LOCAL",
+  "pvEnabling": "ACTIVATION…",
+  "pvLocalAddedHint": "L'appareil est déjà ajouté à votre compte — vous pouvez le piloter via le cloud en attendant le contrôle local. Réessayer active le contrôle local direct sans réclamer l'appareil.",
+  "pvLocalAddedBody": "L'appareil a été ajouté à votre compte. Activation du contrôle local direct…",
+  "pvRetryLocal": "Réessayer le contrôle local",
+  "pvContinueBg": "Continuer en arrière-plan",
+  "pvTerminalAdded": "Appareil déjà ajouté",
+  "pvTerminalRegistered": "Appareil déjà enregistré",
+  "pvTerminalUnreadable": "Identité de l'appareil illisible",
+  "pvTerminalGeneric": "L'appareil n'est pas encore connecté",
+  "pvPhaseConnect": "Connexion",
+  "pvPhaseConfigure": "Configuration",
+  "pvPhaseWait": "Attente",
+  "pvWaitRebooting": "REDÉMARRAGE",
+  "pvWaitJoining": "CONNEXION WI-FI",
+  "pvWaitMqtt": "CONNEXION MQTT",
+  "pvWaitDetected": "APPAREIL DÉTECTÉ",
+  "pvWaitVerifying": "VÉRIFICATION",
+  "pvWaitClaiming": "ENREGISTREMENT",
+  "pvWaitFinalizing": "FINALISATION",
+  "pvWaitDone": "TERMINÉ",
+  "pvWaitFailed": "ÉCHEC",
+  "pvWaitWaiting": "ATTENTE",
+  "pvChecklistReboot": "Redémarrage de l'appareil...",
+  "pvChecklistWifi": "Connexion à votre Wi-Fi...",
+  "pvChecklistCloud": "Connexion au cloud...",
+  "pvSelectWifiTitle": "Choisir le réseau Wi-Fi",
+  "pvRescan": "Analyser à nouveau",
+  "pvScanUnavailable": "Analyse Wi-Fi indisponible. Saisissez votre réseau manuellement.",
+  "pvNoNetworks": "Aucun réseau Wi-Fi trouvé.",
+  "pvScanTimeout": "L'analyse Wi-Fi a expiré. Touchez actualiser pour réessayer.",
+  "pvEnterManual": "Saisir le réseau manuellement",
+  "pvSelectApTitle": "Choisir le Wi-Fi de l'appareil",
+  "pvTapAp": "Touchez ci-dessous le réseau de configuration de votre appareil pour vous connecter.",
+  "pvScanUnavailableSettings": "Analyse Wi-Fi indisponible. Ouvrez plutôt les réglages Wi-Fi.",
+  "pvNoNetworksNearby": "Aucun réseau Wi-Fi trouvé à proximité.",
+  "pvLocationOff": "Android masque les réseaux Wi-Fi proches aux applications tant que la localisation est désactivée.",
+  "pvTurnOnLocation": "Activer la localisation",
+  "pvPermDenied": "L'analyse Wi-Fi nécessite l'autorisation de localisation de cette application.",
+  "pvAllowSettings": "Autoriser dans les réglages",
+  "pvDeviceNets": "RÉSEAUX DE CONFIGURATION",
+  "pvOtherNets": "AUTRES RÉSEAUX WI-FI",
+  "pvApChip": "APPAREIL",
+  "pvManualJoin": "Manuel : rejoignez vous-même le réseau de l'appareil dans les réglages Android",
+  "pvDetectedTap": "Détecté — touchez pour connecter",
+  "@pvSignalLine": {
+    "placeholders": {
+      "signal": { "type": "String" },
+      "id": { "type": "String" }
+    }
+  },
+  "pvSignalLine": "Signal {signal}  ·  ID …{id}",
+  "pvSignalStrong": "Fort",
+  "pvSignalGood": "Bon",
+  "pvSignalFair": "Moyen",
+  "pvSignalWeak": "Faible",
+  "@pvSweepHeader": {
+    "placeholders": {
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "name": { "type": "String" }
+    }
+  },
+  "pvSweepHeader": "Étape {step}/{total} — {name}",
+  "@pvSweepBusy": {
+    "placeholders": {
+      "name": { "type": "String" },
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvSweepBusy": "Configuration de l'appareil — étape {step}/{total} ({name}) · {secs} s",
+  "pvEnterDeviceName": "Saisissez un nom d'appareil.",
+  "pvEnterHomeWifi": "Sélectionnez ou saisissez votre réseau Wi-Fi domestique.",
+  "pvDeviceUnreachable": "L'appareil n'est plus joignable sur son Wi-Fi de configuration. Il a probablement rejoint votre réseau domestique ; redémarrez-le et, s'il se reconnecte au lieu d'afficher le point d'accès tasmota-XXXX, réinitialisez-le (bouton ~10 s), puis réessayez.",
+  "pvIdentityUnreadable": "L'identité de l'appareil n'a pas pu être lue. Redémarrez l'appareil et réessayez.",
+  "pvIdentityLost": "L'identité de l'appareil a été perdue. Veuillez réessayer.",
+  "pvReachStees": "Impossible de joindre STEES. Attente et nouvel essai…",
+  "pvAlreadyExists": "L'appareil existe déjà. Vous devez le supprimer avant de le réclamer.",
+  "pvAlreadyRegistered": "Cet appareil est déjà enregistré sur un autre compte et ne peut pas être ajouté au vôtre.",
+  "pvInvalidMac": "L'appareil n'a pas correctement communiqué son identité. Fermez cette fenêtre et réessayez.",
+  "pvBadRequest": "Cet appareil n'a pas pu être enregistré auprès de STEES. Fermez et réessayez.",
+  "pvAccessDenied": "Accès refusé. Reconnectez-vous et réessayez.",
+  "pvSteesRejected": "STEES a rejeté cet appareil. Fermez et réessayez.",
+  "pvNotSeen": "L'appareil n'est pas encore sur le cloud. Attente et nouvel essai…",
+  "pvRateLimited": "Trop de requêtes vers STEES. Petite pause puis nouvel essai…",
+  "pvSteesBusy": "STEES est occupé. Attente et nouvel essai…",
+  "pvNoLongerConnected": "Vous n'êtes plus connecté au réseau de configuration — reconnectez-vous et continuez.",
+  "@pvSettingRetry": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingRetry": "L'appareil n'a pas accepté un réglage (étape en échec : {step}). Il est toujours joignable — réessayez.",
+  "@pvSettingReset": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingReset": "L'appareil n'a pas accepté tous les réglages (étape en échec : {step}). Redémarrez-le (bouton ~10 s pour réinitialiser s'il n'affiche plus le point d'accès tasmota-XXXX), puis réessayez.",
+  "@pvConnectingTo": {
+    "placeholders": {
+      "ssid": { "type": "String" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvConnectingTo": "Connexion à {ssid}… ({secs} s)",
+  "@pvCheckingDevice": {
+    "placeholders": { "secs": { "type": "int" } }
+  },
+  "pvCheckingDevice": "Vérification de l'appareil… ({secs} s)",
+  "@pvApLost": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApLost": "La connexion à « {ssid} » a été perdue avant le début de la configuration. Restez près de l'appareil et réessayez.",
+  "pvBindFailed": "Le téléphone n'a pas pu router le trafic vers le réseau de l'appareil. Éteignez puis rallumez le Wi-Fi, puis réessayez.",
+  "@pvApTimeout": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApTimeout": "Le système a mis trop longtemps à rejoindre « {ssid} ». Vérifiez que l'appareil est allumé et en mode appairage, puis réessayez.",
+  "@pvApFailed": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApFailed": "Impossible de se connecter au réseau de configuration {ssid}. Vérifiez que l'appareil est allumé et en mode configuration. Si la demande a été refusée ou que le réseau est protégé, ouvrez plutôt les réglages Wi-Fi.",
+  "pvDefaultName": "Appareil intelligent STEES",
+  "pvLocalFallback": "Le contrôle local HTTP n'a pas pu être activé et vérifié sur l'appareil. Assurez-vous que ce téléphone est sur le même Wi-Fi que l'appareil, puis réessayez.",
+  "pvLocalUnknownIp": "L'adresse de l'appareil est encore inconnue de ce téléphone — assurez-vous qu'il est sur le même réseau Wi-Fi que l'appareil, puis réessayez.",
+  "@pvDiagBadIp": {
+    "placeholders": { "ip": { "type": "String" } }
+  },
+  "pvDiagBadIp": "L'adresse IP LAN signalée par le backend ({ip}) est invalide.",
+  "@pvDiagDiscovery": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagDiscovery": "Échec de la découverte locale ({detail}). Assurez-vous que ce téléphone est sur le même Wi-Fi que l'appareil.",
+  "pvDiagNoEndpoint": "Aucun point de terminaison HTTP local joignable pour l'appareil. Assurez-vous que ce téléphone est sur le même Wi-Fi que l'appareil, puis réessayez.",
+  "@pvDiagRejected": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagRejected": "L'appareil a rejeté ou n'a pas confirmé l'activation SetOption128 ({detail}).",
+  "pvDiagHttpApi": "L'appareil n'a pas confirmé l'activation de son API HTTP (StatusNET.HTTP_API != 1). Relancez l'assistant ou vérifiez la console de l'appareil.",
+  "@pvDiagFinalCheck": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagFinalCheck": "Échec de la vérification d'état finale ({detail}).",
+  "pvBrokerFailed": "Impossible de charger l'adresse du broker MQTT. Rouvrez Ajouter un appareil avec une connexion internet.",
+  "pvBrokerLoadFailed": "Impossible de charger l'adresse du broker MQTT depuis le backend. Vérifiez votre connexion, puis rouvrez Ajouter un appareil.",
+  "pvWifiSettingsFailed": "Impossible d'ouvrir les réglages Wi-Fi.",
+  "pvNoIp": "L'appareil s'est connecté au réseau mais n'a pas reçu d'adresse IP. Le nom et le mot de passe sont corrects ; vérifiez que le réseau accepte de nouveaux appareils.",
+  "pvSsidNotFound": "L'appareil n'a pas trouvé ce réseau Wi-Fi. Vérifiez le nom et réessayez.",
+  "pvWrongPasswordMsg": "L'appareil n'a pas pu se connecter à ce réseau Wi-Fi. Le mot de passe est peut-être incorrect.",
+  "pvLocalError": "L'appareil n'a pas répondu au test Wi-Fi. Vérifiez que votre téléphone est toujours connecté au Wi-Fi de l'appareil et réessayez.",
+  "pvWifiVerified": "Connexion Wi-Fi vérifiée.",
+  "pvWifiUnknown": "L'appareil n'a pas pu se connecter à ce réseau Wi-Fi. Vérifiez le nom et le mot de passe, puis réessayez.",
+  "pvGettingReady": "Préparation…",
+  "pvConnecting": "Connexion à l'appareil",
+  "pvReconnecting": "Reconnexion à l'appareil",
+  "pvConfiguring": "Configuration de l'appareil",
+  "pvTesting": "Test de la connexion Wi-Fi…",
+  "pvWifiFailedShort": "Échec de la connexion Wi-Fi",
+  "pvWifiVerifiedShort": "Wi-Fi vérifié",
+  "pvRestarting": "Connexion de l'appareil au Wi-Fi…",
+  "pvRebooting": "Redémarrage de l'appareil…",
+  "pvConnectingMqtt": "Connexion de l'appareil à MQTT…",
+  "pvRegistering": "Enregistrement de l'appareil…",
+  "pvEnablingLocal": "Activation du contrôle local…",
+  "pvWaitingWifi": "En attente de votre Wi-Fi…",
+  "pvDeviceReady": "Appareil prêt",
+  "pvProvisionFailed": "Échec de la configuration",
+  "pvCancelled": "Annulé",
+  "pvSweepWifiTest": "test-wifi",
+  "pvSweepBroker": "broker",
+  "pvSweepTopic": "topic",
+  "pvSweepModule": "module",
+  "pvSweepName": "nom",
+  "pvSweepSsid": "ssid",
+  "pvSweepVerify": "vérification",
+  "pvSweepRestart": "redémarrage",
+  "pvTryDifferent": "Essayer un autre réseau",
+  "pvShowPassword": "Afficher le mot de passe",
+  "pvHidePassword": "Masquer le mot de passe",
+
+  "adWifiOff": "Wi-Fi désactivé",
+  "adWifiOffHint": "Votre téléphone doit activer le Wi-Fi pour trouver et rejoindre le réseau de configuration de l'appareil.",
+  "adTurnOn": "Activer le Wi-Fi",
+  "adTitle": "Ajouter un appareil",
+  "adHeading": "Ajouter un appareil",
+  "adGuided": "CONFIGURATION GUIDÉE",
+  "adWizardHint": "Le Wi-Fi doit être activé sur votre téléphone — l'assistant en a besoin pour trouver et rejoindre le réseau de configuration de l'appareil.",
+  "adProvision": "Configurer un nouvel appareil",
+
+  "asEnterNameId": "Saisissez un nom et un identifiant de capteur",
+  "asSelectDevice": "Sélectionnez l'appareil Sonoff de ce capteur",
+  "asAdded": "Capteur connecté avec succès.",
+  "asAddedHint": "Votre capteur est maintenant lié à l'appareil Sonoff.",
+  "asCheckId": "Vérifiez l'identifiant du capteur et assurez-vous que l'ESP32 est connecté.",
+  "asNotFound": "Capteur introuvable",
+  "asTitle": "Ajouter un capteur",
+  "asLink": "ASSOCIER UN CAPTEUR",
+  "asLinkHint": "Le capteur sera vérifié via MQTT avant d'être ajouté. Assurez-vous que votre ESP32 est allumé pour être détecté.",
+  "asDetails": "Détails du capteur",
+  "asDetailsHint": "Saisissez l'identifiant du capteur exactement comme configuré sur l'appareil, puis choisissez son contrôleur Sonoff.",
+  "asNameHint": "Nom du capteur",
+  "asNameHelper": "ex. Humidité du sol",
+  "asIdHint": "Identifiant du capteur",
+  "asIdHelper": "ex. soil_1",
+  "asSearching": "Recherche du capteur...",
+  "asSearchingHint": "En attente du rapport du capteur via MQTT. Cela peut prendre quelques secondes.",
+  "asDeviceLbl": "Appareil",
+  "asNoDevices": "Aucun appareil Sonoff",
+  "asSelectHint": "Sélectionnez l'appareil Sonoff",
+  "asDeviceHelper": "ex. Sonoff de la serre",
+
+  "apiTimeout": "La requête a expiré. Veuillez réessayer.",
+  "apiUnreachable": "Impossible de joindre le serveur. Vérifiez votre connexion.",
+  "apiSignup": "Échec de l'inscription",
+  "apiLogin": "Échec de la connexion",
+  "apiFetchDevices": "Échec du chargement des appareils",
+  "apiRegisterDevice": "Impossible d'enregistrer l'appareil",
+  "apiCheckDevice": "Impossible de vérifier l'appareil",
+  "apiCheckDeviceStatus": "Impossible de vérifier le statut de l'appareil",
+  "apiFetchStatus": "Échec de la récupération du statut",
+  "apiBrokerInfo": "Impossible de charger les infos du broker",
+  "apiBrokerHost": "Hôte manquant dans les infos du broker",
+  "apiBrokerPort": "Port manquant dans les infos du broker",
+  "apiControl": "Échec de la commande",
+  "apiUnclaim": "Échec de la libération de l'appareil",
+  "apiDeleteDevice": "Échec de la suppression de l'appareil",
+  "apiFetchSensors": "Échec du chargement des capteurs",
+  "apiAddSensor": "Échec de l'ajout du capteur",
+  "apiDeleteSensor": "Échec de la suppression du capteur",
+  "apiFetchRules": "Échec du chargement des règles",
+  "apiCreateRule": "Échec de la création de la règle",
+  "apiUpdateRule": "Échec de la mise à jour de la règle",
+  "apiToggleRule": "Échec du basculement de la règle",
+  "apiDeleteRule": "Échec de la suppression de la règle",
+  "apiFetchSchedules": "Échec du chargement des programmes",
+  "apiCreateSchedule": "Échec de la création du programme",
+  "apiUpdateSchedule": "Échec de la mise à jour du programme",
+  "apiToggleSchedule": "Échec du basculement du programme",
+  "apiDeleteSchedule": "Échec de la suppression du programme",
+  "apiSendMqtt": "Échec de l'envoi de la commande MQTT",
+  "apiLoadWeather": "Échec du chargement de la météo",
+  "apiLoadAdvisories": "Échec du chargement des alertes",
+  "apiUpdateLocation": "Échec de la mise à jour de l'emplacement",
+  "apiRemoveLocation": "Échec du retrait de l'emplacement",
+  "apiRegisterToken": "Échec de l'enregistrement du jeton push",
+  "apiDeleteToken": "Échec de la suppression du jeton push",
+
+  "ntChannel": "Météo STEES",
+  "ntChannelDesc": "Alertes de chevauchement pluie — alerte quand l'irrigation chevauche la pluie prévue",
+  "ntRainExpected": "Pluie attendue",
+  "ntCheckSchedule": "Vérifiez votre programme d'irrigation",
+
+  "relayTypeOne": "1 relais",
+  "relayTypeFour": "4 relais"
+}

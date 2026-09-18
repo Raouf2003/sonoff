@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
 import '../theme/app_theme.dart';
 
 class WeatherAdvisoryChip extends StatelessWidget {
@@ -9,6 +10,7 @@ class WeatherAdvisoryChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final isOverlap = advisory['type'] != 'adjacent';
     final rainStart = advisory['rainStart'] ?? '--:--';
     final rainEnd = advisory['rainEnd'] ?? '--:--';
@@ -29,7 +31,12 @@ class WeatherAdvisoryChip extends StatelessWidget {
           const SizedBox(width: 6),
           Flexible(
             child: Text(
-              'Rain $rainStart–$rainEnd · ${mm ?? '?'} mm · ${prob ?? '?'}%',
+              l10n.wRainChip(
+                rainStart.toString(),
+                rainEnd.toString(),
+                '${mm ?? '?'}',
+                '${prob ?? '?'}',
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: color),

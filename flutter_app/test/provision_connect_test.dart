@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/theme/app_theme.dart';
@@ -19,37 +20,44 @@ void main() {
   });
 
   Future<void> pumpWizard(WidgetTester tester) async {
-    await tester.pumpWidget(MaterialApp(
-      theme: AppTheme.light(),
-      home: ProvisionDeviceScreen.forTest(
-        // The wizard's broker-info pre-fetch (backed by a real ApiService)
-        // would open a real HTTP request that can never resolve under
-        // FakeAsync — inject a deterministic backend so the Connect step is
-        // actually reachable offline and no probe/timer leaks past the test.
-        testApi: _ConnectFakeApi(),
-        testWarmUp: (_) async {},
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
+        theme: AppTheme.light(),
+        home: ProvisionDeviceScreen.forTest(
+          // The wizard's broker-info pre-fetch (backed by a real ApiService)
+          // would open a real HTTP request that can never resolve under
+          // FakeAsync — inject a deterministic backend so the Connect step is
+          // actually reachable offline and no probe/timer leaks past the test.
+          testApi: _ConnectFakeApi(),
+          testWarmUp: (_) async {},
+        ),
       ),
-    ));
+    );
     await tester.pump();
   }
 
   group('Connect step (offline, no session)', () {
-    testWidgets('renders immediately with Open Wi-Fi Settings available',
-        (tester) async {
+    testWidgets('renders immediately with Open Wi-Fi Settings available', (
+      tester,
+    ) async {
       await pumpWizard(tester);
 
       // The instructions render as a numbered checklist under the phase
       // header; the manual path names Wi-Fi Settings in step 2.
       expect(find.text('Join the device network'), findsOneWidget);
       expect(
-          find.textContaining('Open Wi-Fi Settings and join that network.'),
-          findsOneWidget);
+        find.textContaining('Open Wi-Fi Settings and join that network.'),
+        findsOneWidget,
+      );
       expect(find.text('Open Wi-Fi Settings'), findsOneWidget);
       expect(find.text('Continue'), findsOneWidget);
     });
 
-    testWidgets('Open Wi-Fi Settings button is enabled from the start',
-        (tester) async {
+    testWidgets('Open Wi-Fi Settings button is enabled from the start', (
+      tester,
+    ) async {
       await pumpWizard(tester);
 
       final button = tester.widget<FilledButton>(
@@ -58,8 +66,11 @@ void main() {
           matching: find.byType(FilledButton),
         ),
       );
-      expect(button.onPressed, isNotNull,
-          reason: 'Wi-Fi Settings must be reachable with no session gate');
+      expect(
+        button.onPressed,
+        isNotNull,
+        reason: 'Wi-Fi Settings must be reachable with no session gate',
+      );
     });
 
     testWidgets('no session-preparation UI is shown', (tester) async {
@@ -69,8 +80,9 @@ void main() {
       expect(find.text("Couldn't prepare device setup"), findsNothing);
     });
 
-    testWidgets('three-step progress bar shows Connect as the active step',
-        (tester) async {
+    testWidgets('three-step progress bar shows Connect as the active step', (
+      tester,
+    ) async {
       await pumpWizard(tester);
 
       expect(find.text('Connect'), findsOneWidget);
@@ -84,8 +96,11 @@ void main() {
       final labels = <String>[
         for (final s in ProvisionState.values) provisionUserLabel(s),
       ];
-      expect(labels.contains('Preparing device'), isFalse,
-          reason: 'the wizard must never prepare a backend session');
+      expect(
+        labels.contains('Preparing device'),
+        isFalse,
+        reason: 'the wizard must never prepare a backend session',
+      );
       expect(labels.contains('Preparing device setup…'), isFalse);
     });
   });

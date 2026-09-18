@@ -90,9 +90,31 @@ enum RegistrationState {
 /// rerouted: an identity violation is a security/ownership matter and an
 /// unconfirmed command means the device was already contacted, so a resend
 /// would be a duplicate execution.
+/// Machine-readable kind of a claim-time local HTTP setup failure, so the
+/// provisioning wizard can render a localized diagnostic without parsing
+/// display text. The English `lastLocalSetupError` message is unchanged.
+enum LocalSetupErrorKind {
+  /// The backend-reported LAN IP failed validation.
+  badReportedIp,
+
+  /// The discovery ladder threw (mDNS/lookup error in [detail]).
+  discoveryFailed,
+
+  /// No local HTTP endpoint was reachable at all.
+  noEndpoint,
+
+  /// The device rejected or did not confirm the SetOption128 enable.
+  enableRejected,
+
+  /// `StatusNET.HTTP_API` did not report `1` after the enable.
+  httpApiUnconfirmed,
+
+  /// The final referer-less state read-back failed.
+  finalCheckFailed,
+}
+
 class DeviceRepositoryService {
-  DeviceRepositoryService({
-    CloudDeviceTransport? cloud,
+  DeviceRepositoryService({    CloudDeviceTransport? cloud,
     DeviceLocator? locator,
     TasmotaCmFetcher? fetch,
     LocalDeviceCache? cache,
@@ -142,9 +164,32 @@ class DeviceRepositoryService {
   /// success.
   String? _lastSetupError;
 
+  /// Machine-readable kind of [_lastSetupError], so the wizard can render a
+  /// localized diagnostic without parsing display text. `null` together with
+  /// [_lastSetupError].
+  LocalSetupErrorKind? _lastSetupErrorKind;
+
+  /// Dynamic detail (IP address, transport error) for [_lastSetupErrorKind].
+  String? _lastSetupErrorDetail;
+
   /// Latest `enableLocalHttpApi` failure reason to surface on the wizard's
   /// diagnostic screen. `null` when setup never ran or last succeeded.
   String? get lastLocalSetupError => _lastSetupError;
+
+  /// Machine-readable kind of [lastLocalSetupError] for localized display.
+  LocalSetupErrorKind? get lastLocalSetupErrorKind => _lastSetupErrorKind;
+
+  /// Dynamic detail (IP, transport error) for [lastLocalSetupErrorKind].
+  String? get lastLocalSetupErrorDetail => _lastSetupErrorDetail;
+
+  /// Records a setup failure with its machine-readable kind. The English
+  /// message is preserved verbatim for logs and existing tests.
+  void _setSetupError(LocalSetupErrorKind kind, String message,
+      {String? detail}) {
+    _lastSetupError = message;
+    _lastSetupErrorKind = kind;
+    _lastSetupErrorDetail = detail;
+  }
 
   /// Transport that produced the most recent successful result. `null` before
   /// the first result or when the last attempt failed everywhere.
@@ -195,6 +240,8 @@ class DeviceRepositoryService {
   /// uses it locally on the next tap.
   Future<bool> enableLocalHttpApi(String deviceId, {String? lastIp}) async {
     _lastSetupError = null;
+    _lastSetupErrorKind = null;
+    _lastSetupErrorDetail = null;
     _logSetup('setup started');
 
     String? cached;
@@ -220,7 +267,11 @@ class DeviceRepositoryService {
     // enable.
     if (lastIp != null && lastIp.isNotEmpty) {
       if (!isValidLocalIp(lastIp)) {
-        _lastSetupError = 'The backend-reported LAN IP $lastIp was invalid.';
+        _setSetupError(
+          LocalSetupErrorKind.badReportedIp,
+          'The backend-reported LAN IP $lastIp was invalid.',
+          detail: lastIp,
+        );
         _logSetup('backend lastIp rejected (invalid): $lastIp');
       } else {
         _logSetup('backend lastIp accepted');
@@ -266,9 +317,12 @@ class DeviceRepositoryService {
       // possible mDNS sweep stay inside kLocalBudget.
       local = await _findLocal(deviceId, urgent: true).timeout(kLocalBudget);
     } on Object catch (e) {
-      _lastSetupError =
-          'Local discovery failed (${_describe(e)}). Make sure this phone is '
-          'on the same Wi-Fi as the device.';
+      _setSetupError(
+        LocalSetupErrorKind.discoveryFailed,
+        'Local discovery failed (${_describe(e)}). Make sure this phone is '
+        'on the same Wi-Fi as the device.',
+        detail: _describe(e),
+      );
       _logSetup('discovery lookup failed: ${_describe(e)}');
       return false;
     }
@@ -277,9 +331,13 @@ class DeviceRepositoryService {
       return _directBootstrap(local, deviceId);
     }
 
-    _lastSetupError ??=
+    if (_lastSetupError == null) {
+      _setSetupError(
+        LocalSetupErrorKind.noEndpoint,
         'No local HTTP endpoint was reachable for the device. Make sure this '
-        'phone is on the same Wi-Fi as the device, then try again.';
+        'phone is on the same Wi-Fi as the device, then try again.',
+      );
+    }
     _logSetup('failed: no reachable LAN endpoint');
     return false;
   }
@@ -295,9 +353,12 @@ class DeviceRepositoryService {
       await transport.enableHttpApi();
       _logSetup('enableHttpApi result: SetOption128 accepted');
     } on Object catch (e) {
-      _lastSetupError =
-          'The device rejected or did not confirm the SetOption128 enable '
-          '(${_describe(e)}).';
+      _setSetupError(
+        LocalSetupErrorKind.enableRejected,
+        'The device rejected or did not confirm the SetOption128 enable '
+        '(${_describe(e)}).',
+        detail: _describe(e),
+      );
       _logSetup('enableHttpApi result: ${_describe(e)}');
       return false;
     }
@@ -305,10 +366,12 @@ class DeviceRepositoryService {
     // `StatusNET.HTTP_API == 1` (referer'd probe, MAC-verified).
     _logSetup('before HTTP_API verification');
     if (!await transport.verifyHttpApiEnabled()) {
-      _lastSetupError =
-          'The device did not confirm its HTTP API is enabled '
-          '(StatusNET.HTTP_API != 1). Restart the wizard or check the device '
-          'console.';
+      _setSetupError(
+        LocalSetupErrorKind.httpApiUnconfirmed,
+        'The device did not confirm its HTTP API is enabled '
+        '(StatusNET.HTTP_API != 1). Restart the wizard or check the device '
+        'console.',
+      );
       _logSetup('HTTP_API verification failed');
       return false;
     }
@@ -344,8 +407,11 @@ class DeviceRepositoryService {
       _logSetup('persisted verified IP: ${transport.address}');
       return true;
     } on Object catch (e) {
-      _lastSetupError =
-          'The final referer-less state check failed (${_describe(e)}).';
+      _setSetupError(
+        LocalSetupErrorKind.finalCheckFailed,
+        'The final referer-less state check failed (${_describe(e)}).',
+        detail: _describe(e),
+      );
       _logSetup('final verification failed: ${_describe(e)}');
       return false;
     }

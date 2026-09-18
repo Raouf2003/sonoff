@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
@@ -74,9 +75,10 @@ class _SensorsPageState extends State<SensorsPage> {
   Widget build(BuildContext context) {
     if (_loading) return const SteesLoading();
     if (_loadError) {
+      final l10n = AppLocalizations.of(context)!;
       return SteesError(
-        title: 'Could not load sensors',
-        subtitle: 'Check your connection and try again.',
+        title: l10n.senLoadFailed,
+        subtitle: l10n.sharedCheckConnection,
         onRetry: _load,
       );
     }
@@ -85,14 +87,15 @@ class _SensorsPageState extends State<SensorsPage> {
   }
 
   Widget _buildEmpty() {
+    final l10n = AppLocalizations.of(context)!;
     return SteesEmpty(
       icon: Icons.sensors,
-      title: 'No sensors yet',
-      subtitle: 'Add a soil moisture sensor to\nmonitor your irrigation zones.',
+      title: l10n.senEmptyTitle,
+      subtitle: l10n.senEmptyHint,
       action: FilledButton.icon(
         onPressed: _openAddSensor,
         icon: const Icon(Icons.add, size: 18),
-        label: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+        label: Text(l10n.senAdd, style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
         style: FilledButton.styleFrom(
           backgroundColor: context.steesColors.stream,
           foregroundColor: context.steesColors.well,
@@ -104,10 +107,11 @@ class _SensorsPageState extends State<SensorsPage> {
   }
 
   Widget _buildSensorList() {
+    final l10n = AppLocalizations.of(context)!;
     return Column(
       children: [
         SteesSectionHeader(
-          title: 'SENSORS',
+          title: l10n.senSection,
           count: _sensors.length,
           trailing: _AddButton(onTap: _openAddSensor),
         ),
@@ -143,6 +147,7 @@ class _AddButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -157,7 +162,7 @@ class _AddButton extends StatelessWidget {
           children: [
             Icon(Icons.add, size: 14, color: colors.stream),
             const SizedBox(width: AppSpacing.xs),
-            Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: colors.stream)),
+            Text(l10n.sharedAdd, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: colors.stream)),
           ],
         ),
       ),
@@ -182,6 +187,7 @@ class _SensorCardState extends State<_SensorCard> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final s = widget.sensor;
     final id = s['sensorId'] as String? ?? '';
     final name = s['name'] as String? ?? id;
@@ -217,7 +223,7 @@ class _SensorCardState extends State<_SensorCard> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'ID: $id',
+                          l10n.sharedIdValue(id),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
@@ -231,7 +237,7 @@ class _SensorCardState extends State<_SensorCard> {
               const SizedBox(height: AppSpacing.md),
               SteesInfoRow(
                 icon: Icons.settings_input_hdmi,
-                label: 'Device: ${widget.deviceName}',
+                label: l10n.sharedDeviceValue(widget.deviceName),
                 value: online
                     ? Text(
                         _fmtValue(value),
@@ -245,7 +251,7 @@ class _SensorCardState extends State<_SensorCard> {
                 child: OutlinedButton.icon(
                   onPressed: widget.onTap,
                   icon: const Icon(Icons.rule, size: 15),
-                  label: Text('Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                  label: Text(l10n.senRuleBtn, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colors.foam,
                     side: BorderSide(color: colors.border),
@@ -277,6 +283,7 @@ class _StatusBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final color = online ? colors.leaf : colors.mist;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -290,7 +297,7 @@ class _StatusBadge extends StatelessWidget {
           Container(width: 5, height: 5, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
           const SizedBox(width: 4),
           Text(
-            online ? 'Online' : 'Offline',
+            online ? l10n.sharedOnline : l10n.sharedOffline,
             style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color),
           ),
         ],

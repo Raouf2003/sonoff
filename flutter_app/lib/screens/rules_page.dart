@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 import '../widgets/stees_widgets.dart';
@@ -62,31 +64,33 @@ class _RulesPageState extends State<RulesPage> {
   Future<void> _toggleRule(Map<String, dynamic> rule) async {
     final id = rule['_id'] as String;
     final target = !((rule['enabled'] as bool?) ?? false);
+    final l10n = AppLocalizations.of(context)!;
     setState(() => rule['enabled'] = target);
     try {
       await _api.toggleRule(id);
     } catch (e) {
       if (!mounted) return;
       setState(() => rule['enabled'] = !target);
-      _showError(e is ApiException ? e.message : 'Could not update the rule');
+      _showError(e is ApiException ? friendlyError(e, l10n) : l10n.ruleUpdateFailed);
     }
   }
 
   Future<void> _deleteRule(Map<String, dynamic> rule) async {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: colors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
-        title: Text('Delete rule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(l10n.ruleDeleteTitle, style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
         content: Text(
-          '"${rule['name']}" will be removed permanently.',
+          l10n.ruleDeleteConfirm('${rule['name']}'),
           style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(l10n.sharedCancel, style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text(l10n.sharedDelete, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -95,7 +99,9 @@ class _RulesPageState extends State<RulesPage> {
       await _api.deleteRule(rule['_id'] as String);
       if (mounted) _load();
     } catch (e) {
-      if (mounted) _showError(e is ApiException ? e.message : 'Could not delete the rule');
+      if (mounted) {
+        _showError(e is ApiException ? friendlyError(e, l10n) : l10n.ruleDeleteFailed);
+      }
     }
   }
 
@@ -124,10 +130,11 @@ class _RulesPageState extends State<RulesPage> {
 
   void _addRule() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     if (_sensors.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('No sensors available. Add a sensor first.', style: TextStyle(fontSize: 13)),
+          content: Text(l10n.ruleNoSensors, style: const TextStyle(fontSize: 13)),
           backgroundColor: colors.danger,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
@@ -165,12 +172,12 @@ class _RulesPageState extends State<RulesPage> {
               ),
               const SizedBox(height: AppSpacing.lg),
               Text(
-                'Choose a sensor',
+                l10n.ruleChooseSensor,
                 style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam),
               ),
               const SizedBox(height: AppSpacing.sm),
               Text(
-                'Rules control relays based on this sensor\'s readings.',
+                l10n.ruleChooseHint,
                 style: GoogleFonts.inter(fontSize: 12, color: colors.mist),
               ),
               const SizedBox(height: AppSpacing.lg),
@@ -206,7 +213,13 @@ class _RulesPageState extends State<RulesPage> {
                             ],
                           ),
                         ),
-                        Icon(Icons.chevron_right_rounded, size: 20, color: colors.mist),
+                        Icon(
+                          Directionality.of(ctx) == TextDirection.rtl
+                              ? Icons.chevron_left_rounded
+                              : Icons.chevron_right_rounded,
+                          size: 20,
+                          color: colors.mist,
+                        ),
                       ],
                     ),
                   ),
@@ -273,6 +286,7 @@ class _RulesPageState extends State<RulesPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     if (_loading) return const SteesLoading();
     if (_loadError) {
       return Column(
@@ -280,8 +294,8 @@ class _RulesPageState extends State<RulesPage> {
           _buildHeader(),
           Expanded(
             child: SteesError(
-              title: 'Could not load rules',
-              subtitle: 'Check your connection and try again.',
+              title: l10n.ruleLoadFailed,
+              subtitle: l10n.sharedCheckConnection,
               onRetry: _load,
             ),
           ),
@@ -293,10 +307,10 @@ class _RulesPageState extends State<RulesPage> {
         children: [
           _buildHeader(),
           Expanded(
-            child: const SteesEmpty(
+            child: SteesEmpty(
               icon: Icons.rule_outlined,
-              title: 'No rules yet',
-              subtitle: 'Tap "Add Rule" to control a relay\nbased on a sensor\'s readings.',
+              title: l10n.ruleEmptyTitle,
+              subtitle: l10n.ruleEmptyHint(l10n.ruleAdd),
             ),
           ),
         ],
@@ -334,12 +348,13 @@ class _RulesPageState extends State<RulesPage> {
 
   Widget _buildHeader() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Padding(
       padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, AppSpacing.sm),
       child: Row(
         children: [
           Text(
-            'RULES',
+            l10n.ruleSection,
             style: GoogleFonts.sora(
               fontSize: 11,
               fontWeight: FontWeight.w700,
@@ -351,7 +366,7 @@ class _RulesPageState extends State<RulesPage> {
           FilledButton.icon(
             onPressed: _addRule,
             icon: const Icon(Icons.add, size: 16),
-            label: Text('Add Rule', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
+            label: Text(l10n.ruleAdd, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700)),
             style: FilledButton.styleFrom(
               backgroundColor: colors.stream,
               foregroundColor: colors.well,
@@ -394,6 +409,7 @@ class _RuleCardState extends State<_RuleCard> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final rule = widget.rule;
     final enabled = (rule['enabled'] as bool?) ?? false;
     final name = rule['name'] as String? ?? '';
@@ -402,7 +418,7 @@ class _RuleCardState extends State<_RuleCard> {
     final condition = (rule['condition'] as String?) ?? 'below';
     final action = (rule['action'] as String?) ?? 'ON';
     final opposite = action == 'ON' ? 'OFF' : 'ON';
-    final condWord = condition == 'above' ? 'above' : 'below';
+    final condWord = condition == 'above' ? l10n.ruleAbove : l10n.ruleBelow;
     final threshold = rule['threshold'];
     final thresholdLabel = threshold is double && threshold == threshold.roundToDouble()
         ? threshold.toInt().toString()
@@ -437,7 +453,7 @@ class _RuleCardState extends State<_RuleCard> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Sensor: ${widget.sensorName}',
+                          l10n.sharedSensorValue(widget.sensorName),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(fontSize: 11, color: colors.mist),
@@ -463,11 +479,17 @@ class _RuleCardState extends State<_RuleCard> {
                   children: [
                     Row(
                       children: [
-                        _LogicPill(label: 'When $condWord $thresholdLabel', color: colors.stream),
+                        _LogicPill(label: l10n.ruleWhen(condWord, thresholdLabel), color: colors.stream),
                         const Spacer(),
-                        Icon(Icons.arrow_forward_rounded, size: 14, color: colors.mist.withValues(alpha: 0.4)),
+                        Icon(
+                          Directionality.of(context) == TextDirection.rtl
+                              ? Icons.arrow_back_rounded
+                              : Icons.arrow_forward_rounded,
+                          size: 14,
+                          color: colors.mist.withValues(alpha: 0.4),
+                        ),
                         const Spacer(),
-                        _LogicPill(label: '$chLabel → $action', color: colors.leaf),
+                        _LogicPill(label: l10n.ruleActionTarget(chLabel, action), color: colors.leaf),
                       ],
                     ),
                     const SizedBox(height: AppSpacing.sm),
@@ -477,7 +499,7 @@ class _RuleCardState extends State<_RuleCard> {
                         const SizedBox(width: AppSpacing.xs),
                         Flexible(
                           child: Text(
-                            'Otherwise → $chLabel → $opposite',
+                            l10n.ruleOtherwise(chLabel, opposite),
                             overflow: TextOverflow.ellipsis,
                             style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.6)),
                           ),
@@ -491,7 +513,7 @@ class _RuleCardState extends State<_RuleCard> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  Text(enabled ? 'Enabled' : 'Disabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
+                  Text(enabled ? l10n.sharedEnabled : l10n.sharedDisabled, style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                   const SizedBox(width: AppSpacing.sm),
                   Switch(
                     value: enabled,
@@ -503,12 +525,12 @@ class _RuleCardState extends State<_RuleCard> {
                   IconButton(
                     onPressed: widget.onEdit,
                     icon: Icon(Icons.edit_outlined, size: 18, color: colors.stream),
-                    tooltip: 'Edit',
+                    tooltip: l10n.sharedEdit,
                   ),
                   IconButton(
                     onPressed: widget.onDelete,
                     icon: Icon(Icons.delete_outline, size: 18, color: colors.danger),
-                    tooltip: 'Delete',
+                    tooltip: l10n.sharedDelete,
                   ),
                 ],
               ),

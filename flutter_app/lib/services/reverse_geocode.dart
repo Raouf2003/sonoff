@@ -8,12 +8,12 @@ import 'package:http/http.dart' as http;
 // "Ouled Sidi Brahim, M'Sila, Algeria" – so the picker badge is farm-level
 // rather than city-level. Falls back to display_name when address is missing.
 Future<String?> reverseGeocode(double lat, double lon,
-    {http.Client? client}) async {
+    {http.Client? client, String language = 'en'}) async {
   final owned = client == null;
   final httpClient = client ?? http.Client();
   try {
     final uri = Uri.parse(
-        'https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lon&format=jsonv2&zoom=16&addressdetails=1&accept-language=en');
+        'https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lon&format=jsonv2&zoom=16&addressdetails=1&accept-language=$language');
     final res = await httpClient.get(uri, headers: {
       'User-Agent': 'STEES/1.0 (smart irrigation advisory)',
     }).timeout(const Duration(seconds: 8));

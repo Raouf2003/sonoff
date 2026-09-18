@@ -10,6 +10,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:location/location.dart' as loc;
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import '../services/api_service.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../services/reverse_geocode.dart' as geo;
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
@@ -366,8 +368,15 @@ class _WeatherLocationPickerPageState
     final gen = ++_resolveGen;
     setState(() => _resolving = true);
     try {
-      final resolve = widget.reverseGeocode ?? geo.reverseGeocode;
-      final name = await resolve(point.latitude, point.longitude);
+      final String? name;
+      if (widget.reverseGeocode != null) {
+        name = await widget.reverseGeocode!(point.latitude, point.longitude);
+      } else {
+        // Place names follow the app language (server content stays as-is).
+        final language = Localizations.localeOf(context).languageCode;
+        name = await geo.reverseGeocode(point.latitude, point.longitude,
+            language: language);
+      }
       if (!mounted || gen != _resolveGen) return;
       setState(() {
         _placeName = name;
@@ -388,30 +397,31 @@ class _WeatherLocationPickerPageState
     final deviceId = _selectedDeviceId;
     if (deviceId == null) return;
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: colors.surface,
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.xl)),
-        title: Text('Remove location?',
+        title: Text(l10n.pkRemoveTitle,
             style: GoogleFonts.sora(
                 fontSize: 17,
                 fontWeight: FontWeight.w600,
                 color: colors.foam)),
         content: Text(
-            'Weather forecasts will be disabled for this device. Your irrigation schedules are unaffected.',
+            l10n.pkRemoveConfirm,
             style:
                 GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(false),
-              child: Text('Cancel',
+              child: Text(l10n.sharedCancel,
                   style: GoogleFonts.inter(
                       fontSize: 13, color: colors.mist))),
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text('Remove',
+              child: Text(l10n.sharedRemove,
                   style: GoogleFonts.inter(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
@@ -431,14 +441,14 @@ class _WeatherLocationPickerPageState
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = e.message;
+          _error = friendlyError(e, l10n);
         });
       }
     } catch (_) {
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = 'Could not remove location.';
+          _error = l10n.pkRemoveFailed;
         });
       }
     }
@@ -447,8 +457,9 @@ class _WeatherLocationPickerPageState
   Future<void> _save() async {
     final picked = _picked;
     final deviceId = _selectedDeviceId;
+    final l10n = AppLocalizations.of(context)!;
     if (picked == null || deviceId == null) {
-      setState(() => _error = 'Tap the map to choose a location first.');
+      setState(() => _error = l10n.pkChooseFirst);
       return;
     }
     setState(() {
@@ -474,14 +485,14 @@ class _WeatherLocationPickerPageState
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = e.message;
+          _error = friendlyError(e, l10n);
         });
       }
     } catch (_) {
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = 'Could not save location.';
+          _error = l10n.pkSaveFailed;
         });
       }
     }
@@ -490,11 +501,12 @@ class _WeatherLocationPickerPageState
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final center = _picked ?? _mapCenterFallback;
     return Scaffold(
       backgroundColor: colors.well,
       appBar: AppBar(
-        title: Text('Select weather location',
+        title: Text(l10n.pkTitle,
             style: GoogleFonts.sora(
                 fontSize: 17,
                 fontWeight: FontWeight.w600,
@@ -533,9 +545,9 @@ class _WeatherLocationPickerPageState
                   ),
                 ),
                 if (_selectedHasLocation)
-                  Positioned(
+                  PositionedDirectional(
                     top: 12,
-                    right: 12,
+                    end: 12,
                     child: Material(
                       color: colors.surface,
                       borderRadius: BorderRadius.circular(24),
@@ -553,7 +565,7 @@ class _WeatherLocationPickerPageState
                               Icon(Icons.delete_outline,
                                   size: 16, color: colors.danger),
                               const SizedBox(width: 6),
-                              Text('Remove',
+                              Text(l10n.sharedRemove,
                                   style: GoogleFonts.inter(
                                       fontSize: 12,
                                       fontWeight: FontWeight.w700,
@@ -564,8 +576,8 @@ class _WeatherLocationPickerPageState
                       ),
                     ),
                   ),
-                Positioned(
-                  right: 12,
+                PositionedDirectional(
+                  end: 12,
                   bottom: 14,
                   child: _MapZoomCluster(
                     onZoomIn: () => _zoomBy(1),
@@ -574,8 +586,8 @@ class _WeatherLocationPickerPageState
                 ),
                 // Hint pill when nothing picked yet
                 if (_picked == null)
-                  Positioned(
-                    left: 12,
+                  PositionedDirectional(
+                    start: 12,
                     bottom: 14,
                     child: Material(
                       color: colors.submerged.withValues(alpha: 0.92),
@@ -590,7 +602,7 @@ class _WeatherLocationPickerPageState
                             Icon(Icons.touch_app_outlined,
                                 size: 14, color: colors.stream),
                             const SizedBox(width: 6),
-                            Text('Tap map or drag pin',
+                            Text(l10n.pkTapHint,
                                 style: GoogleFonts.inter(
                                     fontSize: 11.5,
                                     fontWeight: FontWeight.w600,
@@ -859,14 +871,14 @@ class _WeatherLocationPickerPageState
                     SizedBox(
                       height: 32,
                       child: Align(
-                        alignment: Alignment.centerLeft,
+                        alignment: AlignmentDirectional.centerStart,
                         child: Text(
                           _placeName ??
                               (picked == null
-                                  ? 'Tap the map to choose the farm location'
+                                  ? AppLocalizations.of(context)!.pkTapChoose
                                   : _resolving
-                                      ? 'Resolving place…'
-                                      : 'Custom map point'),
+                                      ? AppLocalizations.of(context)!.pkResolving
+                                      : AppLocalizations.of(context)!.pkCustom),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(
@@ -880,7 +892,7 @@ class _WeatherLocationPickerPageState
                     SizedBox(
                       height: 12,
                       child: Align(
-                        alignment: Alignment.centerLeft,
+                        alignment: AlignmentDirectional.centerStart,
                         child: picked == null
                             ? const SizedBox.shrink()
                             : Text(
@@ -895,7 +907,7 @@ class _WeatherLocationPickerPageState
               ),
               if (_resolving)
                 Padding(
-                  padding: const EdgeInsets.only(left: 8, top: 3),
+                  padding: const EdgeInsetsDirectional.only(start: 8, top: 3),
                   child: SizedBox(
                     width: 11,
                     height: 11,
@@ -914,7 +926,7 @@ class _WeatherLocationPickerPageState
             dropdownColor: colors.submerged,
             isDense: true,
             decoration: InputDecoration(
-              labelText: 'Use for device',
+              labelText: AppLocalizations.of(context)!.pkUseFor,
               isDense: true,
               contentPadding:
                   const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -991,7 +1003,9 @@ class _WeatherLocationPickerPageState
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: colors.well))
                   : const Icon(Icons.check, size: 16),
-              label: Text(_saving ? 'Saving…' : 'Confirm Location',
+              label: Text(_saving
+                  ? AppLocalizations.of(context)!.pkSaving
+                  : AppLocalizations.of(context)!.pkConfirm,
                   style: GoogleFonts.sora(
                       fontSize: 13.5, fontWeight: FontWeight.w700)),
               style: FilledButton.styleFrom(

@@ -1,6 +1,10 @@
 ﻿import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'l10n/gen/app_localizations.dart';
+import 'l10n/locale_controller.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_controller.dart';
 import 'services/auth_service.dart';
@@ -13,6 +17,12 @@ const String kProtocol = 'https';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // intl weekday/month names used across schedules + weather need explicit
+  // symbol data for Arabic and French (English is built in).
+  try {
+    await initializeDateFormatting('ar');
+    await initializeDateFormatting('fr');
+  } catch (_) {}
   try {
     await Firebase.initializeApp();
   } catch (_) {}
@@ -34,16 +44,19 @@ class SteesApp extends StatefulWidget {
 
 class _SteesAppState extends State<SteesApp> {
   final ThemeController _themeController = ThemeController();
+  final LocaleController _localeController = LocaleController();
 
   @override
   void initState() {
     super.initState();
     _themeController.load();
+    _localeController.load();
   }
 
   @override
   void dispose() {
     _themeController.dispose();
+    _localeController.dispose();
     super.dispose();
   }
 
@@ -52,16 +65,37 @@ class _SteesAppState extends State<SteesApp> {
     return ListenableBuilder(
       listenable: _themeController,
       builder: (context, _) {
-        return MaterialApp(
-          title: 'STEES',
-          debugShowCheckedModeBanner: false,
-          theme: AppTheme.light(),
-          darkTheme: AppTheme.dark(),
-          themeMode: _themeController.themeMode,
-          themeAnimationDuration: const Duration(milliseconds: 350),
-          themeAnimationCurve: Curves.easeInOut,
-          home: AuthGate(themeController: _themeController),
-          routes: { '/home': (_) => AuthGate(themeController: _themeController) },
+        return ListenableBuilder(
+          listenable: _localeController,
+          builder: (context, _) {
+            return MaterialApp(
+              title: 'STEES',
+              debugShowCheckedModeBanner: false,
+              theme: AppTheme.light(),
+              darkTheme: AppTheme.dark(),
+              themeMode: _themeController.themeMode,
+              themeAnimationDuration: const Duration(milliseconds: 350),
+              themeAnimationCurve: Curves.easeInOut,
+              locale: _localeController.locale,
+              supportedLocales: AppLocalizations.supportedLocales,
+              localizationsDelegates: const [
+                AppLocalizations.delegate,
+                GlobalMaterialLocalizations.delegate,
+                GlobalWidgetsLocalizations.delegate,
+                GlobalCupertinoLocalizations.delegate,
+              ],
+              home: AuthGate(
+                themeController: _themeController,
+                localeController: _localeController,
+              ),
+              routes: {
+                '/home': (_) => AuthGate(
+                      themeController: _themeController,
+                      localeController: _localeController,
+                    ),
+              },
+            );
+          },
         );
       },
     );
@@ -70,7 +104,9 @@ class _SteesAppState extends State<SteesApp> {
 
 class AuthGate extends StatefulWidget {
   final ThemeController themeController;
-  const AuthGate({super.key, required this.themeController});
+  final LocaleController localeController;
+  const AuthGate(
+      {super.key, required this.themeController, required this.localeController});
 
   @override
   State<AuthGate> createState() => _AuthGateState();
@@ -132,8 +168,14 @@ class _AuthGateState extends State<AuthGate> {
       );
     }
     return _loggedIn
-        ? MainShell(themeController: widget.themeController)
-        : LoginScreen(themeController: widget.themeController);
+        ? MainShell(
+            themeController: widget.themeController,
+            localeController: widget.localeController,
+          )
+        : LoginScreen(
+            themeController: widget.themeController,
+            localeController: widget.localeController,
+          );
   }
 }
 
@@ -160,17 +202,24 @@ class _SteesLogo extends StatelessWidget {
   }
 }
 
-class ChannelConfig {
-  final String name;
+class ChannelConfig {  final String name;
   final IconData icon;
   final Color color;
   final String subtitle;
   const ChannelConfig(this.name, this.icon, this.color, this.subtitle);
 }
 
-const channels = [
-  ChannelConfig('Zone 1', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 1'),
-  ChannelConfig('Zone 2', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 2'),
-  ChannelConfig('Zone 3', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 3'),
-  ChannelConfig('Zone 4', Icons.water_drop, Color(0xFF0F766E), 'CHANNEL 4'),
-];
+/// Per-locale channel palette: same icons/colors for every locale, with zone
+/// names and codes from [AppLocalizations]. Extra relays fall back to a
+/// generated entry so a device claimed with more channels never breaks.
+List<ChannelConfig> localizedChannels(AppLocalizations l10n, int count) {
+  return [
+    for (var i = 0; i < count; i++)
+      ChannelConfig(
+        l10n.zoneName(i + 1),
+        Icons.water_drop,
+        const Color(0xFF0F766E),
+        l10n.channelCode(i + 1),
+      ),
+  ];
+}

@@ -1,0 +1,677 @@
+{
+  "@@locale": "ar",
+  "appTitle": "STEES",
+
+  "navDevices": "الأجهزة",
+  "navSensors": "الحساسات",
+  "navSchedules": "الجداول",
+  "navRules": "القواعد",
+  "navWeather": "الطقس",
+
+  "appTagline": "الري الذكي",
+  "actionToggleTheme": "تبديل المظهر",
+  "actionLogout": "تسجيل الخروج",
+  "actionLanguage": "اللغة",
+  "languageEnglish": "English",
+  "languageArabic": "العربية",
+  "languageFrench": "Français",
+
+  "sharedCancel": "إلغاء",
+  "sharedDelete": "حذف",
+  "sharedEdit": "تعديل",
+  "sharedRemove": "إزالة",
+  "sharedOk": "حسنًا",
+  "sharedRetry": "إعادة المحاولة",
+  "sharedAdd": "إضافة",
+  "sharedClose": "إغلاق",
+  "sharedActive": "نشط",
+  "sharedOff": "متوقف",
+  "sharedEnabled": "مفعّل",
+  "sharedDisabled": "معطّل",
+  "sharedOnline": "متصل",
+  "sharedOffline": "غير متصل",
+  "sharedDevice": "الجهاز",
+  "sharedChannel": "القناة",
+  "sharedCheckConnection": "تحقق من الاتصال وحاول مجددًا.",
+  "sharedSomethingWrong": "حدث خطأ ما. يرجى المحاولة مجددًا.",
+  "sharedEveryDay": "كل يوم",
+  "sharedEveryDayWord": "كل يوم",
+  "sharedToday": "اليوم",
+  "sharedTomorrow": "غدًا",
+  "sharedSaveChanges": "حفظ التغييرات",
+  "sharedSelectChannel": "اختر قناة واحدة على الأقل",
+  "sharedSignedOut": "يبدو أنك سجّلت الخروج. سجّل الدخول مجددًا وحاول مرة أخرى.",
+  "sharedNoDevices": "لا توجد أجهزة بعد",
+
+  "@sharedScheduleCount": {
+    "description": "Device schedule subtitle: channel range plus schedule count",
+    "placeholders": {
+      "range": { "type": "String" },
+      "n": { "type": "int" }
+    }
+  },
+  "sharedScheduleCount": "{range}  ·  {n, plural, =1{جدول واحد} =2{جدولان} other{{n} جداول}}",
+  "@sharedCustomDays": {
+    "placeholders": { "days": { "type": "String" } }
+  },
+  "sharedCustomDays": "مخصص: {days}",
+  "@sharedIdValue": {
+    "placeholders": { "id": { "type": "String" } }
+  },
+  "sharedIdValue": "المعرف: {id}",
+  "@sharedDeviceValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedDeviceValue": "الجهاز: {name}",
+  "@sharedSensorValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedSensorValue": "الحساس: {name}",
+  "@sharedChannelRange": {
+    "placeholders": { "channels": { "type": "int" } }
+  },
+  "sharedChannelRange": "CH1–CH{channels}",
+  "@zoneName": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "zoneName": "المنطقة {index}",
+  "@channelCode": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "channelCode": "القناة {index}",
+
+  "authFillAll": "املأ جميع الحقول",
+  "authUsername": "اسم المستخدم",
+  "authPassword": "كلمة المرور",
+  "authConfirmPassword": "تأكيد كلمة المرور",
+  "authSignIn": "تسجيل الدخول",
+  "authSignUp": "إنشاء حساب",
+  "authCreateAccount": "إنشاء حساب",
+  "authJoinStees": "انضم إلى STEES",
+  "authHaveAccount": "لديك حساب بالفعل؟  ",
+  "authNoAccount": "ليس لديك حساب؟  ",
+  "authPwdMismatch": "كلمتا المرور غير متطابقتين",
+  "authPwdShort": "يجب أن تتكون كلمة المرور من 6 أحرف على الأقل",
+
+  "devRelayBusy": "الجهاز مشغول، حاول مجددًا",
+  "devRelayUnreachable": "تعذّر الوصول إلى الجهاز",
+  "@devNoResponse": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "devNoResponse": "{channels} لم يستجب",
+  "devFetchStatus": "تعذّر جلب الحالة",
+  "devDeleteTitle": "حذف الجهاز",
+  "devDeleteConfirm": "هل أنت متأكد من حذف هذا الجهاز؟\nيمكنك إضافته مجددًا بعد الحذف.",
+  "devDeleted": "تم حذف الجهاز.",
+  "devDeleteFailed": "تعذّر حذف الجهاز. تحقق من الاتصال وحاول مجددًا.",
+  "devLoadFailed": "تعذّر تحميل الأجهزة",
+  "devEmptyHint": "أضف وحدة تحكم Sonoff للبدء\nفي إدارة مناطق الري.",
+  "devAdd": "إضافة جهاز",
+  "devSectionTitle": "الأجهزة",
+  "devZonesTitle": "المناطق",
+  "devSchedulesBtn": "الجداول",
+  "devLan": "شبكة محلية",
+  "devLanOnly": "محلي فقط",
+  "devSyncing": "جارٍ المزامنة",
+  "devTurningOn": "جارٍ التشغيل…",
+  "devTurningOff": "جارٍ الإيقاف…",
+  "devTurning": "جارٍ التنفيذ…",
+  "devOfflineBadge": "غير متصل",
+  "devFlowing": "يتدفق",
+  "devDry": "جاف",
+
+  "senLoadFailed": "تعذّر تحميل الحساسات",
+  "senEmptyTitle": "لا توجد حساسات بعد",
+  "senEmptyHint": "أضف حساس رطوبة التربة\nلمراقبة مناطق الري.",
+  "senAdd": "إضافة حساس",
+  "senSection": "الحساسات",
+  "senRuleBtn": "القاعدة",
+
+  "schOfflineBanner": "الجهاز غير متصل — ستتم مزامنة الجداول تلقائيًا عند إعادة الاتصال.",
+  "schSaved": "تم حفظ الجدول",
+  "schDeleted": "تم حذف الجدول",
+  "schUpdateFailed": "تعذّر تحديث الجدول",
+  "schDeleteFailed": "تعذّر حذف الجدول",
+  "schDeleteTitle": "حذف الجدول؟",
+  "@schDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "schDeleteConfirm": "سيتم حذف \"{name}\".",
+  "schLoadFailed": "تعذّر تحميل الجداول",
+  "schEmptyDevicesHint": "أضف جهازًا لبدء الجدولة.",
+  "schSection": "الجداول",
+  "schEmptyDevice": "لا توجد جداول لهذا الجهاز",
+  "@schRangeInvalid": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schRangeInvalid": "الفترة {index}: يجب أن تكون النهاية بعد البداية (لا فترات ليلية)",
+  "@schConflict": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" }
+    }
+  },
+  "schConflict": "تعارض في الجدول: {chans} مجدول بالفعل {windows} في {days}.",
+  "@schConflictNamed": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" },
+      "name": { "type": "String" }
+    }
+  },
+  "schConflictNamed": "تعارض في الجدول: {chans} مجدول بالفعل {windows} في {days} (\"{name}\").",
+  "schPickDay": "اختر يومًا واحدًا على الأقل للتكرار المخصص",
+  "schSaveFailed": "تعذّر حفظ الجدول",
+  "schEditTitle": "تعديل الجدول",
+  "schNewTitle": "جدول جديد",
+  "schChannelsSection": "القنوات",
+  "schChannelsDesc": "المخارج التي يشغّلها هذا الجدول.",
+  "schRepeatsSection": "التكرار",
+  "schRepeatsDesc": "أيام الأسبوع التي يعمل فيها الجدول.",
+  "schDaily": "يوميًا",
+  "schCustomMode": "أيام مخصصة",
+  "schWindowsSection": "الفترات",
+  "schWindowsDesc": "القنوات تعمل داخل كل فترة، ومتوقفة خارجها.",
+  "schAddWindow": "إضافة فترة",
+  "schCreate": "إنشاء الجدول",
+  "schStarts": "البداية",
+  "schEnds": "النهاية",
+  "schRemoveWindow": "إزالة الفترة",
+  "@schWindowLabel": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schWindowLabel": "ف{index}",
+
+  "ruleUpdateFailed": "تعذّر تحديث القاعدة",
+  "ruleDeleteFailed": "تعذّر حذف القاعدة",
+  "ruleDeleteTitle": "حذف القاعدة؟",
+  "@ruleDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "ruleDeleteConfirm": "سيتم حذف \"{name}\" نهائيًا.",
+  "ruleNoSensors": "لا توجد حساسات متاحة. أضف حساسًا أولًا.",
+  "ruleChooseSensor": "اختر حساسًا",
+  "ruleChooseHint": "تتحكم القواعد في المرحّلات بناءً على قراءات هذا الحساس.",
+  "ruleLoadFailed": "تعذّر تحميل القواعد",
+  "ruleEmptyTitle": "لا توجد قواعد بعد",
+  "@ruleEmptyHint": {
+    "placeholders": { "action": { "type": "String" } }
+  },
+  "ruleEmptyHint": "اضغط \"{action}\" للتحكم في مرحّل\nبناءً على قراءات حساس.",
+  "ruleSection": "القواعد",
+  "ruleAdd": "إضافة قاعدة",
+  "ruleAbove": "فوق",
+  "ruleBelow": "تحت",
+  "@ruleWhen": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "ruleWhen": "عندما {cond} {threshold}",
+  "@ruleActionTarget": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleActionTarget": "{channels} ← {action}",
+  "@ruleOtherwise": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleOtherwise": "وإلا ← {channels} ← {action}",
+
+  "rfEnterName": "أدخل اسم القاعدة",
+  "rfEnterThreshold": "أدخل عتبة رقمية",
+  "rfSaveFailed": "تعذّر حفظ القاعدة",
+  "rfEditTitle": "تعديل القاعدة",
+  "rfNewTitle": "قاعدة جديدة",
+  "rfIdentity": "الهوية",
+  "rfNameHint": "اسم القاعدة",
+  "rfNameHelper": "مثال: ري تلقائي عند الجفاف",
+  "rfChannelsSection": "القنوات",
+  "rfChannelsDesc": "اختر كل مرحّل يجب أن تتحكم فيه القاعدة.",
+  "rfConditionSection": "الشرط",
+  "rfConditionDesc": "قراءة الحساس التي تُفعّل القاعدة.",
+  "rfBelow": "أقل من",
+  "rfAbove": "أعلى من",
+  "rfThresholdHint": "قيمة العتبة",
+  "rfThresholdHelper": "مثال: 30",
+  "rfActionSection": "الإجراء",
+  "rfActionDesc": "ما يحدث عند تحقق الشرط.",
+  "rfTurnOn": "تشغيل",
+  "rfTurnOff": "إيقاف",
+  "rfCreate": "إنشاء القاعدة",
+  "rfLogic": "المنطق",
+  "@rfIf": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "rfIf": "إذا كانت التربة {cond} {threshold}",
+  "rfOtherwise": "وإلا",
+
+  "srUpdateFailed": "فشل تحديث القاعدة",
+  "srDeleteFailed": "فشل حذف القاعدة",
+  "srLoadFailed": "تعذّر تحميل القاعدة",
+  "srEmptyTitle": "لا توجد قاعدة بعد",
+  "srEmptyHint": "أنشئ قاعدة للتحكم تلقائيًا في مرحّل بناءً على قراءات هذا الحساس.",
+  "srTitle": "القاعدة",
+  "@srElse": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "srElse": "وإلا ← {channels} ← {action}",
+
+  "slLoadFailed": "فشل تحميل الجداول",
+  "slUpdateFailed": "فشل تحديث الجدول",
+  "slDeleteFailed": "فشل حذف الجدول",
+  "slTitle": "الجداول",
+  "@slChannels": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "slChannels": "القنوات: {channels}",
+
+  "wLoadFailed": "تعذّر تحميل الطقس.",
+  "wNoDevicesHint": "أضف جهازًا لتفعيل توقعات الطقس.",
+  "wLoadTitle": "تعذّر تحميل الطقس",
+  "wSection": "الطقس",
+  "wRefresh": "تحديث",
+  "wNoLocation": "لم يتم ضبط موقع الطقس",
+  "wNoLocationHint": "لا يوجد موقع مزرعة لهذا الجهاز بعد. اختر موقعًا على الخريطة لتفعيل الطقس لهذا الجهاز.",
+  "wFeatForecast": "توقعات\nمحلية",
+  "wFeatAdvisories": "تنبيهات\nالمطر",
+  "wFeatUnaffected": "الجداول\nلا تتأثر",
+  "wSetLocation": "تحديد الموقع",
+  "@wPinDefaults": {
+    "placeholders": { "tz": { "type": "String" } }
+  },
+  "wPinDefaults": "الدبوس يبدأ من موقعك الحالي • {tz}",
+  "wForecastUnavailable": "التوقعات غير متاحة",
+  "wForecastHint": "جداول الري الخاصة بك لا تتأثر وستعمل كما هو مبرمج.",
+  "wPrecipitation": "الهطول",
+  "wLastHour": "الساعة الماضية",
+  "wCurrent": "الظروف الحالية",
+  "wTemperature": "درجة الحرارة",
+  "wNoHourly": "لا توجد بيانات ساعية لهذا اليوم.",
+  "wSignificantRain": "مطر مهم: ≥2 مم مع احتمال ≥50٪",
+  "wForecast": "التوقعات",
+  "wRainDuring": "مطر أثناء الري",
+  "wRainNear": "مطر قريب من الري",
+  "wIrrigation": "الري",
+  "wRain": "المطر",
+  "wDirectOverlap": "تداخل مباشر",
+  "@wDirectOverlapWith": {
+    "placeholders": { "duration": { "type": "String" } }
+  },
+  "wDirectOverlapWith": "تداخل مباشر · {duration}",
+  "wCloseToWindow": "قريب من فترة الري",
+  "@wAlsoNear": {
+    "placeholders": { "windows": { "type": "String" } }
+  },
+  "wAlsoNear": "قريب أيضًا: {windows}",
+  "@wMoreOverlaps": {
+    "placeholders": { "n": { "type": "int" } }
+  },
+  "wMoreOverlaps": "+{n} تداخلات أخرى في نفس اليوم",
+  "wReviewSchedule": "مراجعة الجدول",
+  "hourNow": "الآن",
+  "unitMm": "مم",
+  "wNoSchedules": "لا توجد جداول ري لهذا الجهاز.",
+  "wTodayIrrigation": "ري اليوم",
+  "@wDurationMin": {
+    "placeholders": { "minutes": { "type": "int" } }
+  },
+  "wDurationMin": "~{minutes} دقيقة",
+  "@wDurationHour": {
+    "placeholders": { "h": { "type": "int" } }
+  },
+  "wDurationHour": "~{h} س",
+  "@wDurationHourMin": {
+    "placeholders": {
+      "h": { "type": "int" },
+      "m": { "type": "int" }
+    }
+  },
+  "wDurationHourMin": "~{h} س {m} د",
+  "@wRainChip": {
+    "placeholders": {
+      "start": { "type": "String" },
+      "end": { "type": "String" },
+      "mm": { "type": "String" },
+      "prob": { "type": "String" }
+    }
+  },
+  "wRainChip": "مطر {start}–{end} · {mm} مم · {prob}٪",
+  "@wUpdated": {
+    "placeholders": {
+      "time": { "type": "String" },
+      "tz": { "type": "String" }
+    }
+  },
+  "wUpdated": "آخر تحديث {time} · {tz}",
+
+  "pkRemoveTitle": "إزالة الموقع؟",
+  "pkRemoveConfirm": "سيتم تعطيل توقعات الطقس لهذا الجهاز. جداول الري الخاصة بك لا تتأثر.",
+  "pkTitle": "اختيار موقع الطقس",
+  "pkTapHint": "اضغط على الخريطة أو اسحب الدبوس",
+  "pkTapChoose": "اضغط على الخريطة لاختيار موقع المزرعة",
+  "pkResolving": "جارٍ تحديد المكان…",
+  "pkCustom": "نقطة مخصصة على الخريطة",
+  "pkUseFor": "استخدام للجهاز",
+  "pkSaving": "جارٍ الحفظ…",
+  "pkConfirm": "تأكيد الموقع",
+  "pkRemoveFailed": "تعذّر إزالة الموقع.",
+  "pkChooseFirst": "اضغط على الخريطة لاختيار موقع أولًا.",
+  "pkSaveFailed": "تعذّر حفظ الموقع.",
+
+  "pvTitle": "إعداد الجهاز",
+  "pvReconnect": "إعادة توصيل شبكة الجهاز",
+  "pvJoinNetwork": "الانضمام إلى شبكة الجهاز",
+  "pvStep1": "الخطوة 1 من 3",
+  "pvStep1a": "شغّل الجهاز — تبدأ شبكة الإعداد الخاصة به بـ \"tasmota-\" أو تعرض معرف الجهاز.",
+  "pvStep1bJoin": "انضم إلى tasmota-XXXX في إعدادات Wi-Fi.",
+  "pvStep1bPick": "اختر تلك الشبكة من القائمة أدناه.",
+  "pvStep1bOpen": "افتح إعدادات Wi-Fi وانضم إلى تلك الشبكة.",
+  "pvStep1cRecovery": "ارجع إلى هنا — معرف جهازك محفوظ؛ هذا تصحيح للشبكة وليس تسجيلًا جديدًا.",
+  "pvStep1cNormal": "ارجع إلى هنا وتابع.",
+  "pvSelectAp": "اختيار شبكة الجهاز",
+  "pvContinue": "متابعة",
+  "pvDeviceNetwork": "شبكة الجهاز",
+  "pvJoinAp": "الانضمام إلى شبكة الجهاز",
+  "pvOpenSettings": "فتح إعدادات Wi-Fi",
+  "pvNotFoundHint": "إذا لم تجد الجهاز، أوقف Wi-Fi ثم أعد تشغيله وحاول مجددًا. إذا استمر عدم ظهوره، افصل طاقة الجهاز وأعدها بسرعة 6 إلى 7 مرات لإعادة ضبطه.",
+  "pvSearchAgain": "بحث مجددًا",
+  "pvRecoveryBtn": "تعليمات الاسترداد",
+  "pvRecoveryTitle": "خطوات الاسترداد",
+  "pvRecoverySteps": "1. افصل طاقة الجهاز وانتظر 30 ثانية حتى تظهر نقطة الوصول (tasmota-XXXX).\n\n2. افتح إعدادات Wi-Fi واتصل بشبكة tasmota-XXXX.\n\n3. ارجع إلى هنا واضغط متابعة.\n\n4. تأكد من صحة اسم شبكة المنزل وكلمة المرور، ثم اضغط إعداد الجهاز.",
+  "pvConfigure": "ضبط الجهاز",
+  "pvStep2": "الخطوة 2 من 3",
+  "pvHomeWifi": "شبكة المنزل",
+  "pvSsidHint": "اسم الشبكة (SSID)",
+  "pvWifiPwdHint": "كلمة مرور Wi-Fi",
+  "pvWrongPwd": "كلمة مرور خاطئة. تحقق منها وحاول مجددًا.",
+  "pvDeviceSection": "الجهاز",
+  "pvDeviceNameHint": "اسم الجهاز",
+  "pvDeviceIdLbl": "معرف الجهاز",
+  "pvDeviceIdPending": "يُقرأ من الجهاز عند اتصاله",
+  "pvMac": "MAC",
+  "pvWifiFailed": "فشل الاتصال بشبكة Wi-Fi",
+  "pvWifiFailedGeneric": "تعذّر على الجهاز الاتصال بشبكة Wi-Fi هذه. تحقق من اسم الشبكة وكلمة المرور وحاول مجددًا.",
+  "pvWifiFailedHint": "جهازك ما زال متصلًا بشبكة الإعداد، لذا يمكنك تصحيح البيانات وإعادة الاختبار.",
+  "pvTryAgain": "حاول مجددًا",
+  "pvChangeWifi": "تغيير الشبكة",
+  "pvTestContinue": "اختبار Wi-Fi والمتابعة",
+  "pvTestingWifi": "جارٍ اختبار اتصال Wi-Fi…\nيرجى إبقاء هاتفك متصلًا بالجهاز.",
+  "pvWifiNetworkLbl": "شبكة Wi-Fi",
+  "pvSelectWifi": "اختيار شبكة Wi-Fi",
+  "pvWaiting": "انتظار الجهاز",
+  "pvStep3": "الخطوة 3 من 3",
+  "pvWaitHint": "سينضم الجهاز إلى شبكتك ويتصل بالسحابة تلقائيًا.",
+  "pvReconfigure": "إعادة ضبط Wi-Fi",
+  "pvWaitLonger": "انتظر قليلًا",
+  "pvWaitLongerHint": "يمكنك أيضًا فصل طاقة الجهاز وإعادة توصيلها ليعيد الاتصال، ثم مواصلة الانتظار هنا.",
+  "pvLocalNotReady": "التحكم المحلي غير جاهز",
+  "pvPreparingLocal": "جارٍ تجهيز التحكم المحلي…",
+  "pvLocalSection": "التحكم المحلي",
+  "pvEnabling": "جارٍ التفعيل…",
+  "pvLocalAddedHint": "تمت إضافة الجهاز إلى حسابك بالفعل — يمكنك التحكم فيه عبر السحابة بينما التحكم المحلي معلّق. إعادة المحاولة تفعّل التحكم المحلي المباشر دون الحاجة لإضافة الجهاز مجددًا.",
+  "pvLocalAddedBody": "تمت إضافة الجهاز إلى حسابك. جارٍ تفعيل التحكم المحلي المباشر…",
+  "pvRetryLocal": "إعادة محاولة التحكم المحلي",
+  "pvContinueBg": "المتابعة في الخلفية",
+  "pvTerminalAdded": "الجهاز مضاف بالفعل",
+  "pvTerminalRegistered": "الجهاز مسجّل بالفعل",
+  "pvTerminalUnreadable": "تعذّرت قراءة هوية الجهاز",
+  "pvTerminalGeneric": "الجهاز غير متصل بعد",
+  "pvPhaseConnect": "الاتصال",
+  "pvPhaseConfigure": "الضبط",
+  "pvPhaseWait": "الانتظار",
+  "pvWaitRebooting": "جارٍ إعادة التشغيل",
+  "pvWaitJoining": "جارٍ الانضمام للشبكة",
+  "pvWaitMqtt": "جارٍ الاتصال بـ MQTT",
+  "pvWaitDetected": "تم رصد الجهاز",
+  "pvWaitVerifying": "جارٍ التحقق",
+  "pvWaitClaiming": "جارٍ التسجيل",
+  "pvWaitFinalizing": "جارٍ الإنهاء",
+  "pvWaitDone": "تم",
+  "pvWaitFailed": "فشل",
+  "pvWaitWaiting": "انتظار",
+  "pvChecklistReboot": "جارٍ إعادة تشغيل الجهاز...",
+  "pvChecklistWifi": "جارٍ الانضمام إلى شبكتك...",
+  "pvChecklistCloud": "جارٍ الاتصال بالسحابة...",
+  "pvSelectWifiTitle": "اختيار شبكة Wi-Fi",
+  "pvRescan": "إعادة الفحص",
+  "pvScanUnavailable": "فحص Wi-Fi غير متاح. أدخل شبكتك يدويًا.",
+  "pvNoNetworks": "لم يتم العثور على شبكات Wi-Fi.",
+  "pvScanTimeout": "انتهت مهلة فحص Wi-Fi. اضغط التحديث للمحاولة مجددًا.",
+  "pvEnterManual": "إدخال الشبكة يدويًا",
+  "pvSelectApTitle": "اختيار شبكة الجهاز",
+  "pvTapAp": "اضغط على شبكة إعداد جهازك أدناه للاتصال.",
+  "pvScanUnavailableSettings": "فحص Wi-Fi غير متاح. استخدم فتح إعدادات Wi-Fi بدلًا من ذلك.",
+  "pvNoNetworksNearby": "لم يتم العثور على شبكات Wi-Fi قريبة.",
+  "pvLocationOff": "يخفي أندرويد شبكات Wi-Fi القريبة عن التطبيقات حتى يتم تفعيل الموقع.",
+  "pvTurnOnLocation": "تفعيل الموقع",
+  "pvPermDenied": "يحتاج فحص Wi-Fi إلى إذن الموقع الخاص بهذا التطبيق.",
+  "pvAllowSettings": "السماح من إعدادات التطبيق",
+  "pvDeviceNets": "شبكات إعداد الجهاز",
+  "pvOtherNets": "شبكات Wi-Fi أخرى",
+  "pvApChip": "الجهاز",
+  "pvManualJoin": "يدويًا: انضم إلى شبكة الجهاز من إعدادات أندرويد بنفسك",
+  "pvDetectedTap": "تم الرصد — اضغط للاتصال",
+  "@pvSignalLine": {
+    "placeholders": {
+      "signal": { "type": "String" },
+      "id": { "type": "String" }
+    }
+  },
+  "pvSignalLine": "إشارة {signal}  ·  المعرف …{id}",
+  "pvSignalStrong": "قوية",
+  "pvSignalGood": "جيدة",
+  "pvSignalFair": "متوسطة",
+  "pvSignalWeak": "ضعيفة",
+  "@pvSweepHeader": {
+    "placeholders": {
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "name": { "type": "String" }
+    }
+  },
+  "pvSweepHeader": "الخطوة {step}/{total} — {name}",
+  "@pvSweepBusy": {
+    "placeholders": {
+      "name": { "type": "String" },
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvSweepBusy": "جارٍ ضبط الجهاز — الخطوة {step}/{total} ({name}) · {secs} ث",
+  "pvEnterDeviceName": "أدخل اسم الجهاز.",
+  "pvEnterHomeWifi": "اختر شبكة Wi-Fi المنزلية أو أدخلها.",
+  "pvDeviceUnreachable": "تعذّر الوصول إلى الجهاز عبر شبكة الإعداد. ربما اتصل بشبكة منزلك بالفعل؛ افصل طاقته وأعدها، وإذا أعاد الاتصال بدل إظهار شبكة tasmota-XXXX، أعد ضبط المصنع (اضغط الزر ~10 ثوانٍ)، ثم حاول مجددًا.",
+  "pvIdentityUnreadable": "تعذّرت قراءة هوية الجهاز. افصل طاقة الجهاز وحاول مجددًا.",
+  "pvIdentityLost": "فُقدت هوية الجهاز. يرجى المحاولة مجددًا.",
+  "pvReachStees": "تعذّر الوصول إلى STEES. جارٍ الانتظار وإعادة المحاولة…",
+  "pvAlreadyExists": "الجهاز موجود بالفعل. يجب حذفه قبل إضافته مجددًا.",
+  "pvAlreadyRegistered": "هذا الجهاز مسجّل في حساب آخر ولا يمكن إضافته إلى حسابك.",
+  "pvInvalidMac": "لم يُبلغ الجهاز عن هويته بشكل صحيح. أغلق هذه النافذة وحاول مجددًا.",
+  "pvBadRequest": "تعذّر تسجيل هذا الجهاز في STEES. أغلق وحاول مجددًا.",
+  "pvAccessDenied": "تم رفض الوصول. سجّل الدخول مجددًا وحاول مرة أخرى.",
+  "pvSteesRejected": "رفض STEES هذا الجهاز. أغلق وحاول مجددًا.",
+  "pvNotSeen": "الجهاز ليس على السحابة بعد. جارٍ الانتظار وإعادة المحاولة…",
+  "pvRateLimited": "طلبات كثيرة إلى STEES. ننتظر قليلًا ونعيد المحاولة…",
+  "pvSteesBusy": "STEES مشغول. جارٍ الانتظار وإعادة المحاولة…",
+  "pvNoLongerConnected": "لم تعد متصلًا بشبكة إعداد الجهاز — أعد الاتصال بها وتابع.",
+  "@pvSettingRetry": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingRetry": "لم يقبل الجهاز إعدادًا (الخطوة الفاشلة: {step}). ما زال متاحًا — حاول مجددًا.",
+  "@pvSettingReset": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingReset": "لم يقبل الجهاز كل الإعدادات (الخطوة الفاشلة: {step}). افصل طاقته (اضغط الزر ~10 ثوانٍ لإعادة ضبط المصنع إذا لم تعد تظهر نقطة الوصول tasmota-XXXX)، ثم حاول مجددًا.",
+  "@pvConnectingTo": {
+    "placeholders": {
+      "ssid": { "type": "String" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvConnectingTo": "جارٍ الاتصال بـ {ssid}… ({secs} ث)",
+  "@pvCheckingDevice": {
+    "placeholders": { "secs": { "type": "int" } }
+  },
+  "pvCheckingDevice": "جارٍ فحص الجهاز… ({secs} ث)",
+  "@pvApLost": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApLost": "انقطع الاتصال بـ \"{ssid}\" قبل بدء الإعداد. ابقَ قريبًا من الجهاز وحاول مجددًا.",
+  "pvBindFailed": "تعذّر على الهاتف توجيه البيانات إلى شبكة الجهاز. أوقف Wi-Fi ثم أعد تشغيله وحاول مجددًا.",
+  "@pvApTimeout": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApTimeout": "استغرق النظام وقتًا طويلًا للانضمام إلى \"{ssid}\". تأكد من تشغيل الجهاز ووضع الاقتران، ثم حاول مجددًا.",
+  "@pvApFailed": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApFailed": "تعذّر الاتصال بشبكة إعداد الجهاز {ssid}. تأكد من تشغيل الجهاز ووضع الإعداد. إذا تم رفض طلب الانضمام أو كانت الشبكة محمية بكلمة مرور، استخدم فتح إعدادات Wi-Fi بدلًا من ذلك.",
+  "pvDefaultName": "جهاز STEES الذكي",
+  "pvLocalFallback": "تعذّر تفعيل التحكم المحلي عبر HTTP والتحقق منه على الجهاز. تأكد من أن هذا الهاتف على نفس شبكة Wi-Fi مثل الجهاز، ثم حاول مجددًا.",
+  "pvLocalUnknownIp": "عنوان الجهاز غير معروف لهذا الهاتف بعد — تأكد من أنه على نفس شبكة Wi-Fi مثل الجهاز، ثم أعد المحاولة.",
+  "@pvDiagBadIp": {
+    "placeholders": { "ip": { "type": "String" } }
+  },
+  "pvDiagBadIp": "عنوان IP المحلي الذي أبلغ عنه الخادم ({ip}) غير صالح.",
+  "@pvDiagDiscovery": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagDiscovery": "فشل الاكتشاف المحلي ({detail}). تأكد من أن هذا الهاتف على نفس شبكة Wi-Fi مثل الجهاز.",
+  "pvDiagNoEndpoint": "تعذّر الوصول إلى أي نقطة نهاية HTTP محلية للجهاز. تأكد من أن هذا الهاتف على نفس شبكة Wi-Fi مثل الجهاز، ثم حاول مجددًا.",
+  "@pvDiagRejected": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagRejected": "رفض الجهاز تفعيل SetOption128 أو لم يؤكده ({detail}).",
+  "pvDiagHttpApi": "لم يؤكد الجهاز تفعيل واجهة HTTP (StatusNET.HTTP_API != 1). أعد تشغيل المعالج أو تحقق من وحدة تحكم الجهاز.",
+  "@pvDiagFinalCheck": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagFinalCheck": "فشل فحص الحالة النهائي ({detail}).",
+  "pvBrokerFailed": "تعذّر تحميل عنوان وسيط MQTT. أعد فتح إضافة جهاز أثناء اتصالك بالإنترنت.",
+  "pvBrokerLoadFailed": "تعذّر تحميل عنوان وسيط MQTT من الخادم. تأكد من اتصالك بالإنترنت، ثم أعد فتح إضافة جهاز.",
+  "pvWifiSettingsFailed": "تعذّر فتح إعدادات Wi-Fi.",
+  "pvNoIp": "اتصل الجهاز بالشبكة لكنه لم يحصل على عنوان IP. اسم الشبكة وكلمة المرور صحيحان؛ تحقق من أن الشبكة تسمح بالأجهزة الجديدة.",
+  "pvSsidNotFound": "تعذّر على الجهاز العثور على شبكة Wi-Fi هذه. تحقق من اسم الشبكة وحاول مجددًا.",
+  "pvWrongPasswordMsg": "تعذّر على الجهاز الاتصال بشبكة Wi-Fi هذه. قد تكون كلمة المرور غير صحيحة.",
+  "pvLocalError": "لم يستجب الجهاز لاختبار Wi-Fi. تأكد من أن هاتفك ما زال متصلًا بشبكة الجهاز وحاول مجددًا.",
+  "pvWifiVerified": "تم التحقق من اتصال Wi-Fi.",
+  "pvWifiUnknown": "تعذّر على الجهاز الاتصال بشبكة Wi-Fi هذه. تحقق من اسم الشبكة وكلمة المرور وحاول مجددًا.",
+  "pvGettingReady": "جارٍ التجهيز…",
+  "pvConnecting": "جارٍ الاتصال بالجهاز",
+  "pvReconnecting": "جارٍ إعادة الاتصال بالجهاز",
+  "pvConfiguring": "جارٍ ضبط الجهاز",
+  "pvTesting": "جارٍ اختبار اتصال Wi-Fi…",
+  "pvWifiFailedShort": "فشل الاتصال بشبكة Wi-Fi",
+  "pvWifiVerifiedShort": "تم التحقق من Wi-Fi",
+  "pvRestarting": "جارٍ توصيل الجهاز بشبكة Wi-Fi…",
+  "pvRebooting": "جارٍ إعادة تشغيل الجهاز…",
+  "pvConnectingMqtt": "جارٍ توصيل الجهاز بـ MQTT…",
+  "pvRegistering": "جارٍ تسجيل الجهاز…",
+  "pvEnablingLocal": "جارٍ تفعيل التحكم المحلي…",
+  "pvWaitingWifi": "في انتظار شبكتك…",
+  "pvDeviceReady": "الجهاز جاهز",
+  "pvProvisionFailed": "فشل الإعداد",
+  "pvCancelled": "أُلغي",
+  "pvSweepWifiTest": "اختبار الشبكة",
+  "pvSweepBroker": "الوسيط",
+  "pvSweepTopic": "الموضوع",
+  "pvSweepModule": "الوحدة",
+  "pvSweepName": "الاسم",
+  "pvSweepSsid": "الشبكة",
+  "pvSweepVerify": "التحقق",
+  "pvSweepRestart": "إعادة التشغيل",
+  "pvTryDifferent": "تجربة شبكة أخرى",
+  "pvShowPassword": "إظهار كلمة المرور",
+  "pvHidePassword": "إخفاء كلمة المرور",
+
+  "adWifiOff": "Wi-Fi متوقف",
+  "adWifiOffHint": "يحتاج هاتفك إلى تفعيل Wi-Fi للعثور على شبكة إعداد الجهاز والانضمام إليها.",
+  "adTurnOn": "تشغيل Wi-Fi",
+  "adTitle": "إضافة جهاز",
+  "adHeading": "إضافة جهاز",
+  "adGuided": "إعداد موجّه",
+  "adWizardHint": "يجب تفعيل Wi-Fi على هاتفك — يحتاجه المعالج للعثور على شبكة إعداد الجهاز والانضمام إليها.",
+  "adProvision": "إعداد جهاز جديد",
+
+  "asEnterNameId": "أدخل اسم الحساس ومعرفه",
+  "asSelectDevice": "اختر جهاز Sonoff الخاص بهذا الحساس",
+  "asAdded": "تم توصيل الحساس بنجاح.",
+  "asAddedHint": "حساسك مرتبط الآن بجهاز Sonoff.",
+  "asCheckId": "تحقق من معرف الحساس وتأكد من اتصال ESP32.",
+  "asNotFound": "لم يتم العثور على الحساس",
+  "asTitle": "إضافة حساس",
+  "asLink": "ربط حساس",
+  "asLinkHint": "سيتم التحقق من الحساس عبر MQTT قبل إضافته. تأكد من تشغيل ESP32 ليتم العثور عليه.",
+  "asDetails": "تفاصيل الحساس",
+  "asDetailsHint": "أدخل معرف الحساس كما هو مضبوط على الجهاز تمامًا، ثم اختر وحدة تحكم Sonoff التي ينتمي إليها.",
+  "asNameHint": "اسم الحساس",
+  "asNameHelper": "مثال: رطوبة التربة",
+  "asIdHint": "معرف الحساس",
+  "asIdHelper": "مثال: soil_1",
+  "asSearching": "جارٍ البحث عن الحساس...",
+  "asSearchingHint": "في انتظار أن يُبلغ الحساس عبر MQTT. قد يستغرق ذلك بضع ثوانٍ.",
+  "asDeviceLbl": "الجهاز",
+  "asNoDevices": "لا توجد أجهزة Sonoff بعد",
+  "asSelectHint": "اختر جهاز Sonoff",
+  "asDeviceHelper": "مثال: Sonoff الدفيئة",
+
+  "apiTimeout": "انتهت مهلة الطلب. يرجى المحاولة مجددًا.",
+  "apiUnreachable": "تعذّر الوصول إلى الخادم. تحقق من الاتصال.",
+  "apiSignup": "فشل إنشاء الحساب",
+  "apiLogin": "فشل تسجيل الدخول",
+  "apiFetchDevices": "فشل جلب الأجهزة",
+  "apiRegisterDevice": "تعذّر تسجيل الجهاز",
+  "apiCheckDevice": "تعذّر فحص الجهاز",
+  "apiCheckDeviceStatus": "تعذّر التحقق من حالة الجهاز",
+  "apiFetchStatus": "فشل جلب الحالة",
+  "apiBrokerInfo": "تعذّر تحميل معلومات الوسيط",
+  "apiBrokerHost": "معلومات الوسيط تفتقد المضيف",
+  "apiBrokerPort": "معلومات الوسيط تفتقد المنفذ",
+  "apiControl": "فشل التحكم",
+  "apiUnclaim": "فشل إلغاء ارتباط الجهاز",
+  "apiDeleteDevice": "فشل حذف الجهاز",
+  "apiFetchSensors": "فشل جلب الحساسات",
+  "apiAddSensor": "فشل إضافة الحساس",
+  "apiDeleteSensor": "فشل حذف الحساس",
+  "apiFetchRules": "فشل جلب القواعد",
+  "apiCreateRule": "فشل إنشاء القاعدة",
+  "apiUpdateRule": "فشل تحديث القاعدة",
+  "apiToggleRule": "فشل تبديل القاعدة",
+  "apiDeleteRule": "فشل حذف القاعدة",
+  "apiFetchSchedules": "فشل جلب الجداول",
+  "apiCreateSchedule": "فشل إنشاء الجدول",
+  "apiUpdateSchedule": "فشل تحديث الجدول",
+  "apiToggleSchedule": "فشل تبديل الجدول",
+  "apiDeleteSchedule": "فشل حذف الجدول",
+  "apiSendMqtt": "فشل إرسال أمر MQTT",
+  "apiLoadWeather": "فشل تحميل الطقس",
+  "apiLoadAdvisories": "فشل تحميل التنبيهات",
+  "apiUpdateLocation": "فشل تحديث الموقع",
+  "apiRemoveLocation": "فشل إزالة الموقع",
+  "apiRegisterToken": "فشل تسجيل رمز الدفع",
+  "apiDeleteToken": "فشل حذف رمز الدفع",
+
+  "ntChannel": "طقس STEES",
+  "ntChannelDesc": "تنبيهات تداخل المطر — تنبيه عند تداخل الري مع توقعات المطر",
+  "ntRainExpected": "مطر متوقع",
+  "ntCheckSchedule": "تحقق من جدول الري",
+
+  "relayTypeOne": "مرحّل واحد",
+  "relayTypeFour": "4 مرحّلات"
+}

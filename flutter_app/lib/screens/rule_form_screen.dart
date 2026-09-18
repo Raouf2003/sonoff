@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 
@@ -102,19 +104,19 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   String get _logicSummary {
     final chs = _channels.toList()..sort();
     final chLabel = chs.map((c) => 'CH$c').join(' + ');
-    final condLabel = _condition == 'above' ? 'above' : 'below';
     final t = _thresholdCtl.text.trim();
-    final threshold = t.isEmpty ? '...' : t;
     if (chLabel.isEmpty || t.isEmpty) return '';
-    return 'When soil $condLabel $threshold → $chLabel → $_action\nOtherwise → $chLabel → $_oppositeAction';
+    // Non-empty marker only; the localized preview is built by _LogicPreview.
+    return '$chLabel $t';
   }
 
   Future<void> _save() async {
     final name = _nameCtl.text.trim();
     final threshold = double.tryParse(_thresholdCtl.text.trim());
-    if (name.isEmpty) { _err('Enter a rule name'); return; }
-    if (_channels.isEmpty) { _err('Select at least one channel'); return; }
-    if (threshold == null) { _err('Enter a numeric threshold'); return; }
+    final l10n = AppLocalizations.of(context)!;
+    if (name.isEmpty) { _err(l10n.rfEnterName); return; }
+    if (_channels.isEmpty) { _err(l10n.sharedSelectChannel); return; }
+    if (threshold == null) { _err(l10n.rfEnterThreshold); return; }
 
     setState(() => _saving = true);
     try {
@@ -139,7 +141,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
       }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
-      _err(e is ApiException ? e.message : 'Could not save the rule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.rfSaveFailed);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -163,9 +165,10 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEdit ? 'Edit Rule' : 'New Rule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(_isEdit ? l10n.rfEditTitle : l10n.rfNewTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -187,19 +190,19 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                 const SizedBox(height: 20),
 
                 _SectionCard(
-                  eyebrow: 'IDENTITY',
+                  eyebrow: l10n.rfIdentity,
                   child: TextField(
                     controller: _nameCtl,
                     style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                     textInputAction: TextInputAction.next,
-                    decoration: _inputDec('Rule name', 'e.g. Auto-water when dry', Icons.label_outline),
+                    decoration: _inputDec(l10n.rfNameHint, l10n.rfNameHelper, Icons.label_outline),
                   ),
                 ),
                 const SizedBox(height: 14),
 
                 _SectionCard(
-                  eyebrow: 'CHANNELS',
-                  description: 'Pick every relay this rule should control.',
+                  eyebrow: l10n.rfChannelsSection,
+                  description: l10n.rfChannelsDesc,
                   child: Wrap(
                     spacing: 10,
                     runSpacing: 8,
@@ -222,15 +225,15 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                 const SizedBox(height: 14),
 
                 _SectionCard(
-                  eyebrow: 'CONDITION',
-                  description: 'The sensor reading that triggers the rule.',
+                  eyebrow: l10n.rfConditionSection,
+                  description: l10n.rfConditionDesc,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(value: 'below', label: Text('Below', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                          ButtonSegment(value: 'above', label: Text('Above', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                        segments: [
+                          ButtonSegment(value: 'below', label: Text(l10n.rfBelow, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                          ButtonSegment(value: 'above', label: Text(l10n.rfAbove, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
                         ],
                         selected: {_condition},
                         style: SegmentedButton.styleFrom(
@@ -248,7 +251,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                         keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
                         onChanged: (_) => setState(() {}),
-                        decoration: _inputDec('Threshold value', 'e.g. 30', Icons.pin_outlined),
+                        decoration: _inputDec(l10n.rfThresholdHint, l10n.rfThresholdHelper, Icons.pin_outlined),
                       ),
                     ],
                   ),
@@ -256,12 +259,12 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                 const SizedBox(height: 14),
 
                 _SectionCard(
-                  eyebrow: 'ACTION',
-                  description: 'What happens when the condition is true.',
+                  eyebrow: l10n.rfActionSection,
+                  description: l10n.rfActionDesc,
                   child: SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(value: 'ON', label: Text('Turn ON', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                      ButtonSegment(value: 'OFF', label: Text('Turn OFF', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                    segments: [
+                      ButtonSegment(value: 'ON', label: Text(l10n.rfTurnOn, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                      ButtonSegment(value: 'OFF', label: Text(l10n.rfTurnOff, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
                     ],
                     selected: {_action},
                     style: SegmentedButton.styleFrom(
@@ -298,7 +301,7 @@ class _RuleFormScreenState extends State<RuleFormScreen> {
                     ),
                     child: _saving
                         ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
-                        : Text(_isEdit ? 'Save Changes' : 'Create Rule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                        : Text(_isEdit ? l10n.sharedSaveChanges : l10n.rfCreate, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                   ),
                 ),
               ],
@@ -412,7 +415,7 @@ class _SectionCard extends StatelessWidget {
           if (description != null) ...[
             const SizedBox(height: 4),
             Padding(
-              padding: const EdgeInsets.only(left: 28),
+              padding: const EdgeInsetsDirectional.only(start: 28),
               child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
             ),
           ],
@@ -482,8 +485,9 @@ class _LogicPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final chLabel = channels.map((c) => 'CH$c').join(' + ');
-    final condWord = condition == 'above' ? 'above' : 'below';
+    final condWord = condition == 'above' ? l10n.ruleAbove : l10n.ruleBelow;
     final actionColor = action == 'ON' ? colors.leaf : colors.sunlight;
     final oppositeColor = opposite == 'ON' ? colors.leaf : colors.sunlight;
 
@@ -502,22 +506,22 @@ class _LogicPreview extends StatelessWidget {
             children: [
               Icon(Icons.preview, size: 16, color: colors.stream.withValues(alpha: 0.7)),
               const SizedBox(width: 6),
-              Text('LOGIC', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
+              Text(l10n.rfLogic, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.8, color: colors.stream)),
             ],
           ),
           const SizedBox(height: 14),
           _LogicRow(
             icon: Icons.check_circle_outline,
             color: actionColor,
-            label: 'IF soil $condWord $threshold',
-            detail: '$chLabel → $action',
+            label: l10n.rfIf(condWord, threshold),
+            detail: l10n.ruleActionTarget(chLabel, action),
           ),
           const SizedBox(height: 8),
           _LogicRow(
             icon: Icons.cancel_outlined,
             color: oppositeColor,
-            label: 'OTHERWISE',
-            detail: '$chLabel → $opposite',
+            label: l10n.rfOtherwise,
+            detail: l10n.ruleActionTarget(chLabel, opposite),
           ),
         ],
       ),

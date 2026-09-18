@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
+import '../l10n/gen/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
@@ -14,7 +15,7 @@ import '../services/device_transport.dart';
 import '../services/local_device_cache.dart';
 import '../services/provisioning_service.dart';
 import '../services/reachability_monitor.dart';
-import '../main.dart' show kServerIp, kProtocol, channels, ChannelConfig;
+import '../main.dart' show kServerIp, kProtocol, ChannelConfig, localizedChannels;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
 
@@ -337,17 +338,18 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   String _relayErrorText(_RelayErrorKind kind, Set<int> channels) {
+    final l10n = AppLocalizations.of(context)!;
     switch (kind) {
       case _RelayErrorKind.busy:
-        return 'Device is busy, try again';
+        return l10n.devRelayBusy;
       case _RelayErrorKind.network:
-        return 'Could not reach the device';
+        return l10n.devRelayUnreachable;
       case _RelayErrorKind.timeout:
         final sorted = channels.toList()..sort();
         final who = sorted.isEmpty
-            ? 'Channel'
+            ? l10n.sharedChannel
             : sorted.map((c) => 'CH$c').join(', ');
-        return '$who did not respond';
+        return l10n.devNoResponse(who);
     }
   }
 
@@ -1001,7 +1003,7 @@ class _DevicesPageState extends State<DevicesPage>
       _applyStatusResult(result);
     } catch (e) {
       if (mounted) {
-        if (!silent) _showError('Failed to fetch status');
+        if (!silent) _showError(AppLocalizations.of(context)!.devFetchStatus);
         // A single failed poll is NOT device-offline evidence (flicker guard).
         // Only repeated consecutive failures count as strong evidence, and
         // that threshold lives inside the device reducer.
@@ -1361,23 +1363,22 @@ class _DevicesPageState extends State<DevicesPage>
         backgroundColor: colors.surface,
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.xl)),
-        title: Text('Delete Device',
+        title: Text(AppLocalizations.of(context)!.devDeleteTitle,
             style: GoogleFonts.sora(
                 fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
         content: Text(
-          'Are you sure you want to delete this device?\n'
-          'You can claim it again after deletion.',
+          AppLocalizations.of(context)!.devDeleteConfirm,
           style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('Cancel',
+            child: Text(AppLocalizations.of(context)!.sharedCancel,
                 style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Delete',
+            child: Text(AppLocalizations.of(context)!.sharedDelete,
                 style: GoogleFonts.inter(
                     fontSize: 13,
                     fontWeight: FontWeight.w700,
@@ -1408,7 +1409,7 @@ class _DevicesPageState extends State<DevicesPage>
         // The shared ApiService.onUnauthorized handler already handles sign-out.
         // Keep the device; do not pretend deletion succeeded.
         if (mounted) {
-          _showError('You appear to be signed out. Sign in again and retry.');
+          _showError(AppLocalizations.of(context)!.sharedSignedOut);
         }
         setState(() => _deleting = false);
         return;
@@ -1439,7 +1440,7 @@ class _DevicesPageState extends State<DevicesPage>
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(
-          content: Text('Device deleted.',
+          content: Text(AppLocalizations.of(context)!.devDeleted,
               style: const TextStyle(fontSize: 13)),
           backgroundColor: colors.stream,
           behavior: SnackBarBehavior.floating,
@@ -1452,8 +1453,7 @@ class _DevicesPageState extends State<DevicesPage>
       // Network / timeout / server / unexpected failure: keep the device and
       // surface a retryable error. Never claim deletion succeeded.
       setState(() => _deleting = false);
-      _showError('Could not delete the device. Check your connection and try '
-          'again.');
+      _showError(AppLocalizations.of(context)!.devDeleteFailed);
     }
   }
 
@@ -1465,12 +1465,14 @@ class _DevicesPageState extends State<DevicesPage>
   // covers the common case; additional relays fall back to a generated entry so
   // a device claimed with more channels never indexes past the list.
   ChannelConfig _configFor(int index) {
-    if (index < channels.length) return channels[index];
+    final l10n = AppLocalizations.of(context)!;
+    final localized = localizedChannels(l10n, _deviceChannels);
+    if (index < localized.length) return localized[index];
     return ChannelConfig(
-      'Zone ${index + 1}',
+      l10n.zoneName(index + 1),
       Icons.water_drop,
       const Color(0xFF0F766E),
-      'CHANNEL ${index + 1}',
+      l10n.channelCode(index + 1),
     );
   }
 
@@ -1485,24 +1487,25 @@ class _DevicesPageState extends State<DevicesPage>
   Widget _buildError(SteesColors colors) {
     // Uses the shared error component so the failure state is visually
     // consistent with the rest of the app.
+    final l10n = AppLocalizations.of(context)!;
     return SteesError(
-      title: 'Could not load devices',
-      subtitle: 'Check your connection and try again.',
+      title: l10n.devLoadFailed,
+      subtitle: l10n.sharedCheckConnection,
       onRetry: _retryLoad,
     );
   }
 
   Widget _buildEmpty(SteesColors colors) {
+    final l10n = AppLocalizations.of(context)!;
     return SteesEmpty(
       icon: Icons.water_drop_outlined,
-      title: 'No devices yet',
-      subtitle:
-          'Claim a Sonoff controller to start\nmanaging your irrigation zones.',
+      title: l10n.sharedNoDevices,
+      subtitle: l10n.devEmptyHint,
       action: FilledButton.icon(
         onPressed: _openAddDevice,
         icon: const Icon(Icons.add, size: 18),
         label: Text(
-          'Add Device',
+          l10n.devAdd,
           style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
         ),
         style: FilledButton.styleFrom(
@@ -1551,7 +1554,7 @@ class _DevicesPageState extends State<DevicesPage>
         AppSpacing.sm,
       ),
       child: Text(
-        'DEVICES',
+        AppLocalizations.of(context)!.devSectionTitle,
         style: GoogleFonts.sora(
           fontSize: 11,
           fontWeight: FontWeight.w700,
@@ -1719,7 +1722,7 @@ class _DevicesPageState extends State<DevicesPage>
                 const SizedBox(width: AppSpacing.xs),
                 IconButton(
                   onPressed: _deleting ? null : _confirmDeleteDevice,
-                  tooltip: 'Delete Device',
+                  tooltip: AppLocalizations.of(context)!.devDeleteTitle,
                   icon: _deleting
                       ? SizedBox(
                           width: 18,
@@ -1780,7 +1783,7 @@ class _DevicesPageState extends State<DevicesPage>
       child: Row(
         children: [
           Text(
-            'ZONES',
+            AppLocalizations.of(context)!.devZonesTitle,
             style: GoogleFonts.sora(
               fontSize: 11,
               fontWeight: FontWeight.w700,
@@ -1855,7 +1858,7 @@ class _DevicesPageState extends State<DevicesPage>
           onPressed: _openSchedules,
           icon: const Icon(Icons.update, size: 16),
           label: Text(
-            'Schedules',
+            AppLocalizations.of(context)!.devSchedulesBtn,
             style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600),
           ),
           style: OutlinedButton.styleFrom(
@@ -1908,15 +1911,16 @@ class _StatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final isGreen = kind == StatusBadgeKind.online ||
         kind == StatusBadgeKind.lan;
     final color = isGreen ? colors.leaf : colors.mist;
     final label = switch (kind) {
-      StatusBadgeKind.online => 'Online',
-      StatusBadgeKind.lan => 'LAN',
-      StatusBadgeKind.lanOnly => 'LAN ONLY',
-      StatusBadgeKind.offline => 'Offline',
-      StatusBadgeKind.syncing => 'SYNCING',
+      StatusBadgeKind.online => l10n.sharedOnline,
+      StatusBadgeKind.lan => l10n.devLan,
+      StatusBadgeKind.lanOnly => l10n.devLanOnly,
+      StatusBadgeKind.offline => l10n.sharedOffline,
+      StatusBadgeKind.syncing => l10n.devSyncing,
     };
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -2219,19 +2223,26 @@ class _WaterCardBodyState extends State<_WaterCardBody>
     // is shown once pending clears.
     if (pending) {
       final turningOn = desired == 'ON';
+      final l10n = AppLocalizations.of(context)!;
       return _SyncPill(
-        label: turningOn ? 'TURNING ON…' : 'TURNING OFF…',
+        label: turningOn ? l10n.devTurningOn : l10n.devTurningOff,
         color: colors.stream,
       );
     }
     // Not pending: show confirmed state as before.
     if (widget.showPendingIndicator) {
-      return _SyncPill(label: 'TURNING…', color: colors.stream);
+      return _SyncPill(
+          label: AppLocalizations.of(context)!.devTurning,
+          color: colors.stream);
     }
     if (widget.reported == null) {
       // UNKNOWN is never rendered as OFF. Connected+unknown → syncing;
       // otherwise the device is unreachable.
-      return widget.offline ? const _OfflineBadge() : _SyncPill(label: 'SYNCING', color: colors.mist);
+      return widget.offline
+          ? const _OfflineBadge()
+          : _SyncPill(
+              label: AppLocalizations.of(context)!.devSyncing,
+              color: colors.mist);
     }
     final confirmedIsOn = widget.reported == 'ON';
     return _FlowPill(isOn: confirmedIsOn, color: colors.leaf);
@@ -2327,7 +2338,8 @@ class _DropletToggle extends StatelessWidget {
         child: AnimatedAlign(
           duration: const Duration(milliseconds: 250),
           curve: Curves.easeInOut,
-          alignment: isOn ? Alignment.centerRight : Alignment.centerLeft,
+          alignment:
+              isOn ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
           child: Container(
             width: 16,
             height: 16,
@@ -2385,7 +2397,7 @@ class _OfflineBadge extends StatelessWidget {
           Icon(Icons.cloud_off, size: 9, color: colors.mist.withValues(alpha: 0.8)),
           const SizedBox(width: 4),
           Text(
-            'OFFLINE',
+            AppLocalizations.of(context)!.devOfflineBadge,
             style: GoogleFonts.jetBrainsMono(
               fontSize: 9,
               fontWeight: FontWeight.w700,
@@ -2460,7 +2472,9 @@ class _FlowPill extends StatelessWidget {
           ),
           const SizedBox(width: 4),
           Text(
-            isOn ? 'FLOWING' : 'DRY',
+            isOn
+                ? AppLocalizations.of(context)!.devFlowing
+                : AppLocalizations.of(context)!.devDry,
             style: GoogleFonts.jetBrainsMono(
               fontSize: 9,
               fontWeight: FontWeight.w700,

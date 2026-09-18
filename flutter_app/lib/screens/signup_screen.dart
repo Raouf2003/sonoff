@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
+import '../l10n/locale_controller.dart';
 import '../services/auth_service.dart';
 import '../services/api_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/language_menu_button.dart';
 
 class SignupScreen extends StatefulWidget {
-  const SignupScreen({super.key});
+  final LocaleController? localeController;
+  const SignupScreen({super.key, this.localeController});
 
   @override
   State<SignupScreen> createState() => _SignupScreenState();
@@ -33,23 +38,19 @@ class _SignupScreenState extends State<SignupScreen> {
     final u = _usernameCtl.text.trim();
     final p = _passwordCtl.text;
     final c = _confirmCtl.text;
-    if (u.isEmpty || p.isEmpty || c.isEmpty) { _err('Fill in all fields'); return; }
-    if (p != c) { _err('Passwords do not match'); return; }
-    if (p.length < 6) { _err('Password must be at least 6 characters'); return; }
+    final l10n = AppLocalizations.of(context)!;
+    if (u.isEmpty || p.isEmpty || c.isEmpty) { _err(l10n.authFillAll); return; }
+    if (p != c) { _err(l10n.authPwdMismatch); return; }
+    if (p.length < 6) { _err(l10n.authPwdShort); return; }
     setState(() => _loading = true);
     try {
       final data = await _api.signup(u, p);
       await _auth.saveToken(data['token'] as String);
       await _auth.saveUsername(data['user']['username'] as String);
       if (mounted) Navigator.of(context).pushNamedAndRemoveUntil('/home', (_) => false);
-    } catch (e) { _err(_friendly(e)); }
+    } catch (e) { if (mounted) _err(friendlyError(e, l10n)); }
     finally { if (mounted) setState(() => _loading = false); }
   }
-
-  // ApiException already carries a user-safe message; anything else is a
-  // programming/server edge case we never surface verbatim.
-  String _friendly(Object e) =>
-      e is ApiException ? e.message : 'Something went wrong. Please try again.';
 
   void _err(String m) {
     if (!mounted) return;
@@ -66,6 +67,7 @@ class _SignupScreenState extends State<SignupScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(
@@ -81,6 +83,13 @@ class _SignupScreenState extends State<SignupScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (widget.localeController != null)
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: LanguageMenuButton(
+                        controller: widget.localeController!,
+                      ),
+                    ),
                   Container(
                     width: 64, height: 64,
                     decoration: BoxDecoration(
@@ -95,16 +104,16 @@ class _SignupScreenState extends State<SignupScreen> {
                     child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
                   ),
                   const SizedBox(height: 16),
-                  Text('Create Account', style: GoogleFonts.sora(fontSize: 24, fontWeight: FontWeight.w700, color: colors.foam)),
+                  Text(l10n.authCreateAccount, style: GoogleFonts.sora(fontSize: 24, fontWeight: FontWeight.w700, color: colors.foam)),
                   const SizedBox(height: 6),
-                  Text('Join STEES', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+                  Text(l10n.authJoinStees, style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
                   const SizedBox(height: 36),
-                  _Field(controller: _usernameCtl, hint: 'Username', icon: Icons.person_outline, next: true),
+                  _Field(controller: _usernameCtl, hint: l10n.authUsername, icon: Icons.person_outline, next: true),
                   const SizedBox(height: 14),
-                  _Field(controller: _passwordCtl, hint: 'Password', icon: Icons.lock_outline, obscure: _obscure, next: true),
+                  _Field(controller: _passwordCtl, hint: l10n.authPassword, icon: Icons.lock_outline, obscure: _obscure, next: true),
                   const SizedBox(height: 14),
                   _Field(
-                    controller: _confirmCtl, hint: 'Confirm Password', icon: Icons.lock_outline, obscure: _obscure,
+                    controller: _confirmCtl, hint: l10n.authConfirmPassword, icon: Icons.lock_outline, obscure: _obscure,
                     suffix: IconButton(
                       icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18, color: colors.mist),
                       onPressed: () => setState(() => _obscure = !_obscure),
@@ -123,7 +132,7 @@ class _SignupScreenState extends State<SignupScreen> {
                       ),
                       child: _loading
                           ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
-                          : Text('Create Account', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                          : Text(l10n.authCreateAccount, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -131,9 +140,9 @@ class _SignupScreenState extends State<SignupScreen> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: RichText(
                       text: TextSpan(
-                        text: 'Already have an account?  ',
+                        text: l10n.authHaveAccount,
                         style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
-                        children: [TextSpan(text: 'Sign In', style: TextStyle(color: colors.stream, fontWeight: FontWeight.w600))],
+                        children: [TextSpan(text: l10n.authSignIn, style: TextStyle(color: colors.stream, fontWeight: FontWeight.w600))],
                       ),
                     ),
                   ),

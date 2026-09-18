@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
@@ -14,6 +16,9 @@ import 'schedule_form_screen.dart';
 /// any listed device reports offline; schedules converge automatically once
 /// the device reconnects (backend retry sweep), so no per-card sync state is
 /// tracked here.
+///
+/// The live banner text is localized ([AppLocalizations.schOfflineBanner]);
+/// this constant preserves the English source for tests and documentation.
 const kOfflineBannerText =
     'Device offline — schedules will sync automatically once it reconnects.';
 
@@ -220,39 +225,41 @@ class SchedulesPageState extends State<SchedulesPage> {
   void _confirmSaved(Object? result) {
     if (!mounted) return;
     if ((result is Map && result['_id'] != null) || result == true) {
-      _showInfo('Schedule saved');
+      _showInfo(AppLocalizations.of(context)!.schSaved);
     }
   }
 
   Future<void> _toggle(Map<String, dynamic> schedule) async {
     final id = schedule['_id'] as String;
     final target = !((schedule['enabled'] as bool?) ?? false);
+    final l10n = AppLocalizations.of(context)!;
     setState(() => schedule['enabled'] = target);
     try {
       await _api.toggleSchedule(id);
       if (!mounted) return;
-      _showInfo('Schedule saved');
+      _showInfo(l10n.schSaved);
       setState(() {});
     } catch (e) {
       if (!mounted) return;
       setState(() => schedule['enabled'] = !target);
-      _showError(e is ApiException ? e.message : 'Could not update the schedule');
+      _showError(e is ApiException ? friendlyError(e, l10n) : l10n.schUpdateFailed);
     }
   }
 
   Future<void> _delete(Map<String, dynamic> schedule) async {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final id = schedule['_id'] as String;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: colors.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.xl)),
-        title: Text('Delete schedule?', style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
-        content: Text('"${schedule['name']}" will be removed.', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+        title: Text(l10n.schDeleteTitle, style: GoogleFonts.sora(fontSize: 17, fontWeight: FontWeight.w600, color: colors.foam)),
+        content: Text(l10n.schDeleteConfirm('${schedule['name']}'), style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('Delete', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text(l10n.sharedCancel, style: GoogleFonts.inter(fontSize: 13, color: colors.mist))),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text(l10n.sharedDelete, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: colors.danger))),
         ],
       ),
     );
@@ -265,7 +272,7 @@ class SchedulesPageState extends State<SchedulesPage> {
     try {
       await _api.deleteSchedule(id);
       if (!mounted) return;
-      _showInfo('Schedule deleted');
+      _showInfo(l10n.schDeleted);
       await _load();
     } catch (e) {
       // Hard failure: restore the card to its original slot, normal look.
@@ -277,7 +284,7 @@ class SchedulesPageState extends State<SchedulesPage> {
           _schedules.add(schedule);
         }
       });
-      _showError(e is ApiException ? e.message : 'Could not delete the schedule');
+      _showError(e is ApiException ? friendlyError(e, l10n) : l10n.schDeleteFailed);
     }
   }
 
@@ -332,19 +339,20 @@ class SchedulesPageState extends State<SchedulesPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     if (_loading) return const SteesLoading();
     if (_loadError) {
       return SteesError(
-        title: 'Could not load schedules',
-        subtitle: 'Check your connection and try again.',
+        title: l10n.schLoadFailed,
+        subtitle: l10n.sharedCheckConnection,
         onRetry: _load,
       );
     }
     if (_devices.isEmpty) {
-      return const SteesEmpty(
+      return SteesEmpty(
         icon: Icons.devices_other,
-        title: 'No devices yet',
-        subtitle: 'Claim a device to start scheduling.',
+        title: l10n.sharedNoDevices,
+        subtitle: l10n.schEmptyDevicesHint,
       );
     }
     return RefreshIndicator(
@@ -388,7 +396,7 @@ class SchedulesPageState extends State<SchedulesPage> {
         AppSpacing.md,
       ),
       child: Text(
-        'SCHEDULES',
+        AppLocalizations.of(context)!.schSection,
         style: GoogleFonts.sora(
           fontSize: 11,
           fontWeight: FontWeight.w700,
@@ -425,7 +433,7 @@ class SchedulesPageState extends State<SchedulesPage> {
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
-              kOfflineBannerText,
+              AppLocalizations.of(context)!.schOfflineBanner,
               style: GoogleFonts.inter(fontSize: 12, color: colors.foam),
             ),
           ),
@@ -457,6 +465,7 @@ class _DeviceSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final channels = device['channels'] as int? ?? 4;
     // Open group: no enclosing box. A quiet header introduces the device and
     // the schedule tiles stand on their own — no card-in-card nesting.
@@ -485,7 +494,7 @@ class _DeviceSection extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        device['name'] as String? ?? 'Device',
+                        device['name'] as String? ?? l10n.sharedDevice,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w700, color: colors.foam),
@@ -493,8 +502,11 @@ class _DeviceSection extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         schedules.isEmpty
-                            ? 'CH1–CH$channels'
-                            : 'CH1–CH$channels  ·  ${schedules.length} ${schedules.length == 1 ? 'schedule' : 'schedules'}',
+                            ? l10n.sharedChannelRange(channels)
+                            : l10n.sharedScheduleCount(
+                                l10n.sharedChannelRange(channels),
+                                schedules.length,
+                              ),
                         style: GoogleFonts.jetBrainsMono(
                           fontSize: 9.5,
                           fontWeight: FontWeight.w500,
@@ -508,7 +520,7 @@ class _DeviceSection extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onAdd,
                   icon: const Icon(Icons.add, size: 15),
-                  label: Text('Add', style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  label: Text(l10n.sharedAdd, style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600)),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colors.foam,
                     side: BorderSide(color: colors.border),
@@ -538,7 +550,7 @@ class _DeviceSection extends StatelessWidget {
                     Icon(Icons.schedule_outlined, size: 14, color: colors.mist.withValues(alpha: 0.5)),
                     const SizedBox(width: AppSpacing.sm),
                     Text(
-                      'No schedules for this device',
+                      AppLocalizations.of(context)!.schEmptyDevice,
                       style: GoogleFonts.inter(fontSize: 12.5, color: colors.mist.withValues(alpha: 0.6)),
                     ),
                     const SizedBox(width: AppSpacing.sm),
@@ -589,12 +601,12 @@ class _ScheduleTile extends StatefulWidget {
 }
 
 class _ScheduleTileState extends State<_ScheduleTile> {
-  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     final s = widget.schedule;
     final enabled = (s['enabled'] as bool?) ?? false;
     final channels = (s['channels'] as List<dynamic>? ?? []).map((c) => 'CH$c').join(', ');
@@ -676,7 +688,7 @@ class _ScheduleTileState extends State<_ScheduleTile> {
               const SizedBox(height: AppSpacing.sm),
               Row(
                 children: [
-                  Text('Enabled', style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
+                  Text(l10n.sharedEnabled, style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
                   const SizedBox(width: AppSpacing.sm),
                   Switch(
                     value: enabled,
@@ -688,12 +700,12 @@ class _ScheduleTileState extends State<_ScheduleTile> {
                   IconButton(
                     onPressed: widget.onEdit,
                     icon: Icon(Icons.edit_outlined, size: 18, color: colors.stream),
-                    tooltip: 'Edit',
+                    tooltip: l10n.sharedEdit,
                   ),
                   IconButton(
                     onPressed: widget.onDelete,
                     icon: Icon(Icons.delete_outline, size: 18, color: colors.danger),
-                    tooltip: 'Delete',
+                    tooltip: l10n.sharedDelete,
                   ),
                 ],
               ),
@@ -723,14 +735,15 @@ class _ScheduleTileState extends State<_ScheduleTile> {
   }
 
   String _recurrenceSummary(Map<String, dynamic> schedule) {
+    final l10n = AppLocalizations.of(context)!;
     final recurrence = schedule['recurrence'] as Map<String, dynamic>? ?? {};
     if (recurrence['type'] == 'custom') {
       final days = (recurrence['daysOfWeek'] as List<dynamic>? ?? [])
-          .map((d) => _dayLabels[(d as int?) ?? 0])
+          .map((d) => weekdayLabel((d as int?) ?? 0, l10n.localeName))
           .join(', ');
-      return 'Custom: $days';
+      return l10n.sharedCustomDays(days);
     }
-    return 'Every day';
+    return l10n.sharedEveryDay;
   }
 
   List<({int start, int end})> _scheduleWindows(Map<String, dynamic> schedule) {

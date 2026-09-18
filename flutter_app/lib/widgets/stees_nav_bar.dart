@@ -45,6 +45,12 @@ class SteesNavBar extends StatelessWidget {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final segmentWidth = constraints.maxWidth / items.length;
+          // The indicator is positioned by absolute offset: mirror it in RTL
+          // so it stays under the selected segment (Row lays out RTL).
+          final rtl =
+              Directionality.of(context) == TextDirection.rtl;
+          final visualIndex =
+              rtl ? items.length - 1 - currentIndex : currentIndex;
           return Container(
             height: 68,
             decoration: BoxDecoration(
@@ -58,7 +64,7 @@ class SteesNavBar extends StatelessWidget {
                 AnimatedPositioned(
                   duration: slideDuration,
                   curve: Curves.easeOutCubic,
-                  left: currentIndex * segmentWidth,
+                  left: visualIndex * segmentWidth,
                   width: segmentWidth,
                   top: 0,
                   bottom: 0,
@@ -82,7 +88,7 @@ class SteesNavBar extends StatelessWidget {
                   duration: slideDuration,
                   curve:
                       reduceMotion ? Curves.linear : Curves.easeOutBack,
-                  left: currentIndex * segmentWidth + segmentWidth * 0.34,
+                  left: visualIndex * segmentWidth + segmentWidth * 0.34,
                   width: segmentWidth * 0.32,
                   top: 0,
                   child: Container(

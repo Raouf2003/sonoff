@@ -11,7 +11,23 @@ import 'api_service.dart';
 // system auto-display (the backend stamps the same id on the FCM
 // `android.notification` block). High importance so it always heads-ups.
 const String kWeatherChannelId = 'stees_weather';
+
+/// English source of the channel name. The live channel name/description are
+/// localized per app locale via [WeatherNotificationService.updateLocaleStrings]
+/// (Android persists channel settings after first creation; the description
+/// shown in system settings follows the locale active at creation/update).
 const String kWeatherChannelName = 'STEES Weather';
+
+/// English source of the channel description.
+const String kWeatherChannelDescription =
+    'Rain overlap advisories — alerts when irrigation overlaps forecast rain';
+
+/// English fallback title/body used when an FCM payload carries no title/body.
+/// Foreground display uses the localized overrides from
+/// [WeatherNotificationService.updateLocaleStrings]; the background isolate
+/// (which cannot access app state) keeps these English defaults.
+const String kWeatherFallbackTitle = 'Rain expected';
+const String kWeatherFallbackBody = 'Check your irrigation schedule';
 
 // Discriminator stamped by the backend on every weather advisory FCM payload
 // (`data.type`). Handlers route on it explicitly instead of guessing from
@@ -21,13 +37,28 @@ const String kWeatherAdvisoryType = 'weather_advisory';
 const AndroidNotificationChannel _weatherChannel = AndroidNotificationChannel(
   kWeatherChannelId,
   kWeatherChannelName,
-  description: 'Rain overlap advisories — alerts when irrigation overlaps forecast rain',
+  description: kWeatherChannelDescription,
   importance: Importance.max,
   playSound: true,
   enableVibration: true,
 );
 
-Future<void> _ensureWeatherChannel(FlutterLocalNotificationsPlugin local) async {
+/// Builds the notification channel with the given localized name/description.
+/// Falls back to the English sources when a value is null.
+AndroidNotificationChannel weatherChannelL10n(
+    {String? name, String? description}) {
+  return AndroidNotificationChannel(
+    kWeatherChannelId,
+    name ?? kWeatherChannelName,
+    description: description ?? kWeatherChannelDescription,
+    importance: Importance.max,
+    playSound: true,
+    enableVibration: true,
+  );
+}
+
+Future<void> _ensureWeatherChannel(FlutterLocalNotificationsPlugin local,
+    {AndroidNotificationChannel channel = _weatherChannel}) async {
   final android = local.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
   if (android == null) return;
   // Existing installs created this channel without an explicit sound — Android
@@ -35,9 +66,9 @@ Future<void> _ensureWeatherChannel(FlutterLocalNotificationsPlugin local) async 
   // then recreate to force default sound + max importance. Safe to run every
   // launch (re-creating an existing channel is a no-op after the first fix).
   try {
-    await android.deleteNotificationChannel(channelId: kWeatherChannelId);
+    await android.deleteNotificationChannel(channelId: channel.id);
   } catch (_) {}
-  await android.createNotificationChannel(_weatherChannel);
+  await android.createNotificationChannel(channel);
 }
 
 String _dataString(Map<String, dynamic> data, String key, String fallback) {
@@ -127,6 +158,33 @@ class WeatherNotificationService {
   String? _pendingDeviceId;
   void Function(String deviceId)? onNotificationTap;
 
+  /// Localized overrides set from the UI layer whenever the app locale is
+  /// known. Default to the English sources (also what the background isolate
+  /// uses — it cannot access app state).
+  String channelName = kWeatherChannelName;
+  String channelDescription = kWeatherChannelDescription;
+  String fallbackTitle = kWeatherFallbackTitle;
+  String fallbackBody = kWeatherFallbackBody;
+
+  /// Applies the current app-locale notification strings. Safe to call on
+  /// every build: string assignment only, no platform work.
+  void updateLocaleStrings({
+    required String channelName,
+    required String channelDescription,
+    required String fallbackTitle,
+    required String fallbackBody,
+  }) {
+    this.channelName = channelName;
+    this.channelDescription = channelDescription;
+    this.fallbackTitle = fallbackTitle;
+    this.fallbackBody = fallbackBody;
+  }
+
+  AndroidNotificationChannel get _channel => weatherChannelL10n(
+        name: channelName,
+        description: channelDescription,
+      );
+
   String? get pendingDeviceId => _pendingDeviceId;
   void consumePending() => _pendingDeviceId = null;
 
@@ -151,7 +209,7 @@ class WeatherNotificationService {
         },
       );
       // Create channel
-      await _ensureWeatherChannel(_local);
+      await _ensureWeatherChannel(_local, channel: _channel);
       // Cold start from a tapped LOCALLY-shown notification (e.g. posted by
       // the background handler while the app was dead): route like a tap.
       try {
@@ -179,9 +237,9 @@ class WeatherNotificationService {
       try {
         final data = msg.data;
         final title = msg.notification?.title ??
-            _dataString(data, 'title', 'Rain expected');
+            _dataString(data, 'title', fallbackTitle);
         final body = msg.notification?.body ??
-            _dataString(data, 'body', 'Check your irrigation schedule');
+            _dataString(data, 'body', fallbackBody);
         final deviceId = _dataString(data, 'deviceId', '');
         debugPrint(
             '[weather-notif] foreground msg type=${data['type'] ?? 'none'} device=$deviceId');
@@ -254,7 +312,7 @@ class WeatherNotificationService {
       // Belt-and-suspenders: re-creating an existing channel is a no-op, and
       // this repairs the case where init()'s channel step failed but FCM
       // listeners still attached.
-      await _ensureWeatherChannel(_local);
+      await _ensureWeatherChannel(_local, channel: _channel);
       await _local.show(
         id: DateTime.now().millisecondsSinceEpoch % 100000,
         title: title,
@@ -262,7 +320,7 @@ class WeatherNotificationService {
         notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails(
             kWeatherChannelId,
-            kWeatherChannelName,
+            channelName,
             importance: Importance.max,
             priority: Priority.high,
             playSound: true,

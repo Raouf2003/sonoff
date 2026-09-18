@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../services/api_service.dart';
 
@@ -42,8 +44,9 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
   Future<void> _add() async {
     final name = _nameCtl.text.trim();
     final id = _sensorIdCtl.text.trim();
-    if (name.isEmpty || id.isEmpty) { _err('Enter a Sensor Name and Sensor ID'); return; }
-    if (_selectedDeviceId == null) { _err('Select the Sonoff device for this sensor'); return; }
+    final l10n = AppLocalizations.of(context)!;
+    if (name.isEmpty || id.isEmpty) { _err(l10n.asEnterNameId); return; }
+    if (_selectedDeviceId == null) { _err(l10n.asSelectDevice); return; }
 
     final colors = context.steesColors;
 
@@ -65,23 +68,23 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
         builder: (_) => _ResultDialog(
           icon: Icons.check_circle,
           color: colors.leaf,
-          title: 'Sensor connected successfully.',
-          message: 'Your sensor is now linked to the Sonoff device.',
-          autoClose: Duration(milliseconds: 1500),
+          title: l10n.asAdded,
+          message: l10n.asAddedHint,
+          autoClose: const Duration(milliseconds: 1500),
         ),
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
-      final msg = e is ApiException ? e.message : 'Check the Sensor ID and make sure the ESP32 is connected.';
+      final msg = e is ApiException ? friendlyError(e, l10n) : l10n.asCheckId;
       await showDialog(
         context: context,
         barrierDismissible: true,
         builder: (_) => _ResultDialog(
           icon: Icons.error_outline,
           color: colors.danger,
-          title: 'Sensor not found',
+          title: l10n.asNotFound,
           message: msg,
         ),
       );
@@ -107,9 +110,10 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(l10n.asTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -140,6 +144,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
 
   Widget _buildIntro() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
@@ -155,12 +160,12 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
             children: [
               Icon(Icons.sensors, size: 18, color: colors.stream),
               const SizedBox(width: 10),
-              Text('LINK A SENSOR', style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: colors.mist)),
+              Text(l10n.asLink, style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 2.2, color: colors.mist)),
             ],
           ),
           const SizedBox(height: 10),
           Text(
-            'The sensor will be verified on MQTT before it is added. Make sure your ESP32 is powered on so it can be found.',
+            l10n.asLinkHint,
             style: GoogleFonts.inter(fontSize: 12.5, height: 1.55, color: colors.foam.withValues(alpha: 0.85)),
           ),
         ],
@@ -170,6 +175,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
 
   Widget _buildForm() {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
@@ -181,16 +187,16 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Sensor details', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: colors.foam)),
+          Text(l10n.asDetails, style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: colors.foam)),
           const SizedBox(height: 4),
           Text(
-            'Enter the Sensor ID exactly as configured on the device, then choose which Sonoff controller it belongs to.',
+            l10n.asDetailsHint,
             style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.7)),
           ),
           const SizedBox(height: 18),
-          _Field(controller: _nameCtl, hint: 'Sensor Name', subtitle: 'e.g. Soil Moisture', icon: Icons.label_outline, next: true),
+          _Field(controller: _nameCtl, hint: l10n.asNameHint, subtitle: l10n.asNameHelper, icon: Icons.label_outline, next: true),
           const SizedBox(height: 12),
-          _Field(controller: _sensorIdCtl, hint: 'Sensor ID', subtitle: 'e.g. soil_1', icon: Icons.sensors, onSubmit: _adding ? null : () => _add()),
+          _Field(controller: _sensorIdCtl, hint: l10n.asIdHint, subtitle: l10n.asIdHelper, icon: Icons.sensors, onSubmit: _adding ? null : () => _add()),
           const SizedBox(height: 12),
           _DeviceDropdown(
             devices: _devices,
@@ -207,7 +213,7 @@ class _AddSensorScreenState extends State<AddSensorScreen> {
                 foregroundColor: colors.well,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               ),
-              child: Text('Add Sensor', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+              child: Text(l10n.asTitle, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
             ),
           ),
         ],
@@ -222,6 +228,7 @@ class _SearchingDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Dialog(
       backgroundColor: colors.submerged,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -232,10 +239,10 @@ class _SearchingDialog extends StatelessWidget {
           children: [
             SizedBox(width: 34, height: 34, child: CircularProgressIndicator(strokeWidth: 3, color: colors.stream)),
             const SizedBox(height: 20),
-            Text('Searching for sensor...', style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: colors.foam)),
+            Text(l10n.asSearching, style: GoogleFonts.sora(fontSize: 16, fontWeight: FontWeight.w600, color: colors.foam)),
             const SizedBox(height: 8),
             Text(
-              'Waiting for the sensor to report on MQTT. This can take a few seconds.',
+              l10n.asSearchingHint,
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(fontSize: 12, height: 1.5, color: colors.mist.withValues(alpha: 0.8)),
             ),
@@ -273,6 +280,7 @@ class _ResultDialogState extends State<_ResultDialog> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Dialog(
       backgroundColor: colors.submerged,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -301,7 +309,7 @@ class _ResultDialogState extends State<_ResultDialog> {
                     foregroundColor: colors.well,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: Text('OK', style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
+                  child: Text(l10n.sharedOk, style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700)),
                 ),
               ),
             ],
@@ -322,6 +330,7 @@ class _DeviceDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return DropdownButtonFormField<String>(
       initialValue: value,
       isExpanded: true,
@@ -329,10 +338,10 @@ class _DeviceDropdown extends StatelessWidget {
       dropdownColor: colors.submerged,
       icon: Icon(Icons.expand_more, size: 18, color: colors.mist),
       decoration: InputDecoration(
-        labelText: 'Device',
-        hintText: devices.isEmpty ? 'No Sonoff devices yet' : 'Select the Sonoff device',
+        labelText: l10n.asDeviceLbl,
+        hintText: devices.isEmpty ? l10n.asNoDevices : l10n.asSelectHint,
         labelStyle: GoogleFonts.inter(fontSize: 12, color: colors.mist),
-        helperText: 'e.g. Greenhouse Sonoff',
+        helperText: l10n.asDeviceHelper,
         helperStyle: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
         prefixIcon: Icon(Icons.settings_input_hdmi, size: 18, color: colors.mist),
         filled: true,

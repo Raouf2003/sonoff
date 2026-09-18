@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:smart_home_app/screens/devices_page.dart';
@@ -543,6 +544,8 @@ Future<void> _pumpDevicesPage(
   _mockSecureStorage(tester);
   await tester.pumpWidget(
     MaterialApp(
+      localizationsDelegates: testDelegates,
+      supportedLocales: testLocales,
       theme: AppTheme.light(),
       home: Scaffold(
         body: DevicesPage.test(
@@ -628,8 +631,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('rapid opposite taps coalesce to last-tap-wins with follow-up',
-      (tester) async {
+  testWidgets('rapid opposite taps coalesce to last-tap-wins with follow-up', (
+    tester,
+  ) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -673,8 +677,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('first tap fires immediately with 0ms delay (regression guard)',
-      (tester) async {
+  testWidgets('first tap fires immediately with 0ms delay (regression guard)', (
+    tester,
+  ) async {
     final repo = _FakeRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -683,52 +688,67 @@ void main() {
     await tester.pump();
     sw.stop();
     expect(repo.controlCalls, 1);
-    expect(sw.elapsedMilliseconds, lessThan(100),
-        reason: 'first tap must fire immediately, not delayed by kMinRelayInterval');
+    expect(
+      sw.elapsedMilliseconds,
+      lessThan(100),
+      reason:
+          'first tap must fire immediately, not delayed by kMinRelayInterval',
+    );
     expect(find.text('TURNING ON…'), findsOneWidget);
 
     await _unmount(tester);
   });
 
-  testWidgets('new tap during 300ms delay updates eventual target (last-wins)',
-      (tester) async {
-    final repo = _FakeRepo(gateControl: true);
-    await _pumpDevicesPage(tester, repo: repo);
+  testWidgets(
+    'new tap during 300ms delay updates eventual target (last-wins)',
+    (tester) async {
+      final repo = _FakeRepo(gateControl: true);
+      await _pumpDevicesPage(tester, repo: repo);
 
-    // First tap ON
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pump();
-    expect(repo.controlCalls, 1);
-    // Second tap OFF while pending — queued OFF
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pump();
-    expect(find.text('TURNING OFF…'), findsOneWidget);
+      // First tap ON
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(repo.controlCalls, 1);
+      // Second tap OFF while pending — queued OFF
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      expect(find.text('TURNING OFF…'), findsOneWidget);
 
-    // Release first control (ON) — schedules follow-up OFF after 300ms
-    repo.releaseControl.complete();
-    await tester.pump();
-    expect(repo.controlCalls, 1);
+      // Release first control (ON) — schedules follow-up OFF after 300ms
+      repo.releaseControl.complete();
+      await tester.pump();
+      expect(repo.controlCalls, 1);
 
-    // During the 300ms gap, tap again to ON — should update queued to ON
-    await tester.pump(const Duration(milliseconds: 150));
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pump();
-    // Queued should now be ON — the tap should be accepted and coalesced
-    expect(repo.controlCalls, 1,
-        reason: 'new tap during gap should update queued, not fire immediate HTTP');
+      // During the 300ms gap, tap again to ON — should update queued to ON
+      await tester.pump(const Duration(milliseconds: 150));
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
+      // Queued should now be ON — the tap should be accepted and coalesced
+      expect(
+        repo.controlCalls,
+        1,
+        reason:
+            'new tap during gap should update queued, not fire immediate HTTP',
+      );
 
-    // After remaining delay, follow-up would fire with latest (ON), but since
-    // the device is already ON, no follow-up is needed
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.pump();
-    expect(repo.controlCalls, 1,
-        reason: 'latest queued ON already matches reported ON, no follow-up needed');
+      // After remaining delay, follow-up would fire with latest (ON), but since
+      // the device is already ON, no follow-up is needed
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      expect(
+        repo.controlCalls,
+        1,
+        reason:
+            'latest queued ON already matches reported ON, no follow-up needed',
+      );
 
-    await _unmount(tester);
-  });
+      await _unmount(tester);
+    },
+  );
 
-  testWidgets('SUPERSEDED error does not show toast (coalesced race)',
-      (tester) async {
+  testWidgets('SUPERSEDED error does not show toast (coalesced race)', (
+    tester,
+  ) async {
     final repo = _SupersededRepo();
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -743,8 +763,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('coalesced follow-up timeout shows "Device is busy, try again"',
-      (tester) async {
+  testWidgets('coalesced follow-up timeout shows "Device is busy, try again"', (
+    tester,
+  ) async {
     final repo = _BusyTimeoutRepo(gateControl: true);
     await _pumpDevicesPage(tester, repo: repo);
 
@@ -772,8 +793,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('standalone timeout shows timeout message, not busy',
-      (tester) async {
+  testWidgets('standalone timeout shows timeout message, not busy', (
+    tester,
+  ) async {
     final repo = _BusyTimeoutRepo(gateControl: false);
     repo.failNextAsBusy = true;
     await _pumpDevicesPage(tester, repo: repo);
@@ -786,8 +808,10 @@ void main() {
     // Raw backend text never reaches the UI: the approved timeout message
     // names the channel; the busy message is reserved for rapid-tap bursts.
     expect(find.text('CH1 did not respond'), findsOneWidget);
-    expect(find.text('The device did not confirm the command before timing out.'),
-        findsNothing);
+    expect(
+      find.text('The device did not confirm the command before timing out.'),
+      findsNothing,
+    );
     expect(find.text('Device is busy, try again'), findsNothing);
 
     await _unmount(tester);
@@ -889,7 +913,8 @@ void main() {
       expect(
         leafDrops(),
         2,
-        reason: 'the requested state is shown before the device confirms (main icon + toggle icon)',
+        reason:
+            'the requested state is shown before the device confirms (main icon + toggle icon)',
       );
 
       // A FRESH device report contradicting the optimistic flip (the device
@@ -968,8 +993,9 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('same-WiFi tap is dispatched local-only (no cloud round-trip)',
-      (tester) async {
+  testWidgets('same-WiFi tap is dispatched local-only (no cloud round-trip)', (
+    tester,
+  ) async {
     final repo = _FakeRepo(source: DeviceTransportSource.local);
     final socket = _ScriptableSocket();
     final monitor = ReachabilityMonitor(repo);
@@ -985,8 +1011,11 @@ void main() {
     await tester.tap(find.text('CHANNEL 1'));
     await tester.pump();
 
-    expect(repo.lastRoute, ControlRoute.localOnly,
-        reason: 'a same-WiFi tap must be dispatched local-only');
+    expect(
+      repo.lastRoute,
+      ControlRoute.localOnly,
+      reason: 'a same-WiFi tap must be dispatched local-only',
+    );
     expect(repo.controlCalls, 1);
 
     // The fake's LOCAL-source result confirms: the command was confirmed by the
@@ -996,29 +1025,34 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('different-network tap is dispatched cloud-only (no LAN attempt)',
-      (tester) async {
-    final repo = _FakeRepo(source: DeviceTransportSource.cloud);
-    final socket = _ScriptableSocket();
-    final monitor = ReachabilityMonitor(repo);
-    await _pumpDevicesPage(
-      tester,
-      repo: repo,
-      socketFactory: (u, o) => socket,
-      monitor: monitor,
-    );
+  testWidgets(
+    'different-network tap is dispatched cloud-only (no LAN attempt)',
+    (tester) async {
+      final repo = _FakeRepo(source: DeviceTransportSource.cloud);
+      final socket = _ScriptableSocket();
+      final monitor = ReachabilityMonitor(repo);
+      await _pumpDevicesPage(
+        tester,
+        repo: repo,
+        socketFactory: (u, o) => socket,
+        monitor: monitor,
+      );
 
-    // Background state: different network + cloud socket connected.
-    monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
-    await tester.tap(find.text('CHANNEL 1'));
-    await tester.pump();
+      // Background state: different network + cloud socket connected.
+      monitor.state.value = monitor.state.value.copyWith(sameWifi: false);
+      await tester.tap(find.text('CHANNEL 1'));
+      await tester.pump();
 
-    expect(repo.lastRoute, ControlRoute.cloudOnly,
-        reason: 'a different-network tap must be dispatched cloud-only');
-    expect(repo.controlCalls, 1);
+      expect(
+        repo.lastRoute,
+        ControlRoute.cloudOnly,
+        reason: 'a different-network tap must be dispatched cloud-only',
+      );
+      expect(repo.controlCalls, 1);
 
-    await _unmount(tester);
-  });
+      await _unmount(tester);
+    },
+  );
 
   group('background reachability monitor (continuous routing state)', () {
     testWidgets(
@@ -1042,8 +1076,11 @@ void main() {
         monitor.notifyNetworkChanged(_deviceId);
         monitor.notifyNetworkChanged(_deviceId);
         await tester.pump(const Duration(milliseconds: 100));
-        expect(repo.sameWifiProbes, 0,
-            reason: 'still inside the settle window — no probe yet');
+        expect(
+          repo.sameWifiProbes,
+          0,
+          reason: 'still inside the settle window — no probe yet',
+        );
         await tester.pump(const Duration(milliseconds: 400));
         expect(
           repo.sameWifiProbes,
@@ -1119,13 +1156,15 @@ void main() {
         // (S2) → local-status result (S4) → socket reconnect (S1) → debounced
         // probe (S5), all landing within kBadgeSettleDelay. The local-status
         // result (S4) is also the badge-truth positive signal.
-        monitor.state.value =
-            monitor.state.value.copyWith(cloudSocketReady: false); // S2
+        monitor.state.value = monitor.state.value.copyWith(
+          cloudSocketReady: false,
+        ); // S2
         await tester.pump(const Duration(milliseconds: 100));
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.local); // S4
         await tester.pump(const Duration(milliseconds: 100));
-        monitor.state.value =
-            monitor.state.value.copyWith(cloudSocketReady: true); // S1
+        monitor.state.value = monitor.state.value.copyWith(
+          cloudSocketReady: true,
+        ); // S1
         await tester.pump(const Duration(milliseconds: 100));
 
         // No intermediate write rendered: the badge is debounced.
@@ -1252,32 +1291,29 @@ void main() {
   });
 
   group('ReachabilityMonitor hysteresis (sameWifi downgrade confirmation)', () {
-    test(
-      'a single transient cloud-sourced read never downgrades a confirmed '
-      'same-WiFi verdict — the sticky window absorbs it',
-      () {
-        final repo = _FakeRepo();
-        final monitor = ReachabilityMonitor(repo);
-        var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
-        monitor.now = () => fakeNow;
+    test('a single transient cloud-sourced read never downgrades a confirmed '
+        'same-WiFi verdict — the sticky window absorbs it', () {
+      final repo = _FakeRepo();
+      final monitor = ReachabilityMonitor(repo);
+      var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
+      monitor.now = () => fakeNow;
 
-        // Device confirmed on the same network (local status read).
-        monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
-        expect(monitor.state.value.sameWifi, isTrue);
+      // Device confirmed on the same network (local status read).
+      monitor.noteStatusResult(_deviceId, DeviceTransportSource.local);
+      expect(monitor.state.value.sameWifi, isTrue);
 
-        // One transient cloud fallback (e.g. a single 15s poll that lost the
-        // local HTTP round-trip) inside kDowngradeStickyWindow (10s).
-        fakeNow = fakeNow.add(const Duration(seconds: 5));
-        monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
-        expect(
-          monitor.state.value.sameWifi,
-          isTrue,
-          reason: 'a single cloud-sourced read must not downgrade the verdict',
-        );
+      // One transient cloud fallback (e.g. a single 15s poll that lost the
+      // local HTTP round-trip) inside kDowngradeStickyWindow (10s).
+      fakeNow = fakeNow.add(const Duration(seconds: 5));
+      monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
+      expect(
+        monitor.state.value.sameWifi,
+        isTrue,
+        reason: 'a single cloud-sourced read must not downgrade the verdict',
+      );
 
-        monitor.dispose();
-      },
-    );
+      monitor.dispose();
+    });
 
     test(
       'a downgrade needs 2 consecutive cloud-sourced reads AFTER the sticky '
@@ -1292,7 +1328,9 @@ void main() {
         expect(monitor.state.value.sameWifi, isTrue);
 
         // Sticky window expires; the next cloud read only starts counting.
-        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(
+          kDowngradeStickyWindow + const Duration(seconds: 1),
+        );
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
         expect(
           monitor.state.value.sameWifi,
@@ -1306,7 +1344,8 @@ void main() {
         expect(
           monitor.state.value.sameWifi,
           isFalse,
-          reason: '2 consecutive cloud reads with no local confirmation '
+          reason:
+              '2 consecutive cloud reads with no local confirmation '
               'confirm the downgrade',
         );
 
@@ -1316,7 +1355,9 @@ void main() {
         expect(monitor.state.value.sameWifi, isTrue);
 
         // After the reset, one stray cloud read again cannot downgrade.
-        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(
+          kDowngradeStickyWindow + const Duration(seconds: 1),
+        );
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
         expect(
           monitor.state.value.sameWifi,
@@ -1353,7 +1394,9 @@ void main() {
         );
 
         // After the sticky window, one more failed probe only starts counting.
-        fakeNow = fakeNow.add(kDowngradeStickyWindow + const Duration(seconds: 1));
+        fakeNow = fakeNow.add(
+          kDowngradeStickyWindow + const Duration(seconds: 1),
+        );
         monitor.notifyNetworkChanged(_deviceId);
         await tester.pump(const Duration(milliseconds: 400));
         await tester.pump();
@@ -1372,7 +1415,8 @@ void main() {
         expect(
           monitor.state.value.sameWifi,
           isFalse,
-          reason: '2 consecutive failed probes with no local confirmation '
+          reason:
+              '2 consecutive failed probes with no local confirmation '
               'confirm the downgrade',
         );
 
@@ -1557,7 +1601,8 @@ void main() {
       expect(
         find.text('Online'),
         findsNothing,
-        reason: 'cloud confirmed down without local evidence must not read green Online',
+        reason:
+            'cloud confirmed down without local evidence must not read green Online',
       );
       expect(find.text('SYNCING'), findsOneWidget);
       expect(find.text('Offline'), findsNothing);
@@ -1597,7 +1642,8 @@ void main() {
         expect(
           find.text('Offline'),
           findsOneWidget,
-          reason: 'three fast LOCAL failures with a verified same-WiFi path '
+          reason:
+              'three fast LOCAL failures with a verified same-WiFi path '
               'are strong offline evidence; the badge never claims LAN without '
               'fresh local proof',
         );
@@ -1611,7 +1657,9 @@ void main() {
       },
     );
 
-    testWidgets('fast local probes stop once the cloud recovers', (tester) async {
+    testWidgets('fast local probes stop once the cloud recovers', (
+      tester,
+    ) async {
       final repo = _FakeRepo();
       final socket = _ScriptableSocket();
       final monitor = ReachabilityMonitor(repo);
@@ -2206,75 +2254,83 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('reconnect keeps the LAN badge while the device stays on the same '
-      'network — the badge follows routing and never bounces (Issue 1)', (
-      tester,
-    ) async {
-      final socket = _ScriptableSocket();
-      final repo = _CloudThenLocalRepo();
-      await _pumpDevicesPage(
-        tester,
-        repo: repo,
-        socketFactory: (u, o) => socket,
-      );
+    testWidgets(
+      'reconnect keeps the LAN badge while the device stays on the same '
+      'network — the badge follows routing and never bounces (Issue 1)',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo = _CloudThenLocalRepo();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      // First read was cloud-sourced (device not yet on same WiFi) → ONLINE.
-      expect(find.text('Online'), findsOneWidget);
+        // First read was cloud-sourced (device not yet on same WiFi) → ONLINE.
+        expect(find.text('Online'), findsOneWidget);
 
-      socket.fireDisconnect();
-      await tester.pump();
-      expect(find.text('LAN'), findsOneWidget);
+        socket.fireDisconnect();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
 
-      socket.fireConnect();
-      await tester.pump();
-      // The device is STILL on the same network (subsequent reads are local),
-      // so routing stays local and the badge must stay LAN — no bounce to
-      // ONLINE just because the cloud socket recovered.
-      expect(
-        find.text('LAN'),
-        findsOneWidget,
-        reason: 'a same-WiFi device keeps the LAN badge after a socket reconnect',
-      );
-      expect(find.text('Online'), findsNothing);
+        socket.fireConnect();
+        await tester.pump();
+        // The device is STILL on the same network (subsequent reads are local),
+        // so routing stays local and the badge must stay LAN — no bounce to
+        // ONLINE just because the cloud socket recovered.
+        expect(
+          find.text('LAN'),
+          findsOneWidget,
+          reason:
+              'a same-WiFi device keeps the LAN badge after a socket reconnect',
+        );
+        expect(find.text('Online'), findsNothing);
 
-      socket.push('device_status', {'deviceId': _deviceId, 'online': true});
-      await tester.pump();
-      expect(
-        find.text('LAN'),
-        findsOneWidget,
-        reason: 'fresh cloud device evidence does not flip a same-WiFi device',
-      );
+        socket.push('device_status', {'deviceId': _deviceId, 'online': true});
+        await tester.pump();
+        expect(
+          find.text('LAN'),
+          findsOneWidget,
+          reason:
+              'fresh cloud device evidence does not flip a same-WiFi device',
+        );
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
-    testWidgets('a different-network device (cloud source) shows ONLINE after a '
-        'socket reconnect — cloud routing restored', (tester) async {
-      final socket = _ScriptableSocket();
-      final repo = _FakeRepo(); // cloud source: device NOT on the same network
-      await _pumpDevicesPage(
-        tester,
-        repo: repo,
-        socketFactory: (u, o) => socket,
-      );
-      expect(find.text('Online'), findsOneWidget);
-      expect(find.text('LAN'), findsNothing);
+    testWidgets(
+      'a different-network device (cloud source) shows ONLINE after a '
+      'socket reconnect — cloud routing restored',
+      (tester) async {
+        final socket = _ScriptableSocket();
+        final repo =
+            _FakeRepo(); // cloud source: device NOT on the same network
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
+        expect(find.text('Online'), findsOneWidget);
+        expect(find.text('LAN'), findsNothing);
 
-      socket.fireDisconnect();
-      await tester.pump();
-      socket.fireConnect();
-      await tester.pump();
-      await tester.pump();
+        socket.fireDisconnect();
+        await tester.pump();
+        socket.fireConnect();
+        await tester.pump();
+        await tester.pump();
 
-      expect(
-        find.text('Online'),
-        findsOneWidget,
-        reason: 'cloud reachability restores ONLINE for a cloud-routed device',
-      );
-      expect(find.text('LAN'), findsNothing);
+        expect(
+          find.text('Online'),
+          findsOneWidget,
+          reason:
+              'cloud reachability restores ONLINE for a cloud-routed device',
+        );
+        expect(find.text('LAN'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
 
     testWidgets(
       'healthy-cloud local polls keep the LAN badge — a same-WiFi probe never '
@@ -2686,51 +2742,55 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('cold start: LAN displayed, then cloud reconnects → the same-WiFi '
-        'badge stays LAN (routing never bounced)', (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final cache = LocalDeviceCache();
-      await cache.upsert({
-        'deviceId': _deviceId,
-        'name': 'Controller',
-        'channels': 4,
-      });
-      final cm = _CmFake(
-        responses: {'Status%205': _macBody, 'State': _stateBody},
-      );
-      final repo = DeviceRepositoryService(
-        cloud: CloudDeviceTransport(api: _CloudDownApi()),
-        locator: _LocatorStub(cached: '192.168.1.5'),
-        fetch: cm.call,
-        cache: cache,
-      );
-      final socket = _ScriptableSocket();
-      await _pumpDevicesPage(
-        tester,
-        repo: repo,
-        socketFactory: (u, o) => socket,
-      );
+    testWidgets(
+      'cold start: LAN displayed, then cloud reconnects → the same-WiFi '
+      'badge stays LAN (routing never bounced)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final cache = LocalDeviceCache();
+        await cache.upsert({
+          'deviceId': _deviceId,
+          'name': 'Controller',
+          'channels': 4,
+        });
+        final cm = _CmFake(
+          responses: {'Status%205': _macBody, 'State': _stateBody},
+        );
+        final repo = DeviceRepositoryService(
+          cloud: CloudDeviceTransport(api: _CloudDownApi()),
+          locator: _LocatorStub(cached: '192.168.1.5'),
+          fetch: cm.call,
+          cache: cache,
+        );
+        final socket = _ScriptableSocket();
+        await _pumpDevicesPage(
+          tester,
+          repo: repo,
+          socketFactory: (u, o) => socket,
+        );
 
-      socket.fireConnectError();
-      await tester.pump();
-      expect(find.text('LAN'), findsOneWidget);
+        socket.fireConnectError();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
 
-      // Cloud comes back: the same-WiFi device keeps the LAN badge — the
-      // reconnect must not bounce routing (or the badge) to ONLINE.
-      socket.fireConnect();
-      await tester.pump();
-      expect(find.text('LAN'), findsOneWidget);
-      expect(find.text('Online'), findsNothing);
+        // Cloud comes back: the same-WiFi device keeps the LAN badge — the
+        // reconnect must not bounce routing (or the badge) to ONLINE.
+        socket.fireConnect();
+        await tester.pump();
+        expect(find.text('LAN'), findsOneWidget);
+        expect(find.text('Online'), findsNothing);
 
-      await _unmount(tester);
-    });
+        await _unmount(tester);
+      },
+    );
   });
 
   group('fast cloud-failure detection (health monitor)', () {
     testWidgets('Online → Internet lost → fast confirmed failure → immediate '
         'LAN probe → LAN (no socket timeout wait)', (tester) async {
       final socket = _ScriptableSocket();
-      final repo = _CloudThenLocalRepo(); // first read cloud (Online) → probe local (LAN)
+      final repo =
+          _CloudThenLocalRepo(); // first read cloud (Online) → probe local (LAN)
       var healthy = true;
       await _pumpDevicesPage(
         tester,
@@ -2831,7 +2891,8 @@ void main() {
       expect(
         find.text('LAN'),
         findsOneWidget,
-        reason: 'a same-WiFi device keeps LAN after recovery — no wedge, no bounce',
+        reason:
+            'a same-WiFi device keeps LAN after recovery — no wedge, no bounce',
       );
       expect(find.text('Online'), findsNothing);
 
@@ -3476,7 +3537,10 @@ void main() {
         // kDowngradeStickyWindow (10s) work together without deadlock or
         // stuck-pending when a burst of coalesced taps coincides with a WiFi
         // transition. Exercises all three timers simultaneously.
-        final repo = _FakeRepo(gateControl: true, source: DeviceTransportSource.local);
+        final repo = _FakeRepo(
+          gateControl: true,
+          source: DeviceTransportSource.local,
+        );
         final socket = _ScriptableSocket();
         final monitor = ReachabilityMonitor(repo);
         var fakeNow = DateTime(2026, 1, 1, 12, 0, 0);
@@ -3507,26 +3571,34 @@ void main() {
 
         await tester.tap(find.text('CHANNEL 1'));
         await tester.pump();
-        expect(repo.controlCalls, 1,
-            reason: 'second tap must coalesce, not fire second HTTP');
+        expect(
+          repo.controlCalls,
+          1,
+          reason: 'second tap must coalesce, not fire second HTTP',
+        );
         expect(find.text('TURNING OFF…'), findsOneWidget);
 
         // While those taps are coalesced (kMinRelayInterval pending after first
         // resolves), flap WiFi: socket drop → sameWifi cloud hiccup → reconnect,
         // all inside kBadgeSettleDelay (500ms) and inside kDowngradeStickyWindow
         // (10s). This is the exact burst from the badge test.
-        monitor.state.value =
-            monitor.state.value.copyWith(cloudSocketReady: false); // S2
+        monitor.state.value = monitor.state.value.copyWith(
+          cloudSocketReady: false,
+        ); // S2
         await tester.pump(const Duration(milliseconds: 100));
         // A transient cloud-sourced status read arrives while sameWifi is still
         // fresh — must be absorbed by the 10s sticky window, not downgrade.
         fakeNow = fakeNow.add(const Duration(seconds: 2));
         monitor.noteStatusResult(_deviceId, DeviceTransportSource.cloud);
-        expect(monitor.state.value.sameWifi, isTrue,
-            reason: 'sticky window must absorb transient cloud read');
+        expect(
+          monitor.state.value.sameWifi,
+          isTrue,
+          reason: 'sticky window must absorb transient cloud read',
+        );
         await tester.pump(const Duration(milliseconds: 100));
-        monitor.state.value =
-            monitor.state.value.copyWith(cloudSocketReady: true); // S1 reconnect
+        monitor.state.value = monitor.state.value.copyWith(
+          cloudSocketReady: true,
+        ); // S1 reconnect
         await tester.pump(const Duration(milliseconds: 100));
 
         // No badge flicker yet — still debounced.
@@ -3546,8 +3618,11 @@ void main() {
         // (a) Relay: last-tapped was OFF, first completed as ON → follow-up
         // must fire with OFF. This verifies the 300ms gap doesn't swallow the
         // coalesced intent and the last-wins value is honored.
-        expect(repo.controlCalls, 2,
-            reason: 'coalesced OFF must fire as follow-up after 300ms gap');
+        expect(
+          repo.controlCalls,
+          2,
+          reason: 'coalesced OFF must fire as follow-up after 300ms gap',
+        );
         // The coalesced OFF→ON sequence leaves desired ON pending during the
         // gap, but since the gap found no work, the UI should settle to the
         // confirmed ON (FLOWING) once timers clear.
@@ -3570,8 +3645,11 @@ void main() {
         // follow-up) + 1 (fresh CHANNEL 2) = 3.
         await tester.tap(find.text('CHANNEL 2'));
         await tester.pump();
-        expect(repo.controlCalls, 3,
-            reason: 'new device/channel tap must not be throttled by prior gap');
+        expect(
+          repo.controlCalls,
+          3,
+          reason: 'new device/channel tap must not be throttled by prior gap',
+        );
 
         // (d) No exception — reaching here is the crash check.
         await _unmount(tester);

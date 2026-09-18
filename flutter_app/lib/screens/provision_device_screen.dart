@@ -10,6 +10,8 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/device_type.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/device_repository_service.dart';
@@ -60,6 +62,9 @@ const List<Duration> kLocalSetupBackoff = [
 
 /// Fallback diagnostic for the recoverable local-control screen when the
 /// repository produced no more specific reason.
+///
+/// The live message is localized ([AppLocalizations.pvLocalFallback]); this
+/// constant preserves the English source.
 const String kLocalSetupFallbackMessage =
     'Local HTTP control could not be enabled and verified on the device. '
     'Make sure this phone is on the same Wi-Fi as the device, then try again.';
@@ -156,9 +161,8 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   // Closed-loop duplicate message for a device already registered. Re-claiming
   // inside the wizard is intentionally unsupported: the existing device must be
-  // deleted from the Devices page first.
-  static const String _alreadyExistsMessage =
-      'The device already exists. You must delete it before claiming it again.';
+  // deleted from the Devices page first. The live text is localized
+  // ([AppLocalizations.pvAlreadyExists]).
 
   // Give up waiting for the device to appear on the backend after this long.
   // Must comfortably exceed the backend's recentDevices window so a device that
@@ -354,28 +358,29 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
 
   /// Mono stage readout mapped from the EXISTING state machine — display only.
   String get _waitStageReadout {
+    final l10n = AppLocalizations.of(context)!;
     switch (_state) {
       case ProvisionState.waitingForReboot:
-        return 'REBOOTING';
+        return l10n.pvWaitRebooting;
       case ProvisionState.waitingForWifi:
-        return 'JOINING WI-FI';
+        return l10n.pvWaitJoining;
       case ProvisionState.waitingForMqtt:
-        return 'CONNECTING TO MQTT';
+        return l10n.pvWaitMqtt;
       case ProvisionState.deviceDetected:
-        return 'DEVICE DETECTED';
+        return l10n.pvWaitDetected;
       case ProvisionState.verifyingPossession:
-        return 'VERIFYING';
+        return l10n.pvWaitVerifying;
       case ProvisionState.claiming:
-        return 'CLAIMING';
+        return l10n.pvWaitClaiming;
       case ProvisionState.settingUpLocalControl:
       case ProvisionState.localSetupWaiting:
-        return 'FINALIZING';
+        return l10n.pvWaitFinalizing;
       case ProvisionState.completed:
-        return 'DONE';
+        return l10n.pvWaitDone;
       case ProvisionState.failed:
-        return 'FAILED';
+        return l10n.pvWaitFailed;
       default:
-        return 'WAITING';
+        return l10n.pvWaitWaiting;
     }
   }
 
@@ -412,8 +417,10 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // are ignored until the user exits. A plain widget rebuild can never clear it;
   // it is only reset when the wizard exits.
   bool _terminal = false;
-  // Whether the terminal failure was a wait-deadline (device never seen) - the
-  // only case where "Wait a bit longer" makes sense. Provision conflicts and
+  // Test-seeded terminal failure code (see initState). The localized message
+  // is resolved in didChangeDependencies, never in initState.
+  String? _seededFailureCode;
+  // Whether the terminal failure was a wait-deadline (device never seen) - the  // only case where "Wait a bit longer" makes sense. Provision conflicts and
   // other terminal errors get a Close-only recovery instead of a pointless
   // re-arm.
   bool _allowWaitRetry = false;
@@ -485,12 +492,17 @@ void _startSweepFeedback() {
 void _setSweepStep(int index) => _sweepStepIndex = index;
 
 String get _sweepProgressLabel {
+  final l10n = AppLocalizations.of(context)!;
   if (_sweepStepIndex < 0) {
-    return '${provisionUserLabel(_state)}\u2026 ${_sweepElapsedSec}s';
+    return '${provisionUserLabelL10n(_state, l10n)}\u2026 ${_sweepElapsedSec}s';
   }
   final i = _sweepStepIndex.clamp(0, _sweepSteps.length - 1);
-  return 'Configuring device \u2014 step ${i + 1}/${_sweepSteps.length} '
-      '(${_sweepSteps[i]}) \u00b7 ${_sweepElapsedSec}s';
+  return l10n.pvSweepBusy(
+    sweepStepName(_sweepSteps[i], l10n),
+    i + 1,
+    _sweepSteps.length,
+    _sweepElapsedSec,
+  );
 }
 
   // The canonical identity most recently submitted to the backend duplicate
@@ -544,6 +556,11 @@ String get _sweepProgressLabel {
   bool _localSetupReady = false;
   String? _localSetupError;
 
+  /// Machine-readable kind + detail of [_localSetupError] (mirrored from the
+  /// repository) so the diagnostic renders localized without parsing text.
+  LocalSetupErrorKind? _localSetupErrorKind;
+  String? _localSetupErrorDetail;
+
   /// The most recent usable LAN IP (MQTT-learned or claim-carried) driving the
   /// local bootstrap; retained so Retry resumes from the last known address.
   String? _lastKnownIp;
@@ -583,12 +600,10 @@ String get _sweepProgressLabel {
       );
       _terminalKind = kind;
       // Seed the terminal freeze so the seeded duplicate state is stable (as it
-      // would be after a real terminal result).
+      // would be after a real terminal result). The message itself is resolved
+      // in didChangeDependencies — Localizations cannot be read in initState.
       _terminal = true;
-      _error = code == 'DEVICE_ALREADY_EXISTS'
-          ? _alreadyExistsMessage
-          : 'This device is already registered to another account and cannot '
-              'be added to this one.';
+      _seededFailureCode = code;
     }
     // Snapshot the user's registered devices once, at flow start. Loaded on the
     // home network, where the backend is reachable; on the Tasmota AP it never
@@ -611,6 +626,24 @@ String get _sweepProgressLabel {
     // ever created. MAC read, Wi-Fi configuration and WifiTest3 all run against
     // the Tasmota AP (192.168.4.1); the backend is only contacted AFTER the
     // device restarts and rejoins the network, to register the device.
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Resolves the test-seeded terminal message once dependencies (including
+    // Localizations) are available. Re-applies on locale change so the seeded
+    // message follows the app language like every other string.
+    final code = _seededFailureCode;
+    if (code != null && _terminal) {
+      final l10n = AppLocalizations.of(context)!;
+      final message = code == 'DEVICE_ALREADY_EXISTS'
+          ? l10n.pvAlreadyExists
+          : l10n.pvAlreadyRegistered;
+      if (_error != message) {
+        _error = message;
+      }
+    }
   }
 
   @override
@@ -716,6 +749,7 @@ String get _sweepProgressLabel {
   // Available from the very start - no backend session is required for the
   // offline Connect phase.
   Future<void> _openWifiSettings() async {
+    final l10n = AppLocalizations.of(context)!;
     try {
       if (Theme.of(context).platform == TargetPlatform.iOS) {
         await launchUrl(
@@ -726,7 +760,7 @@ String get _sweepProgressLabel {
         await _wifiSettingsChannel.invokeMethod<void>('openWifiSettings');
       }
     } catch (_) {
-      _setError('Could not open Wi-Fi settings.');
+      _setError(l10n.pvWifiSettingsFailed);
     }
   }
 
@@ -820,10 +854,11 @@ String get _sweepProgressLabel {
   // E: single busy label rendered INSIDE the primary button while joining or
   // probing — one spinner, one live counter, no duplicate status row.
   String get _connectBusyLabel {
+    final l10n = AppLocalizations.of(context)!;
     if (_apConnectPending != null) {
-      return '${_apConnectPending!} (${_joinElapsedSec}s)';
+      return l10n.pvConnectingTo(_apConnectPending!, _joinElapsedSec);
     }
-    return 'Checking device\u2026 (${_probeElapsedSec}s)';
+    return l10n.pvCheckingDevice(_probeElapsedSec);
   }
 
   Future<bool> _connectToApSsid(String ssid) async {
@@ -833,7 +868,7 @@ String get _sweepProgressLabel {
         _searching = true;
         _error = null;
         _programmaticFailed = false;
-        _apConnectPending = 'Connecting to $ssid…';
+        _apConnectPending = ssid;
       });
     }
     // E: live elapsed counter so the join await never looks frozen.
@@ -858,21 +893,12 @@ String get _sweepProgressLabel {
     // C: every terminal stage now arrives immediately (native resolves on the
     // callback), so give each one its precise recovery copy instead of a
     // generic message after a blind wait.
+    final l10n = AppLocalizations.of(context)!;
     final message = switch (stage) {
-      'lost' =>
-        'The connection to "$ssid" was dropped before setup could start. '
-            'Stay close to the device and try again.',
-      'bindFailed' =>
-        'The phone couldn\u2019t route traffic to the device network. Toggle '
-            'Wi-Fi off/on, then try again.',
-      'timeout' =>
-        'The system took too long to join "$ssid". Make sure the device is '
-            'powered on and in pairing mode, then try again.',
-      _ =>
-        'Could not connect to the device setup network $ssid. Make sure the '
-            'device is powered on and in setup mode. If the join prompt was '
-            'declined or the AP is password-protected, use Open Wi-Fi Settings '
-            'instead.',
+      'lost' => l10n.pvApLost(ssid),
+      'bindFailed' => l10n.pvBindFailed,
+      'timeout' => l10n.pvApTimeout(ssid),
+      _ => l10n.pvApFailed(ssid),
     };
     _failProgrammatic(message);
     return false;
@@ -948,8 +974,7 @@ String get _sweepProgressLabel {
       debugPrint('[PROVISION] blocked: broker info not available');
       if (mounted) {
         setState(() => _error = _brokerInfoError ??
-            'Could not load the MQTT broker address. Reopen Add Device while '
-                'you have an internet connection.');
+            AppLocalizations.of(context)!.pvBrokerFailed);
       }
       return;
     }
@@ -1155,8 +1180,7 @@ String get _sweepProgressLabel {
         setState(() {
           _searching = false;
           _error = _brokerInfoError ??
-              'Could not load the MQTT broker address. Reopen Add Device while '
-                  'you have an internet connection.';
+              AppLocalizations.of(context)!.pvBrokerFailed;
         });
       }
       return;
@@ -1335,12 +1359,13 @@ String get _sweepProgressLabel {
   Future<void> _provisionInner() async {
     final name = _deviceNameCtl.text.trim();
     final ssid = _ssidCtl.text.trim();
+    final l10n = AppLocalizations.of(context)!;
     if (name.isEmpty) {
-      _setError('Enter a Device Name.');
+      _setError(l10n.pvEnterDeviceName);
       return;
     }
     if (ssid.isEmpty) {
-      _setError('Select or enter your home Wi-Fi network.');
+      _setError(l10n.pvEnterHomeWifi);
       return;
     }
     setState(() {
@@ -1354,10 +1379,7 @@ String get _sweepProgressLabel {
       if (!mounted) return;
       setState(() {
         _provisioning = false;
-        _error = 'The device is not reachable on its setup Wi-Fi anymore. '
-            'It likely already connected to your home network; power-cycle it '
-            'and, if it reconnects instead of showing the tasmota-XXXX AP, '
-            'factory-reset it (hold its button ~10s), then try again.';
+        _error = AppLocalizations.of(context)!.pvDeviceUnreachable;
       });
       return;
     }
@@ -1389,8 +1411,7 @@ String get _sweepProgressLabel {
         _provisioning = false;
         _state = ProvisionState.failed;
         _terminalKind = _TerminalKind.identityUnreadable;
-        _error = "The device's identity couldn't be read. Power-cycle the "
-            'device and try again.';
+        _error = AppLocalizations.of(context)!.pvIdentityUnreadable;
       });
       return;
     }
@@ -1446,9 +1467,8 @@ String get _sweepProgressLabel {
         _provisioning = false;
         _wifiTestOffline = offlineCause;
         _error = offlineCause
-            ? 'You\u2019re no longer connected to the device setup network \u2014 '
-                'reconnect to it and continue.'
-            : wifiTestMessage(_wifiTestResult);
+            ? AppLocalizations.of(context)!.pvNoLongerConnected
+            : wifiTestMessageL10n(_wifiTestResult, AppLocalizations.of(context)!);
       });
       return;
     }
@@ -1460,13 +1480,10 @@ String get _sweepProgressLabel {
       setState(() {
         _provisioning = false;
         _configRetryable = stillOnAp;
+        final l10n = AppLocalizations.of(context)!;
         _error = stillOnAp
-            ? 'The device didn\u2019t accept a setting (failed step: '
-                '$_lastFailedStep). It\u2019s still reachable \u2014 try again.'
-            : 'The device did not accept all settings '
-                '(failed step: $_lastFailedStep). Power-cycle it (hold its '
-                'button ~10s to factory-reset if it no longer shows the '
-                'tasmota-XXXX access point), then try again.';
+            ? l10n.pvSettingRetry(_lastFailedStep)
+            : l10n.pvSettingReset(_lastFailedStep);
       });
       return;
     }
@@ -2334,14 +2351,16 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   Future<void> _registerDevice() async {
     final deviceId = _issuedDeviceId;
     if (deviceId.isEmpty) {
-      _setError('Device identity was lost. Please try again.');
+      _setError(AppLocalizations.of(context)!.pvIdentityLost);
       return;
     }
     // Never start an automatic provisioning attempt (or move back to a loading
     // state) while a closed-loop terminal state is active.
     if (_isTerminal) return;
     final rawName = _deviceNameCtl.text.trim();
-    final name = rawName.isEmpty ? 'STEES Smart Device' : rawName;
+    final name = rawName.isEmpty
+        ? AppLocalizations.of(context)!.pvDefaultName
+        : rawName;
     if (!mounted) return;
     setState(() {
       _state = ProvisionState.claiming;
@@ -2424,7 +2443,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       debugPrint('[PROVISION] REGISTER_FAILED network: $e');
       // Network / timeout: recoverable. Fall back to polling for the device.
       if (_isTerminal) return;
-      _setError('Could not reach STEES. Waiting and retrying…');
+      _setError(AppLocalizations.of(context)!.pvReachStees);
       setState(() {
         _state = ProvisionState.waitingForMqtt;
       });
@@ -2458,12 +2477,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       if (!_isTerminal && mounted) {
         setState(() {
           _brokerInfo = null;
-          final msg = 'Could not load the MQTT broker address from the '
-              'backend. Make sure you are online, then reopen Add Device.';
-          _brokerInfoError = msg;
+          // Sentinel (empty): the display text is resolved in build()
+          // (_displayError) so it follows the app locale. Localizations
+          // cannot be read here — this future starts in initState.
+          _brokerInfoError = '';
           // Surface immediately on the Connect screen so the blocker is visible
           // before the user even taps Continue, not only after the tap.
-          _error = msg;
+          _error = '';
         });
       }
     }
@@ -2565,7 +2585,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     if (_claimedMacsAtStart.containsMac(canonical)) {
       debugPrint('[PROVISION] $canonical already registered (wizard-start '
           'snapshot) — stopping before any provisioning command');
-      _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+      _enterTerminalState(_TerminalKind.alreadyAdded,
+          AppLocalizations.of(context)!.pvAlreadyExists);
       return true;
     }
     if (_preflightCheckedFor == canonical) {
@@ -2578,10 +2599,10 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     _preflightCheckedFor = canonical;
     if (!mounted) return true;
     if (duplicateKind != null) {
+      final l10n = AppLocalizations.of(context)!;
       final msg = duplicateKind == _TerminalKind.alreadyAdded
-          ? _alreadyExistsMessage
-          : 'This device is already registered to another account and cannot '
-              'be added to this one.';
+          ? l10n.pvAlreadyExists
+          : l10n.pvAlreadyRegistered;
       _enterTerminalState(duplicateKind, msg);
       return true;
     }
@@ -2605,12 +2626,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // terminal duplicate state and NEVER sends a configuration command. Returns
   // true only when the flow must stop.
   Future<bool> _stopIfRegisteredAtBoundary(String canonical) async {
+    final l10n = AppLocalizations.of(context)!;
     final load = _claimedMacsAtStartLoad;
     if (load != null) await load;
     if (_claimedMacsAtStart.containsMac(canonical)) {
       debugPrint('[PROVISION] $canonical already registered (session snapshot) '
           '— stopping at the provisioning boundary');
-      _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+      _enterTerminalState(_TerminalKind.alreadyAdded, l10n.pvAlreadyExists);
       return true;
     }
     final hook = widget.testIsDeviceRegistered;
@@ -2619,7 +2641,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       if (registered) {
         debugPrint('[PROVISION] $canonical already registered (test boundary '
             'verdict) — stopping before any provisioning command');
-        _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+        _enterTerminalState(_TerminalKind.alreadyAdded, l10n.pvAlreadyExists);
       }
       return registered;
     }
@@ -2630,7 +2652,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       if (state == RegistrationState.registered) {
         debugPrint('[PROVISION] $canonical already registered (authoritative '
             'repository check) — stopping before any provisioning command');
-        _enterTerminalState(_TerminalKind.alreadyAdded, _alreadyExistsMessage);
+        _enterTerminalState(_TerminalKind.alreadyAdded, l10n.pvAlreadyExists);
         return true;
       }
       // `notRegistered` = a valid source shows the MAC absent (evidence);
@@ -2734,39 +2756,39 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
 
   // User-facing, non-technical wording for a TERMINAL provision failure.
   String _provisionFailureMessage(ApiException e) {
+    final l10n = AppLocalizations.of(context)!;
     switch (e.code) {
       case 'DEVICE_ALREADY_EXISTS':
-        return _alreadyExistsMessage;
+        return l10n.pvAlreadyExists;
       case 'DEVICE_ALREADY_REGISTERED':
-        return 'This device is already registered to another account and cannot '
-            'be added to this one.';
+        return l10n.pvAlreadyRegistered;
       case 'INVALID_MAC':
-        return "The device didn't report its identity correctly. Close this "
-            'window and try again.';
+        return l10n.pvInvalidMac;
       case 'BAD_NAME':
       case 'BAD_CHANNELS':
       case 'BAD_HARDWARE':
-        return 'This device could not be registered with STEES. Close and try again.';
+        return l10n.pvBadRequest;
       default:
         if (e.statusCode == 401) {
-          return 'You appear to be signed out. Sign in again and retry.';
+          return l10n.sharedSignedOut;
         }
         if (e.statusCode == 403) {
-          return 'Access was denied. Sign in again and retry.';
+          return l10n.pvAccessDenied;
         }
-        return 'STEES rejected this device. Close and try again.';
+        return l10n.pvSteesRejected;
     }
   }
 
   // Wording for a RECOVERABLE provision failure (the wizard keeps waiting).
   String _provisionRecoveryMessage(ApiException e) {
+    final l10n = AppLocalizations.of(context)!;
     switch (e.code) {
       case 'DEVICE_NOT_SEEN':
-        return 'The device is not on the cloud yet. Waiting and retrying…';
+        return l10n.pvNotSeen;
       case 'RATE_LIMITED':
-        return 'Too many requests to STEES. Waiting a moment and retrying…';
+        return l10n.pvRateLimited;
       default:
-        return 'STEES was busy. Waiting and retrying…';
+        return l10n.pvSteesBusy;
     }
   }
 
@@ -2908,6 +2930,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
       _localSetupInProgress = true;
       _localSetupReady = false;
       _localSetupError = null;
+      _localSetupErrorKind = null;
+      _localSetupErrorDetail = null;
       _state = ProvisionState.settingUpLocalControl;
     });
     var knownIp = lastIp;
@@ -2958,8 +2982,9 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         'LOCAL_HTTP_RECOVERABLE total=${_trace.elapsedMs}ms deviceId=$deviceId');
     setState(() {
       _localSetupInProgress = false;
-      _localSetupError = _repository.lastLocalSetupError ??
-          kLocalSetupFallbackMessage;
+      _localSetupError = _repository.lastLocalSetupError;
+      _localSetupErrorKind = _repository.lastLocalSetupErrorKind;
+      _localSetupErrorDetail = _repository.lastLocalSetupErrorDetail;
     });
   }
 
@@ -2995,6 +3020,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     if (!mounted) return;
     setState(() {
       _localSetupError = null;
+      _localSetupErrorKind = null;
+      _localSetupErrorDetail = null;
     });
     _startLocalSetup(_issuedDeviceId, _lastKnownIp);
   }
@@ -3066,11 +3093,19 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // Helpers
   // ──────────────────────────────────────────────────────────
 
+  /// Display text for [_error]. An empty [_error] is the broker-load sentinel
+  /// (see [_loadBrokerInfo]) and resolves to the localized broker message so
+  /// it follows the app locale. Called only from build().
+  String? get _displayError {
+    if (_error == null) return null;
+    if (_error!.isEmpty) return AppLocalizations.of(context)!.pvBrokerLoadFailed;
+    return _error;
+  }
+
   void _setError(String msg) {
     if (!mounted) return;
     final colors = context.steesColors;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
+    ScaffoldMessenger.of(context).showSnackBar(      SnackBar(
         content: Text(msg, style: const TextStyle(fontSize: 13)),
         backgroundColor: colors.danger,
         behavior: SnackBarBehavior.floating,
@@ -3088,7 +3123,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          'Provision Device',
+          AppLocalizations.of(context)!.pvTitle,
           style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam),
         ),
         backgroundColor: colors.well,
@@ -3128,6 +3163,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
 
   Widget _buildConnect(SteesColors colors) {
     final recovering = _recoveryMode;
+    final l10n = AppLocalizations.of(context)!;
     // On Android API 29+ the primary action opens the in-app scan list (same UI
     // as the Configure step's home Wi-Fi picker); everywhere else it is the
     // plain manual Wi-Fi-Settings open.
@@ -3174,8 +3210,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       children: [
                         Text(
                           recovering
-                              ? 'Reconnect device Wi-Fi'
-                              : 'Join the device network',
+                              ? l10n.pvReconnect
+                              : l10n.pvJoinNetwork,
                           style: GoogleFonts.sora(
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
@@ -3183,7 +3219,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'STEP 1 OF 3',
+                          l10n.pvStep1,
                           style: GoogleFonts.jetBrainsMono(
                             fontSize: 9,
                             fontWeight: FontWeight.w500,
@@ -3199,25 +3235,23 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
               const SizedBox(height: AppSpacing.lg),
               _ConnectStepLine(
                 index: 1,
-                text: 'Power on the device \u2014 its setup network starts '
-                    'with "tasmota-" or shows its device ID.',
+                text: l10n.pvStep1a,
               ),
               const SizedBox(height: AppSpacing.sm),
               _ConnectStepLine(
                 index: 2,
                 text: recovering
-                    ? 'Join tasmota-XXXX in Wi-Fi Settings.'
+                    ? l10n.pvStep1bJoin
                     : smartConnect
-                        ? 'Pick that network from the list below.'
-                        : 'Open Wi-Fi Settings and join that network.',
+                        ? l10n.pvStep1bPick
+                        : l10n.pvStep1bOpen,
               ),
               const SizedBox(height: AppSpacing.sm),
               _ConnectStepLine(
                 index: 3,
                 text: recovering
-                    ? 'Return here \u2014 your device ID is kept; this is a '
-                        'Wi-Fi correction, not a new registration.'
-                    : 'Return here and continue.',
+                    ? l10n.pvStep1cRecovery
+                    : l10n.pvStep1cNormal,
               ),
               const SizedBox(height: AppSpacing.lg),
               // U1: exactly ONE filled primary per state.
@@ -3234,7 +3268,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       child: FilledButton.icon(
                         onPressed: _connectToDeviceWifi,
                         icon: const Icon(Icons.wifi_tethering, size: 18),
-                        label: const Text('Select Device Wi-Fi'),
+                        label: Text(l10n.pvSelectAp),
                         style: _filledStyle(colors),
                       ),
                     ),
@@ -3264,7 +3298,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                                   ),
                                 ],
                               )
-                            : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                            : Text(l10n.pvContinue, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                       ),
                     ),
               ] else if (smartConnect && selectedAp != null) ...[
@@ -3288,7 +3322,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Device network',
+                                l10n.pvDeviceNetwork,
                                 style: GoogleFonts.inter(
                                     fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
                               ),
@@ -3321,7 +3355,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                         : const Icon(Icons.wifi_outlined, size: 18),
-                    label: Text(_searching ? _connectBusyLabel : 'Join Device Network'),
+                    label: Text(_searching ? _connectBusyLabel : l10n.pvJoinAp),
                     style: _filledStyle(colors),
                   ),
                 ),
@@ -3333,7 +3367,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                     onPressed: _openWifiSettings,
                     icon: const Icon(Icons.settings_outlined, size: 18),
                     style: _filledStyle(colors),
-                    label: Text('Open Wi-Fi Settings'),
+                    label: Text(l10n.pvOpenSettings),
                   ),
                 ),
                 const SizedBox(height: AppSpacing.md),
@@ -3362,7 +3396,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                               ),
                             ],
                           )
-                        : Text('Continue', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                        : Text(l10n.pvContinue, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                   ),
                 ),
               ],
@@ -3382,8 +3416,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'If you do not find the device, turn Wi-Fi off and back on, then try again. '
-                        'If you still do not find it, turn the device\u2019s power off and on rapidly 6 to 7 times to reset it.',
+                        l10n.pvNotFoundHint,
                         style: GoogleFonts.inter(fontSize: 12, color: colors.mist, height: 1.45),
                       ),
                     ),
@@ -3411,7 +3444,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          _error!,
+                          _displayError!,
                           style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.45),
                         ),
                       ),
@@ -3429,7 +3462,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                             onPressed: _startSearch,
                             style: _outlinedStyle(colors),
                             child: Text(
-                              'Search Again',
+                              l10n.pvSearchAgain,
                               style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
                             ),
                           ),
@@ -3443,7 +3476,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                             onPressed: _openWifiSettings,
                             style: _outlinedStyle(colors),
                             child: Text(
-                              'Open Wi-Fi Settings',
+                              l10n.pvOpenSettings,
                               style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
                             ),
                           ),
@@ -3458,9 +3491,9 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                     child: OutlinedButton(
                       onPressed: _showRecoveryInstructions,
                       style: _outlinedStyle(colors),
-                      child: const Text(
-                        'Recovery Instructions',
-                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                      child: Text(
+                        l10n.pvRecoveryBtn,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ),
@@ -3468,7 +3501,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   TextButton(
                     onPressed: _leaveWizard,
                     child: Text(
-                      'Close',
+                      l10n.sharedClose,
                       style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
                     ),
                   ),
@@ -3483,7 +3516,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       icon: const Icon(Icons.wifi_tethering, size: 18),
                       style: _outlinedStyle(colors),
                       label: Text(
-                        'Try a different network',
+                        l10n.pvTryDifferent,
                         style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -3497,7 +3530,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       icon: const Icon(Icons.settings_outlined, size: 18),
                       style: _outlinedStyle(colors),
                       label: Text(
-                        'Open Wi-Fi Settings',
+                        l10n.pvOpenSettings,
                         style: GoogleFonts.sora(fontSize: 14, fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -3515,22 +3548,16 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // open until dismissed - the phone has no internet while on the Tasmota AP,
   // so everything here must be actionable without backend calls.
   void _showRecoveryInstructions() {
+    final l10n = AppLocalizations.of(context)!;
     showDialog<void>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('Recovery steps'),
-        content: const Text(
-          '1. Power-cycle the device and wait 30 seconds for its setup AP '
-          '(tasmota-XXXX) to appear.\n\n'
-          '2. Open Wi-Fi Settings and connect to the tasmota-XXXX network.\n\n'
-          '3. Return here and tap Continue.\n\n'
-          '4. Make sure the home Wi-Fi name and password are correct, then tap '
-          'Provision Device.',
-        ),
+        title: Text(l10n.pvRecoveryTitle),
+        content: Text(l10n.pvRecoverySteps),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
+            child: Text(l10n.sharedOk),
           ),
         ],
       ),
@@ -3543,10 +3570,18 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     // other failure keeps the general Wi-Fi banner below the form.
     final bool isWrongPassword = _state == ProvisionState.wifiTestFailed &&
         _wifiTestResult == WifiTestResult.wrongPassword;
+    final l10n = AppLocalizations.of(context)!;
     final subLabel = _provisioning
         ? (_sweepStepIndex >= 0
-            ? 'Step ${_sweepStepIndex + 1}/${_sweepSteps.length} \u2014 ${_sweepSteps[_sweepStepIndex]}'
-            : provisionUserLabel(_state))
+            ? l10n.pvSweepHeader(
+                _sweepStepIndex + 1,
+                _sweepSteps.length,
+                sweepStepName(
+                    _sweepSteps[
+                        _sweepStepIndex.clamp(0, _sweepSteps.length - 1)],
+                    l10n),
+              )
+            : provisionUserLabelL10n(_state, l10n))
         : null;
     // P1: a WifiTest localError traced to the PHONE leaving the AP routes to
     // the neutral danger banner — the big credential-failure card would lie.
@@ -3591,13 +3626,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Configure the device',
+                          l10n.pvConfigure,
                           style: GoogleFonts.sora(
                               fontSize: 16, fontWeight: FontWeight.w700, color: colors.foam),
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'STEP 2 OF 3',
+                          l10n.pvStep2,
                           style: GoogleFonts.jetBrainsMono(
                             fontSize: 9,
                             fontWeight: FontWeight.w500,
@@ -3624,31 +3659,31 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _section(colors, 'HOME WI-FI'),
+                    _section(colors, l10n.pvHomeWifi),
               _buildWifiSelector(colors),
         const SizedBox(height: AppSpacing.md),
         if (_manualWifi) ...[
           _Field(
             controller: _ssidCtl,
-            hint: 'Network name (SSID)',
+            hint: l10n.pvSsidHint,
             icon: Icons.router_outlined,
           ),
           const SizedBox(height: AppSpacing.md),
         ],
         _Field(
           controller: _wifiPassCtl,
-          hint: 'Wi-Fi Password',
+          hint: l10n.pvWifiPwdHint,
           icon: Icons.lock_outline,
           obscure: true,
           focusNode: _wifiPassFocus,
           errorText:
-              isWrongPassword ? 'Wrong password. Check it and try again.' : null,
+              isWrongPassword ? l10n.pvWrongPwd : null,
         ),
         const SizedBox(height: AppSpacing.xl),
-        _section(colors, 'DEVICE'),
+        _section(colors, l10n.pvDeviceSection),
         _Field(
           controller: _deviceNameCtl,
-          hint: 'Device Name',
+          hint: l10n.pvDeviceNameHint,
           icon: Icons.label_outline,
         ),
         const SizedBox(height: AppSpacing.md),
@@ -3673,13 +3708,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Device ID',
+                      l10n.pvDeviceIdLbl,
                       style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       _issuedDeviceId.isEmpty
-                          ? 'read from the device when it connects'
+                          ? l10n.pvDeviceIdPending
                           : _issuedDeviceId,
                       style: GoogleFonts.jetBrainsMono(
                           fontSize: 12.5,
@@ -3699,7 +3734,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   borderRadius: BorderRadius.circular(AppRadius.sm),
                 ),
                 child: Text(
-                  'MAC',
+                  l10n.pvMac,
                   style: GoogleFonts.jetBrainsMono(
                       fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.6, color: colors.mist),
                 ),
@@ -3729,24 +3764,21 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                     size: 28, color: colors.danger),
                 const SizedBox(height: AppSpacing.md),
                 Text(
-                  'Wi-Fi connection failed',
+                  l10n.pvWifiFailed,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.sora(
                       fontSize: 15, fontWeight: FontWeight.w600, color: colors.danger),
                 ),
                 const SizedBox(height: AppSpacing.sm),
                 Text(
-                  _error ??
-                      "The device couldn't connect to this Wi-Fi network. "
-                          'Check the Wi-Fi name and password and try again.',
+                  _error ?? l10n.pvWifiFailedGeneric,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
                       fontSize: 12, color: colors.mist.withValues(alpha: 0.85), height: 1.4),
                 ),
                 const SizedBox(height: AppSpacing.md),
                 Text(
-                  'Your device is still connected to the setup Wi-Fi, so you '
-                  'can correct the credentials and test again.',
+                  l10n.pvWifiFailedHint,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
                       fontSize: 11, color: colors.mist.withValues(alpha: 0.6)),
@@ -3763,7 +3795,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   child: FilledButton(
                     onPressed: _provisioning ? null : _provision,
                     style: _filledStyle(colors),
-                    child: Text('Try Again',
+                    child: Text(l10n.pvTryAgain,
                         style: GoogleFonts.sora(
                             fontSize: 15, fontWeight: FontWeight.w700)),
                   ),
@@ -3776,7 +3808,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   child: OutlinedButton(
                     onPressed: _focusWifiPassword,
                     style: _outlinedStyle(colors),
-                    child: Text('Change Wi-Fi',
+                    child: Text(l10n.pvChangeWifi,
                         style: GoogleFonts.sora(
                             fontSize: 14, fontWeight: FontWeight.w600)),
                   ),
@@ -3800,7 +3832,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _error!,
+                    _displayError!,
                     style: GoogleFonts.inter(fontSize: 12, color: colors.danger, height: 1.45),
                   ),
                 ),
@@ -3816,7 +3848,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                 onPressed: _provisioning ? null : _provision,
                 icon: const Icon(Icons.refresh, size: 18),
                 style: _filledStyle(colors),
-                label: Text('Try Again',
+                label: Text(l10n.pvTryAgain,
                     style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
               ),
             ),
@@ -3852,15 +3884,14 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                         ),
                       ],
                     )
-                  : Text('Test Wi-Fi & Continue',
+                  : Text(l10n.pvTestContinue,
                       style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
             ),
           ),
         if (_provisioning && _state == ProvisionState.configuringWifiTest) ...[
           const SizedBox(height: AppSpacing.md),
           Text(
-            'Testing Wi-Fi connection…\nPlease keep your phone connected to '
-            'the device.',
+            l10n.pvTestingWifi,
             textAlign: TextAlign.center,
             style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.85), height: 1.5),
           ),
@@ -3883,6 +3914,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   Widget _buildWifiSelector(SteesColors colors) {
     final selected = _ssidCtl.text.trim();
     final hasSelection = selected.isNotEmpty;
+    final l10n = AppLocalizations.of(context)!;
     return InkWell(
       onTap: _openWifiPicker,
       borderRadius: BorderRadius.circular(AppRadius.md),
@@ -3913,12 +3945,12 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Wi-Fi Network',
+                    l10n.pvWifiNetworkLbl,
                     style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    hasSelection ? selected : 'Select Wi-Fi network',
+                    hasSelection ? selected : l10n.pvSelectWifi,
                     overflow: TextOverflow.ellipsis,
                     style: hasSelection
                         ? GoogleFonts.jetBrainsMono(
@@ -3966,6 +3998,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     final failed = _state == ProvisionState.failed;
     final completed = _state == ProvisionState.completed;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final l10n = AppLocalizations.of(context)!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -4012,7 +4045,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          failed ? _terminalTitle : 'Waiting for device',
+                          failed ? _terminalTitle : l10n.pvWaiting,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.sora(
@@ -4022,7 +4055,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'STEP 3 OF 3',
+                          l10n.pvStep3,
                           style: GoogleFonts.jetBrainsMono(
                             fontSize: 9,
                             fontWeight: FontWeight.w500,
@@ -4073,8 +4106,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
         const SizedBox(height: AppSpacing.md),
         Text(
           failed
-              ? _error ?? 'Something went wrong. Please try again.'
-              : 'The device will join your Wi-Fi and connect to the cloud automatically.',
+              ? _displayError ?? l10n.sharedSomethingWrong
+              : l10n.pvWaitHint,
           textAlign: TextAlign.center,
           style: GoogleFonts.inter(fontSize: 12.5, height: 1.5, color: colors.mist.withValues(alpha: 0.75)),
         ),
@@ -4094,7 +4127,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
               child: FilledButton.icon(
                 onPressed: _startRecovery,
                 icon: const Icon(Icons.wifi_tethering, size: 18),
-                label: const Text('Reconfigure Wi-Fi'),
+                label: Text(l10n.pvReconfigure),
                 style: _filledStyle(colors),
               ),
             ),
@@ -4112,14 +4145,13 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       borderRadius: BorderRadius.circular(AppRadius.xl),
                     ),
                   ),
-                  child: Text('Wait a bit longer',
+                  child: Text(l10n.pvWaitLonger,
                       style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
                 ),
               ),
               const SizedBox(height: AppSpacing.sm),
               Text(
-                'You can also power-cycle the device so it reconnects, then '
-                'continue waiting here.',
+                l10n.pvWaitLongerHint,
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.6)),
               ),
@@ -4138,7 +4170,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                   borderRadius: BorderRadius.circular(AppRadius.xl),
                 ),
               ),
-              child: Text('Close',
+              child: Text(l10n.sharedClose,
                   style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600)),
             ),
           ),
@@ -4154,18 +4186,28 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // Never a terminal state and never a second claim.
   Widget _buildLocalControl(SteesColors colors) {
     final failed = !_localSetupInProgress && !_localSetupReady;
+    final l10n = AppLocalizations.of(context)!;
     // Smarter diagnostics: the repository records a precise reason when one is
-    // known (`_localSetupError`); when it stayed empty, the recurring pattern
+    // known (`_localSetupErrorKind`); when it stayed empty, the recurring pattern
     // is that no address was ever known to the phone (null lastIp through the
     // whole loop) — call that out explicitly instead of a generic fallback.
+    String diagnostic() {
+      if (_localSetupErrorKind != null) {
+        return localSetupErrorMessage(
+          _localSetupErrorKind,
+          _localSetupErrorDetail,
+          l10n,
+          _localSetupError ?? l10n.pvLocalFallback,
+        );
+      }
+      return _localSetupError ?? l10n.pvLocalFallback;
+    }
+
     final localControlMessage = failed
         ? (_lastKnownIp == null && _localSetupError == null
-            ? '${_localSetupError ?? kLocalSetupFallbackMessage}\n\n'
-                'The device address is not known to this phone yet — make sure '
-                'it is on the same Wi-Fi network as the device, then retry.'
-            : _localSetupError ?? kLocalSetupFallbackMessage)
-        : 'The device has been added to your account. Enabling direct '
-            'local control…';
+            ? '${diagnostic()}\n\n${l10n.pvLocalUnknownIp}'
+            : diagnostic())
+        : l10n.pvLocalAddedBody;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -4216,8 +4258,8 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                       children: [
                         Text(
                           failed
-                              ? 'Local control not ready'
-                              : 'Preparing local control…',
+                              ? l10n.pvLocalNotReady
+                              : l10n.pvPreparingLocal,
                           style: GoogleFonts.sora(
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
@@ -4225,7 +4267,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'LOCAL CONTROL',
+                          l10n.pvLocalSection,
                           style: GoogleFonts.jetBrainsMono(
                             fontSize: 9,
                             fontWeight: FontWeight.w500,
@@ -4256,7 +4298,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'ENABLING…',
+                      l10n.pvEnabling,
                       style: GoogleFonts.jetBrainsMono(
                         fontSize: 10,
                         fontWeight: FontWeight.w700,
@@ -4279,10 +4321,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
                         Border.all(color: colors.stream.withValues(alpha: 0.20)),
                   ),
                   child: Text(
-                    'The device is already added to your account — you can '
-                    'control it through the cloud while local control is '
-                    'pending. Retry enables direct local control without '
-                    'claiming the device again.',
+                    l10n.pvLocalAddedHint,
                     style: GoogleFonts.inter(
                         fontSize: 12, height: 1.45, color: colors.mist),
                   ),
@@ -4299,7 +4338,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             child: FilledButton(
               onPressed: _retryLocalSetup,
               style: _filledStyle(colors),
-              child: Text('Retry Local Control',
+              child: Text(l10n.pvRetryLocal,
                   style: GoogleFonts.sora(
                       fontSize: 15, fontWeight: FontWeight.w700)),
             ),
@@ -4311,7 +4350,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
             child: OutlinedButton(
               onPressed: _continueLocalSetupInBackground,
               style: _outlinedStyle(colors),
-              child: Text('Continue in background',
+              child: Text(l10n.pvContinueBg,
                   style: GoogleFonts.sora(
                       fontSize: 15, fontWeight: FontWeight.w600)),
             ),
@@ -4390,21 +4429,22 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
   // unreadable identity get their own close-only wording; everything else keeps
   // the original, deliberately non-specific title.
   String get _terminalTitle {
+    final l10n = AppLocalizations.of(context)!;
     switch (_terminalKind) {
       case _TerminalKind.alreadyAdded:
-        return 'Device Already Added';
+        return l10n.pvTerminalAdded;
       case _TerminalKind.alreadyRegistered:
-        return 'Device Already Registered';
+        return l10n.pvTerminalRegistered;
       case _TerminalKind.identityUnreadable:
-        return 'Device identity not readable';
+        return l10n.pvTerminalUnreadable;
       case _TerminalKind.generic:
-        return 'Device is not connected yet';
+        return l10n.pvTerminalGeneric;
     }
   }
 
   Widget _section(SteesColors colors, String title) {
     return Padding(
-      padding: const EdgeInsets.only(left: AppSpacing.xs, bottom: AppSpacing.sm),
+      padding: const EdgeInsetsDirectional.only(start: AppSpacing.xs, bottom: AppSpacing.sm),
       child: Text(
         title,
         style: GoogleFonts.sora(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1.6, color: colors.mist),
@@ -4490,7 +4530,12 @@ class _PhaseProgress extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const labels = ['Connect', 'Configure', 'Wait'];
+    final l10n = AppLocalizations.of(context)!;
+    final labels = [
+      l10n.pvPhaseConnect,
+      l10n.pvPhaseConfigure,
+      l10n.pvPhaseWait
+    ];
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final baseDur = reduceMotion ? Duration.zero : const Duration(milliseconds: 620);
     const curve = Curves.easeInOutCubic;
@@ -4520,7 +4565,7 @@ class _PhaseProgress extends StatelessWidget {
                     curve: curve,
                     builder: (context, t, _) => FractionallySizedBox(
                       widthFactor: t,
-                      alignment: Alignment.centerLeft,
+                      alignment: AlignmentDirectional.centerStart,
                       child: Container(
                         height: 2,
                         decoration: BoxDecoration(
@@ -4862,9 +4907,9 @@ class _WaitChecklist extends StatelessWidget {
 
     return Column(
       children: [
-        row('Device rebooting...', 1),
-        row('Joining your Wi-Fi...', 2),
-        row('Connecting to cloud...', 3),
+        row(AppLocalizations.of(context)!.pvChecklistReboot, 1),
+        row(AppLocalizations.of(context)!.pvChecklistWifi, 2),
+        row(AppLocalizations.of(context)!.pvChecklistCloud, 3),
       ],
     );
   }
@@ -4917,23 +4962,24 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
       setState(() {
         _scanning = false;
         _networks = ssids;
+        final l10n = AppLocalizations.of(context)!;
         _scanMessage = !available
-            ? 'Wi-Fi scan unavailable. Enter your network manually.'
-            : (ssids.isEmpty ? 'No Wi-Fi networks found.' : null);
+            ? l10n.pvScanUnavailable
+            : (ssids.isEmpty ? l10n.pvNoNetworks : null);
       });
     } on TimeoutException {
       debugPrint('[PROVISION] wifi scan timed out after 10s');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan timed out. Tap refresh to try again.';
+        _scanMessage = AppLocalizations.of(context)!.pvScanTimeout;
       });
     } catch (e) {
       debugPrint('[PROVISION] wifi scan failed: $e');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan unavailable. Enter your network manually.';
+        _scanMessage = AppLocalizations.of(context)!.pvScanUnavailable;
       });
     }
   }
@@ -4949,6 +4995,7 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -4959,12 +5006,12 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
             Row(
               children: [
                 Text(
-                  'Select Wi-Fi Network',
+                  l10n.pvSelectWifiTitle,
                   style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
                 ),
                 const Spacer(),
                 IconButton(
-                  tooltip: 'Rescan',
+                  tooltip: l10n.pvRescan,
                   onPressed: _scanning ? null : _scan,
                   icon: _scanning
                       ? SizedBox(
@@ -5033,7 +5080,7 @@ class _WifiPickerSheetState extends State<_WifiPickerSheet> {
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
               leading: Icon(Icons.keyboard_outlined, size: 20, color: colors.mist),
               title: Text(
-                'Enter network manually',
+                l10n.pvEnterManual,
                 style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
               ),
               onTap: _selectManual,
@@ -5074,6 +5121,8 @@ bool isDeviceApSsid(String ssid) =>
 
 int rssiBars(int rssi) => rssi >= -55 ? 3 : (rssi >= -67 ? 2 : (rssi >= -75 ? 1 : 0));
 
+/// English signal-strength word. UI code must use [signalStrengthLabel] from
+/// l10n_helpers so the label follows the app locale.
 String rssiLabel(int rssi) =>
     switch (rssiBars(rssi)) { 3 => 'Strong', 2 => 'Good', 1 => 'Fair', _ => 'Weak' };
 
@@ -5159,25 +5208,26 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
         final reason = result?['reason']?.toString() ?? '';
         _permDenied = !available && reason.contains('permission');
         _networks = [...devices, ...others];
+        final l10n = AppLocalizations.of(context)!;
         _scanMessage = !available
             ? (_permDenied
                 ? null // dedicated banner below handles it
-                : 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.')
-            : (all.isEmpty ? 'No Wi-Fi networks found nearby.' : null);
+                : l10n.pvScanUnavailableSettings)
+            : (all.isEmpty ? l10n.pvNoNetworksNearby : null);
       });
     } on TimeoutException {
       debugPrint('[PROVISION] device-AP scan timed out after 10s');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan timed out. Tap refresh to try again.';
+        _scanMessage = AppLocalizations.of(context)!.pvScanTimeout;
       });
     } catch (e) {
       debugPrint('[PROVISION] device-AP scan failed: $e');
       if (!mounted) return;
       setState(() {
         _scanning = false;
-        _scanMessage = 'Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.';
+        _scanMessage = AppLocalizations.of(context)!.pvScanUnavailableSettings;
       });
     }
   }
@@ -5227,7 +5277,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
           ),
           const SizedBox(height: 6),
           Align(
-            alignment: Alignment.centerRight,
+            alignment: AlignmentDirectional.centerEnd,
             child: TextButton.icon(
               onPressed: () => onAction(),
               icon: Icon(icon, size: 13),
@@ -5246,6 +5296,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
   // border and an explicit "tap to connect" cue.
   Widget _deviceTile(ScannedNetwork n, SteesColors colors, {required bool highlighted}) {
     final bars = rssiBars(n.rssi);
+    final l10n = AppLocalizations.of(context)!;
     return Material(
       color: colors.stream.withValues(alpha: 0.08),
       borderRadius: BorderRadius.circular(AppRadius.md),
@@ -5278,8 +5329,15 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                     const SizedBox(height: 2),
                     Text(
                       highlighted
-                          ? 'Detected \u2014 tap to connect'
-                          : '${rssiLabel(n.rssi)} signal${n.bssid != null ? '  \u00b7  ID \u2026${n.bssid!.substring(n.bssid!.length >= 5 ? n.bssid!.length - 5 : 0)}' : ''}',
+                          ? l10n.pvDetectedTap
+                          : (n.bssid != null
+                              ? l10n.pvSignalLine(
+                                  signalStrengthLabel(bars, l10n),
+                                  n.bssid!.substring(n.bssid!.length >= 5
+                                      ? n.bssid!.length - 5
+                                      : 0),
+                                )
+                              : signalStrengthLabel(bars, l10n)),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.85)),
@@ -5301,7 +5359,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  'DEVICE',
+                  l10n.pvApChip,
                   style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.stream),
                 ),
               ),
@@ -5333,6 +5391,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -5343,12 +5402,12 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
             Row(
               children: [
                 Text(
-                  'Select Device Wi-Fi',
+                  l10n.pvSelectApTitle,
                   style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w600, color: colors.foam),
                 ),
                 const Spacer(),
                 IconButton(
-                  tooltip: 'Rescan',
+                  tooltip: l10n.pvRescan,
                   onPressed: _scanning ? null : _scan,
                   icon: _scanning
                       ? SizedBox(
@@ -5362,7 +5421,7 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
             ),
             const SizedBox(height: AppSpacing.xs),
             Text(
-              'Tap your device\u2019s setup network below to connect.',
+              l10n.pvTapAp,
               style: GoogleFonts.inter(fontSize: 12, color: colors.mist.withValues(alpha: 0.8)),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -5390,17 +5449,16 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                 _scanFixBanner(
                   colors: colors,
                   icon: Icons.location_on_outlined,
-                  text: 'Android hides nearby Wi-Fi networks from apps until '
-                      'Location is turned on.',
-                  actionLabel: 'Turn on Location',
+                  text: l10n.pvLocationOff,
+                  actionLabel: l10n.pvTurnOnLocation,
                   onAction: _openLocationSettingsAndRescan,
                 ),
               if (_permDenied)
                 _scanFixBanner(
                   colors: colors,
                   icon: Icons.lock_outline,
-                  text: 'Wi-Fi scanning needs this app\u2019s location permission.',
-                  actionLabel: 'Allow in App Settings',
+                  text: l10n.pvPermDenied,
+                  actionLabel: l10n.pvAllowSettings,
                   onAction: _openAppSettingsAndRescan,
                 ),
 
@@ -5417,9 +5475,9 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                     children: [
                       if (devices.isNotEmpty) ...[
                         Padding(
-                          padding: const EdgeInsets.only(left: 4, bottom: 6),
+                          padding: const EdgeInsetsDirectional.only(start: 4, bottom: 6),
                           child: Text(
-                            'DEVICE SETUP NETWORKS',
+                            l10n.pvDeviceNets,
                             style: GoogleFonts.sora(
                               fontSize: 10,
                               fontWeight: FontWeight.w700,
@@ -5438,9 +5496,9 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
                         if (devices.isNotEmpty)
                           Divider(height: 16, thickness: 1, color: colors.border),
                         Padding(
-                          padding: const EdgeInsets.only(left: 4, bottom: 6),
+                          padding: const EdgeInsetsDirectional.only(start: 4, bottom: 6),
                           child: Text(
-                            'OTHER WI-FI NETWORKS',
+                            l10n.pvOtherNets,
                             style: GoogleFonts.sora(
                               fontSize: 10,
                               fontWeight: FontWeight.w700,
@@ -5466,11 +5524,11 @@ class _DeviceApPickerSheetState extends State<_DeviceApPickerSheet> {
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
               leading: Icon(Icons.settings_outlined, size: 20, color: colors.mist),
               title: Text(
-                'Open Wi-Fi Settings',
+                l10n.pvOpenSettings,
                 style: GoogleFonts.inter(fontSize: 14, color: colors.foam),
               ),
               subtitle: Text(
-                'Manual: join the device\u2019s network in Android settings yourself',
+                l10n.pvManualJoin,
                 style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.75)),
               ),
               onTap: _selectManual,
@@ -5531,7 +5589,9 @@ class _FieldState extends State<_Field> {
                   color: colors.mist,
                 ),
                 onPressed: () => setState(() => _obscure = !_obscure),
-                tooltip: _obscure ? 'Show password' : 'Hide password',
+                tooltip: _obscure
+                    ? AppLocalizations.of(context)!.pvShowPassword
+                    : AppLocalizations.of(context)!.pvHidePassword,
               )
             : null,
         filled: true,

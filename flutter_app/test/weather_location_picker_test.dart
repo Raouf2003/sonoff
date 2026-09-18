@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:latlong2/latlong.dart';
@@ -34,8 +35,10 @@ Widget _stubMap(LatLng? picked, ValueChanged<LatLng> onPick) {
   return Column(
     children: [
       if (picked != null)
-        Text('${picked.latitude.toStringAsFixed(4)},'
-            ' ${picked.longitude.toStringAsFixed(4)}'),
+        Text(
+          '${picked.latitude.toStringAsFixed(4)},'
+          ' ${picked.longitude.toStringAsFixed(4)}',
+        ),
       ElevatedButton(
         onPressed: () => onPick(const LatLng(35.2, 4.18)),
         child: const Text('stub-pick'),
@@ -47,21 +50,23 @@ Widget _stubMap(LatLng? picked, ValueChanged<LatLng> onPick) {
 void main() {
   test('buildLocationSave uses typed name, falls back to place', () {
     final named = buildLocationSave(
-        deviceId: 'D1',
-        name: '  Farm North ',
-        placeName: 'Bou Saada',
-        lat: 35.2,
-        lon: 4.18);
+      deviceId: 'D1',
+      name: '  Farm North ',
+      placeName: 'Bou Saada',
+      lat: 35.2,
+      lon: 4.18,
+    );
     expect(named.farmName, 'Farm North');
     expect(named.lat, 35.2);
     expect(named.timezone, 'Africa/Algiers');
 
     final fallback = buildLocationSave(
-        deviceId: 'D1',
-        name: '   ',
-        placeName: 'Bou Saada',
-        lat: 35.2,
-        lon: 4.18);
+      deviceId: 'D1',
+      name: '   ',
+      placeName: 'Bou Saada',
+      lat: 35.2,
+      lon: 4.18,
+    );
     expect(fallback.farmName, 'Bou Saada');
   });
 
@@ -73,22 +78,29 @@ void main() {
         patchedPath = req.url.path;
         patched = jsonDecode(req.body) as Map<String, dynamic>;
         return http.Response(
-            jsonEncode({'deviceId': 'D1', 'farmName': 'Bou Saada'}),
-            200);
+          jsonEncode({'deviceId': 'D1', 'farmName': 'Bou Saada'}),
+          200,
+        );
       }
       return http.Response('Not found', 404);
     });
     final api = ApiService(auth: _FakeAuth(), client: client);
 
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(
-            body: WeatherLocationPickerPage(
-      devices: _devices,
-      initialDeviceId: 'D1',
-      api: api,
-      reverseGeocode: (_, _) async => 'Bou Saada, Algeria',
-      mapBuilder: _stubMap,
-    ))));
+          body: WeatherLocationPickerPage(
+            devices: _devices,
+            initialDeviceId: 'D1',
+            api: api,
+            reverseGeocode: (_, _) async => 'Bou Saada, Algeria',
+            mapBuilder: _stubMap,
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('stub-pick'));
@@ -106,8 +118,9 @@ void main() {
     expect(patched?['timezone'], 'Africa/Algiers');
   });
 
-  testWidgets('remove location sends null PATCH for selected device',
-      (tester) async {
+  testWidgets('remove location sends null PATCH for selected device', (
+    tester,
+  ) async {
     String? patchedPath;
     Map<String, dynamic>? patched;
     final client = MockClient((req) async {
@@ -119,15 +132,22 @@ void main() {
       return http.Response('Not found', 404);
     });
     final api = ApiService(auth: _FakeAuth(), client: client);
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(
-            body: WeatherLocationPickerPage(
-      devices: _devices,
-      initialDeviceId: 'D2',
-      api: api,
-      reverseGeocode: (_, _) async => null,
-      mapBuilder: (_, _) => const SizedBox(height: 400, child: SizedBox.expand()),
-    ))));
+          body: WeatherLocationPickerPage(
+            devices: _devices,
+            initialDeviceId: 'D2',
+            api: api,
+            reverseGeocode: (_, _) async => null,
+            mapBuilder: (_, _) =>
+                const SizedBox(height: 400, child: SizedBox.expand()),
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.delete_outline), findsOneWidget);
     await tester.tap(find.byIcon(Icons.delete_outline));
@@ -141,29 +161,32 @@ void main() {
 
   testWidgets('dropdown shows device name only, not location', (tester) async {
     final api = ApiService(
-        auth: _FakeAuth(),
-        client: MockClient((_) async => http.Response('{}', 200)));
-    await tester.pumpWidget(MaterialApp(
+      auth: _FakeAuth(),
+      client: MockClient((_) async => http.Response('{}', 200)),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(
-            body: WeatherLocationPickerPage(
-      devices: const [
-        {
-          'deviceId': 'D1',
-          'name': 'Sonoff 01',
-          'farmName': 'Field North',
-          'channels': 4,
-        },
-        {
-          'deviceId': 'D2',
-          'name': 'Sonoff 02',
-          'channels': 4,
-        },
-      ],
-      initialDeviceId: 'D1',
-      api: api,
-      reverseGeocode: (_, _) async => null,
-      mapBuilder: (_, _) => const SizedBox.shrink(),
-    ))));
+          body: WeatherLocationPickerPage(
+            devices: const [
+              {
+                'deviceId': 'D1',
+                'name': 'Sonoff 01',
+                'farmName': 'Field North',
+                'channels': 4,
+              },
+              {'deviceId': 'D2', 'name': 'Sonoff 02', 'channels': 4},
+            ],
+            initialDeviceId: 'D1',
+            api: api,
+            reverseGeocode: (_, _) async => null,
+            mapBuilder: (_, _) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Sonoff 01'), findsOneWidget);
     expect(find.textContaining('Field North'), findsNothing);
@@ -174,22 +197,31 @@ void main() {
 
   testWidgets('save blocked without map pick', (tester) async {
     final api = ApiService(
-        auth: _FakeAuth(),
-        client: MockClient((_) async => http.Response('{}', 200)));
-    await tester.pumpWidget(MaterialApp(
+      auth: _FakeAuth(),
+      client: MockClient((_) async => http.Response('{}', 200)),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(
-            body: WeatherLocationPickerPage(
-      devices: _devices,
-      api: api,
-      reverseGeocode: (_, _) async => null,
-      mapBuilder: (_, _) => const SizedBox.shrink(),
-    ))));
+          body: WeatherLocationPickerPage(
+            devices: _devices,
+            api: api,
+            reverseGeocode: (_, _) async => null,
+            mapBuilder: (_, _) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Confirm Location'), findsOneWidget);
     final button = tester.widget<FilledButton>(
-        find.ancestor(
-            of: find.text('Confirm Location'),
-            matching: find.byType(FilledButton)));
+      find.ancestor(
+        of: find.text('Confirm Location'),
+        matching: find.byType(FilledButton),
+      ),
+    );
     expect(button.onPressed, isNull);
   });
 }

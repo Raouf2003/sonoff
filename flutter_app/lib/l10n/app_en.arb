@@ -1,0 +1,676 @@
+﻿{
+  "@@locale": "en",
+  "appTitle": "STEES",
+
+  "navDevices": "Devices",
+  "navSensors": "Sensors",
+  "navSchedules": "Schedules",
+  "navRules": "Rules",
+  "navWeather": "Weather",
+
+  "appTagline": "Smart Irrigation",
+  "actionToggleTheme": "Toggle theme",
+  "actionLogout": "Logout",
+  "actionLanguage": "Language",
+  "languageEnglish": "English",
+  "languageArabic": "العربية",
+  "languageFrench": "Français",
+
+  "sharedCancel": "Cancel",
+  "sharedDelete": "Delete",
+  "sharedEdit": "Edit",
+  "sharedRemove": "Remove",
+  "sharedOk": "OK",
+  "sharedRetry": "Retry",
+  "sharedAdd": "Add",
+  "sharedClose": "Close",
+  "sharedActive": "Active",
+  "sharedOff": "Off",
+  "sharedEnabled": "Enabled",
+  "sharedDisabled": "Disabled",
+  "sharedOnline": "Online",
+  "sharedOffline": "Offline",
+  "sharedDevice": "Device",
+  "sharedChannel": "Channel",
+  "sharedCheckConnection": "Check your connection and try again.",
+  "sharedSomethingWrong": "Something went wrong. Please try again.",
+  "sharedEveryDay": "Every day",
+  "sharedEveryDayWord": "every day",
+  "sharedToday": "Today",
+  "sharedTomorrow": "Tomorrow",
+  "sharedSaveChanges": "Save Changes",
+  "sharedSelectChannel": "Select at least one channel",
+  "sharedSignedOut": "You appear to be signed out. Sign in again and retry.",
+  "sharedNoDevices": "No devices yet",
+
+  "@sharedScheduleCount": {
+    "description": "Device schedule subtitle: channel range plus schedule count",
+    "placeholders": {
+      "range": { "type": "String" },
+      "n": { "type": "int" }
+    }
+  },
+  "sharedScheduleCount": "{range}  ·  {n, plural, =1{1 schedule} other{{n} schedules}}",
+  "@sharedCustomDays": {
+    "placeholders": { "days": { "type": "String" } }
+  },
+  "sharedCustomDays": "Custom: {days}",
+  "@sharedIdValue": {
+    "placeholders": { "id": { "type": "String" } }
+  },
+  "sharedIdValue": "ID: {id}",
+  "@sharedDeviceValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedDeviceValue": "Device: {name}",
+  "@sharedSensorValue": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "sharedSensorValue": "Sensor: {name}",
+  "@sharedChannelRange": {
+    "placeholders": { "channels": { "type": "int" } }
+  },
+  "sharedChannelRange": "CH1–CH{channels}",
+  "@zoneName": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "zoneName": "Zone {index}",
+  "@channelCode": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "channelCode": "CHANNEL {index}",
+
+  "authFillAll": "Fill in all fields",
+  "authUsername": "Username",
+  "authPassword": "Password",
+  "authConfirmPassword": "Confirm Password",
+  "authSignIn": "Sign In",
+  "authSignUp": "Sign Up",
+  "authCreateAccount": "Create Account",
+  "authJoinStees": "Join STEES",
+  "authHaveAccount": "Already have an account?  ",
+  "authNoAccount": "Don't have an account?  ",
+  "authPwdMismatch": "Passwords do not match",
+  "authPwdShort": "Password must be at least 6 characters",
+
+  "devRelayBusy": "Device is busy, try again",
+  "devRelayUnreachable": "Could not reach the device",
+  "@devNoResponse": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "devNoResponse": "{channels} did not respond",
+  "devFetchStatus": "Failed to fetch status",
+  "devDeleteTitle": "Delete Device",
+  "devDeleteConfirm": "Are you sure you want to delete this device?\nYou can claim it again after deletion.",
+  "devDeleted": "Device deleted.",
+  "devDeleteFailed": "Could not delete the device. Check your connection and try again.",
+  "devLoadFailed": "Could not load devices",
+  "devEmptyHint": "Claim a Sonoff controller to start\nmanaging your irrigation zones.",
+  "devAdd": "Add Device",
+  "devSectionTitle": "DEVICES",
+  "devZonesTitle": "ZONES",
+  "devSchedulesBtn": "Schedules",
+  "devLan": "LAN",
+  "devLanOnly": "LAN ONLY",
+  "devSyncing": "SYNCING",
+  "devTurningOn": "TURNING ON…",
+  "devTurningOff": "TURNING OFF…",
+  "devTurning": "TURNING…",
+  "devOfflineBadge": "OFFLINE",
+  "devFlowing": "FLOWING",
+  "devDry": "DRY",
+
+  "senLoadFailed": "Could not load sensors",
+  "senEmptyTitle": "No sensors yet",
+  "senEmptyHint": "Add a soil moisture sensor to\nmonitor your irrigation zones.",
+  "senAdd": "Add Sensor",
+  "senSection": "SENSORS",
+  "senRuleBtn": "Rule",
+
+  "schOfflineBanner": "Device offline — schedules will sync automatically once it reconnects.",
+  "schSaved": "Schedule saved",
+  "schDeleted": "Schedule deleted",
+  "schUpdateFailed": "Could not update the schedule",
+  "schDeleteFailed": "Could not delete the schedule",
+  "schDeleteTitle": "Delete schedule?",
+  "@schDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "schDeleteConfirm": "\"{name}\" will be removed.",
+  "schLoadFailed": "Could not load schedules",
+  "schEmptyDevicesHint": "Claim a device to start scheduling.",
+  "schSection": "SCHEDULES",
+  "schEmptyDevice": "No schedules for this device",
+  "@schRangeInvalid": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schRangeInvalid": "Range {index}: end must be after start (no overnight)",
+  "@schConflict": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" }
+    }
+  },
+  "schConflict": "Schedule conflict: {chans} is already scheduled {windows} on {days}.",
+  "@schConflictNamed": {
+    "placeholders": {
+      "chans": { "type": "String" },
+      "windows": { "type": "String" },
+      "days": { "type": "String" },
+      "name": { "type": "String" }
+    }
+  },
+  "schConflictNamed": "Schedule conflict: {chans} is already scheduled {windows} on {days} (\"{name}\").",
+  "schPickDay": "Pick at least one day for custom recurrence",
+  "schSaveFailed": "Could not save the schedule",
+  "schEditTitle": "Edit Schedule",
+  "schNewTitle": "New Schedule",
+  "schChannelsSection": "CHANNELS",
+  "schChannelsDesc": "Which outlets this schedule drives.",
+  "schRepeatsSection": "REPEATS",
+  "schRepeatsDesc": "When in the week this schedule runs.",
+  "schDaily": "Daily",
+  "schCustomMode": "Custom days",
+  "schWindowsSection": "WINDOWS",
+  "schWindowsDesc": "Channels are ON inside each window, OFF otherwise.",
+  "schAddWindow": "Add window",
+  "schCreate": "Create Schedule",
+  "schStarts": "Starts",
+  "schEnds": "Ends",
+  "schRemoveWindow": "Remove window",
+  "@schWindowLabel": {
+    "placeholders": { "index": { "type": "int" } }
+  },
+  "schWindowLabel": "W{index}",
+
+  "ruleUpdateFailed": "Could not update the rule",
+  "ruleDeleteFailed": "Could not delete the rule",
+  "ruleDeleteTitle": "Delete rule?",
+  "@ruleDeleteConfirm": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "ruleDeleteConfirm": "\"{name}\" will be removed permanently.",
+  "ruleNoSensors": "No sensors available. Add a sensor first.",
+  "ruleChooseSensor": "Choose a sensor",
+  "ruleChooseHint": "Rules control relays based on this sensor's readings.",
+  "ruleLoadFailed": "Could not load rules",
+  "ruleEmptyTitle": "No rules yet",
+  "@ruleEmptyHint": {
+    "placeholders": { "action": { "type": "String" } }
+  },
+  "ruleEmptyHint": "Tap \"{action}\" to control a relay\nbased on a sensor's readings.",
+  "ruleSection": "RULES",
+  "ruleAdd": "Add Rule",
+  "ruleAbove": "above",
+  "ruleBelow": "below",
+  "@ruleWhen": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "ruleWhen": "When {cond} {threshold}",
+  "@ruleActionTarget": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleActionTarget": "{channels} → {action}",
+  "@ruleOtherwise": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "ruleOtherwise": "Otherwise → {channels} → {action}",
+
+  "rfEnterName": "Enter a rule name",
+  "rfEnterThreshold": "Enter a numeric threshold",
+  "rfSaveFailed": "Could not save the rule",
+  "rfEditTitle": "Edit Rule",
+  "rfNewTitle": "New Rule",
+  "rfIdentity": "IDENTITY",
+  "rfNameHint": "Rule name",
+  "rfNameHelper": "e.g. Auto-water when dry",
+  "rfChannelsSection": "CHANNELS",
+  "rfChannelsDesc": "Pick every relay this rule should control.",
+  "rfConditionSection": "CONDITION",
+  "rfConditionDesc": "The sensor reading that triggers the rule.",
+  "rfBelow": "Below",
+  "rfAbove": "Above",
+  "rfThresholdHint": "Threshold value",
+  "rfThresholdHelper": "e.g. 30",
+  "rfActionSection": "ACTION",
+  "rfActionDesc": "What happens when the condition is true.",
+  "rfTurnOn": "Turn ON",
+  "rfTurnOff": "Turn OFF",
+  "rfCreate": "Create Rule",
+  "rfLogic": "LOGIC",
+  "@rfIf": {
+    "placeholders": {
+      "cond": { "type": "String" },
+      "threshold": { "type": "String" }
+    }
+  },
+  "rfIf": "IF soil {cond} {threshold}",
+  "rfOtherwise": "OTHERWISE",
+
+  "srUpdateFailed": "Failed to update rule",
+  "srDeleteFailed": "Failed to delete rule",
+  "srLoadFailed": "Could not load the rule",
+  "srEmptyTitle": "No rule yet",
+  "srEmptyHint": "Create a rule to automatically control a relay based on this sensor's readings.",
+  "srTitle": "Rule",
+  "@srElse": {
+    "placeholders": {
+      "channels": { "type": "String" },
+      "action": { "type": "String" }
+    }
+  },
+  "srElse": "Else → {channels} → {action}",
+
+  "slLoadFailed": "Failed to load schedules",
+  "slUpdateFailed": "Failed to update schedule",
+  "slDeleteFailed": "Failed to delete schedule",
+  "slTitle": "Schedules",
+  "@slChannels": {
+    "placeholders": { "channels": { "type": "String" } }
+  },
+  "slChannels": "Channels: {channels}",
+
+  "wLoadFailed": "Could not load weather.",
+  "wNoDevicesHint": "Claim a device to enable weather forecasts.",
+  "wLoadTitle": "Could not load weather",
+  "wSection": "WEATHER",
+  "wRefresh": "Refresh",
+  "wNoLocation": "Weather location not configured",
+  "wNoLocationHint": "This device does not have a farm location yet. Select a location on the map to enable weather for this device.",
+  "wFeatForecast": "Local\nforecast",
+  "wFeatAdvisories": "Rain\nadvisories",
+  "wFeatUnaffected": "Schedules\nunaffected",
+  "wSetLocation": "Set Location",
+  "@wPinDefaults": {
+    "placeholders": { "tz": { "type": "String" } }
+  },
+  "wPinDefaults": "Pin defaults to your current location • {tz}",
+  "wForecastUnavailable": "Forecast unavailable",
+  "wForecastHint": "Your irrigation schedules are unaffected and will run as programmed.",
+  "wPrecipitation": "Precipitation",
+  "wLastHour": "Last hour",
+  "wCurrent": "CURRENT CONDITIONS",
+  "wTemperature": "Temperature",
+  "wNoHourly": "No hourly data for this day.",
+  "wSignificantRain": "Significant rain: ≥2 mm with ≥50% chance",
+  "wForecast": "FORECAST",
+  "wRainDuring": "Rain during irrigation",
+  "wRainNear": "Rain near irrigation",
+  "wIrrigation": "Irrigation",
+  "wRain": "Rain",
+  "wDirectOverlap": "Direct overlap",
+  "@wDirectOverlapWith": {
+    "placeholders": { "duration": { "type": "String" } }
+  },
+  "wDirectOverlapWith": "Direct overlap · {duration}",
+  "wCloseToWindow": "Close to irrigation window",
+  "@wAlsoNear": {
+    "placeholders": { "windows": { "type": "String" } }
+  },
+  "wAlsoNear": "Also near: {windows}",
+  "@wMoreOverlaps": {
+    "placeholders": { "n": { "type": "int" } }
+  },
+  "wMoreOverlaps": "+{n, plural, =1{1 more overlap} other{{n} more overlaps}} same day",
+  "wReviewSchedule": "Review Schedule",
+  "hourNow": "NOW",
+  "unitMm": "mm",  "wNoSchedules": "No irrigation schedules for this device.",
+  "wTodayIrrigation": "TODAY’S IRRIGATION",
+  "@wDurationMin": {
+    "placeholders": { "minutes": { "type": "int" } }
+  },
+  "wDurationMin": "~{minutes} min",
+  "@wDurationHour": {
+    "placeholders": { "h": { "type": "int" } }
+  },
+  "wDurationHour": "~{h} h",
+  "@wDurationHourMin": {
+    "placeholders": {
+      "h": { "type": "int" },
+      "m": { "type": "int" }
+    }
+  },
+  "wDurationHourMin": "~{h} h {m} min",
+  "@wRainChip": {
+    "placeholders": {
+      "start": { "type": "String" },
+      "end": { "type": "String" },
+      "mm": { "type": "String" },
+      "prob": { "type": "String" }
+    }
+  },
+  "wRainChip": "Rain {start}–{end} · {mm} mm · {prob}%",
+  "@wUpdated": {
+    "placeholders": {
+      "time": { "type": "String" },
+      "tz": { "type": "String" }
+    }
+  },
+  "wUpdated": "Updated {time} · {tz}",
+
+  "pkRemoveTitle": "Remove location?",
+  "pkRemoveConfirm": "Weather forecasts will be disabled for this device. Your irrigation schedules are unaffected.",
+  "pkTitle": "Select weather location",
+  "pkTapHint": "Tap map or drag pin",
+  "pkTapChoose": "Tap the map to choose the farm location",
+  "pkResolving": "Resolving place…",
+  "pkCustom": "Custom map point",
+  "pkUseFor": "Use for device",
+  "pkSaving": "Saving…",
+  "pkConfirm": "Confirm Location",
+  "pkRemoveFailed": "Could not remove location.",
+  "pkChooseFirst": "Tap the map to choose a location first.",
+  "pkSaveFailed": "Could not save location.",
+
+  "pvTitle": "Provision Device",
+  "pvReconnect": "Reconnect device Wi-Fi",
+  "pvJoinNetwork": "Join the device network",
+  "pvStep1": "STEP 1 OF 3",
+  "pvStep1a": "Power on the device — its setup network starts with \"tasmota-\" or shows its device ID.",
+  "pvStep1bJoin": "Join tasmota-XXXX in Wi-Fi Settings.",
+  "pvStep1bPick": "Pick that network from the list below.",
+  "pvStep1bOpen": "Open Wi-Fi Settings and join that network.",
+  "pvStep1cRecovery": "Return here — your device ID is kept; this is a Wi-Fi correction, not a new registration.",
+  "pvStep1cNormal": "Return here and continue.",
+  "pvSelectAp": "Select Device Wi-Fi",
+  "pvContinue": "Continue",
+  "pvDeviceNetwork": "Device network",
+  "pvJoinAp": "Join Device Network",
+  "pvOpenSettings": "Open Wi-Fi Settings",
+  "pvNotFoundHint": "If you do not find the device, turn Wi-Fi off and back on, then try again. If you still do not find it, turn the device’s power off and on rapidly 6 to 7 times to reset it.",
+  "pvSearchAgain": "Search Again",
+  "pvRecoveryBtn": "Recovery Instructions",
+  "pvRecoveryTitle": "Recovery steps",
+  "pvRecoverySteps": "1. Power-cycle the device and wait 30 seconds for its setup AP (tasmota-XXXX) to appear.\n\n2. Open Wi-Fi Settings and connect to the tasmota-XXXX network.\n\n3. Return here and tap Continue.\n\n4. Make sure the home Wi-Fi name and password are correct, then tap Provision Device.",
+  "pvConfigure": "Configure the device",
+  "pvStep2": "STEP 2 OF 3",
+  "pvHomeWifi": "HOME WI-FI",
+  "pvSsidHint": "Network name (SSID)",
+  "pvWifiPwdHint": "Wi-Fi Password",
+  "pvWrongPwd": "Wrong password. Check it and try again.",
+  "pvDeviceSection": "DEVICE",
+  "pvDeviceNameHint": "Device Name",
+  "pvDeviceIdLbl": "Device ID",
+  "pvDeviceIdPending": "read from the device when it connects",
+  "pvMac": "MAC",
+  "pvWifiFailed": "Wi-Fi connection failed",
+  "pvWifiFailedGeneric": "The device couldn't connect to this Wi-Fi network. Check the Wi-Fi name and password and try again.",
+  "pvWifiFailedHint": "Your device is still connected to the setup Wi-Fi, so you can correct the credentials and test again.",
+  "pvTryAgain": "Try Again",
+  "pvChangeWifi": "Change Wi-Fi",
+  "pvTestContinue": "Test Wi-Fi & Continue",
+  "pvTestingWifi": "Testing Wi-Fi connection…\nPlease keep your phone connected to the device.",
+  "pvWifiNetworkLbl": "Wi-Fi Network",
+  "pvSelectWifi": "Select Wi-Fi network",
+  "pvWaiting": "Waiting for device",
+  "pvStep3": "STEP 3 OF 3",
+  "pvWaitHint": "The device will join your Wi-Fi and connect to the cloud automatically.",
+  "pvReconfigure": "Reconfigure Wi-Fi",
+  "pvWaitLonger": "Wait a bit longer",
+  "pvWaitLongerHint": "You can also power-cycle the device so it reconnects, then continue waiting here.",
+  "pvLocalNotReady": "Local control not ready",
+  "pvPreparingLocal": "Preparing local control…",
+  "pvLocalSection": "LOCAL CONTROL",
+  "pvEnabling": "ENABLING…",
+  "pvLocalAddedHint": "The device is already added to your account — you can control it through the cloud while local control is pending. Retry enables direct local control without claiming the device again.",
+  "pvLocalAddedBody": "The device has been added to your account. Enabling direct local control…",
+  "pvRetryLocal": "Retry Local Control",
+  "pvContinueBg": "Continue in background",
+  "pvTerminalAdded": "Device Already Added",
+  "pvTerminalRegistered": "Device Already Registered",
+  "pvTerminalUnreadable": "Device identity not readable",
+  "pvTerminalGeneric": "Device is not connected yet",
+  "pvPhaseConnect": "Connect",
+  "pvPhaseConfigure": "Configure",
+  "pvPhaseWait": "Wait",
+  "pvWaitRebooting": "REBOOTING",
+  "pvWaitJoining": "JOINING WI-FI",
+  "pvWaitMqtt": "CONNECTING TO MQTT",
+  "pvWaitDetected": "DEVICE DETECTED",
+  "pvWaitVerifying": "VERIFYING",
+  "pvWaitClaiming": "CLAIMING",
+  "pvWaitFinalizing": "FINALIZING",
+  "pvWaitDone": "DONE",
+  "pvWaitFailed": "FAILED",
+  "pvWaitWaiting": "WAITING",
+  "pvChecklistReboot": "Device rebooting...",
+  "pvChecklistWifi": "Joining your Wi-Fi...",
+  "pvChecklistCloud": "Connecting to cloud...",
+  "pvSelectWifiTitle": "Select Wi-Fi Network",
+  "pvRescan": "Rescan",
+  "pvScanUnavailable": "Wi-Fi scan unavailable. Enter your network manually.",
+  "pvNoNetworks": "No Wi-Fi networks found.",
+  "pvScanTimeout": "Wi-Fi scan timed out. Tap refresh to try again.",
+  "pvEnterManual": "Enter network manually",
+  "pvSelectApTitle": "Select Device Wi-Fi",
+  "pvTapAp": "Tap your device’s setup network below to connect.",
+  "pvScanUnavailableSettings": "Wi-Fi scan unavailable. Use Open Wi-Fi Settings instead.",
+  "pvNoNetworksNearby": "No Wi-Fi networks found nearby.",
+  "pvLocationOff": "Android hides nearby Wi-Fi networks from apps until Location is turned on.",
+  "pvTurnOnLocation": "Turn on Location",
+  "pvPermDenied": "Wi-Fi scanning needs this app’s location permission.",
+  "pvAllowSettings": "Allow in App Settings",
+  "pvDeviceNets": "DEVICE SETUP NETWORKS",
+  "pvOtherNets": "OTHER WI-FI NETWORKS",
+  "pvApChip": "DEVICE",
+  "pvManualJoin": "Manual: join the device's network in Android settings yourself",
+  "pvDetectedTap": "Detected — tap to connect",
+  "@pvSignalLine": {
+    "placeholders": {
+      "signal": { "type": "String" },
+      "id": { "type": "String" }
+    }
+  },
+  "pvSignalLine": "{signal} signal  ·  ID …{id}",
+  "pvSignalStrong": "Strong",
+  "pvSignalGood": "Good",
+  "pvSignalFair": "Fair",
+  "pvSignalWeak": "Weak",
+  "@pvSweepHeader": {
+    "placeholders": {
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "name": { "type": "String" }
+    }
+  },
+  "pvSweepHeader": "Step {step}/{total} — {name}",
+  "@pvSweepBusy": {
+    "placeholders": {
+      "name": { "type": "String" },
+      "step": { "type": "int" },
+      "total": { "type": "int" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvSweepBusy": "Configuring device — step {step}/{total} ({name}) · {secs}s",
+  "pvEnterDeviceName": "Enter a Device Name.",
+  "pvEnterHomeWifi": "Select or enter your home Wi-Fi network.",
+  "pvDeviceUnreachable": "The device is not reachable on its setup Wi-Fi anymore. It likely already connected to your home network; power-cycle it and, if it reconnects instead of showing the tasmota-XXXX AP, factory-reset it (hold its button ~10s), then try again.",
+  "pvIdentityUnreadable": "The device's identity couldn't be read. Power-cycle the device and try again.",
+  "pvIdentityLost": "Device identity was lost. Please try again.",
+  "pvReachStees": "Could not reach STEES. Waiting and retrying…",
+  "pvAlreadyExists": "The device already exists. You must delete it before claiming it again.",
+  "pvAlreadyRegistered": "This device is already registered to another account and cannot be added to this one.",
+  "pvInvalidMac": "The device didn't report its identity correctly. Close this window and try again.",
+  "pvBadRequest": "This device could not be registered with STEES. Close and try again.",
+  "pvAccessDenied": "Access was denied. Sign in again and retry.",
+  "pvSteesRejected": "STEES rejected this device. Close and try again.",
+  "pvNotSeen": "The device is not on the cloud yet. Waiting and retrying…",
+  "pvRateLimited": "Too many requests to STEES. Waiting a moment and retrying…",
+  "pvSteesBusy": "STEES was busy. Waiting and retrying…",
+  "pvNoLongerConnected": "You’re no longer connected to the device setup network — reconnect to it and continue.",
+  "@pvSettingRetry": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingRetry": "The device didn’t accept a setting (failed step: {step}). It’s still reachable — try again.",
+  "@pvSettingReset": {
+    "placeholders": { "step": { "type": "String" } }
+  },
+  "pvSettingReset": "The device did not accept all settings (failed step: {step}). Power-cycle it (hold its button ~10s to factory-reset if it no longer shows the tasmota-XXXX access point), then try again.",
+  "@pvConnectingTo": {
+    "placeholders": {
+      "ssid": { "type": "String" },
+      "secs": { "type": "int" }
+    }
+  },
+  "pvConnectingTo": "Connecting to {ssid}… ({secs}s)",
+  "@pvCheckingDevice": {
+    "placeholders": { "secs": { "type": "int" } }
+  },
+  "pvCheckingDevice": "Checking device… ({secs}s)",
+  "@pvApLost": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApLost": "The connection to \"{ssid}\" was dropped before setup could start. Stay close to the device and try again.",
+  "pvBindFailed": "The phone couldn’t route traffic to the device network. Toggle Wi-Fi off/on, then try again.",
+  "@pvApTimeout": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApTimeout": "The system took too long to join \"{ssid}\". Make sure the device is powered on and in pairing mode, then try again.",
+  "@pvApFailed": {
+    "placeholders": { "ssid": { "type": "String" } }
+  },
+  "pvApFailed": "Could not connect to the device setup network {ssid}. Make sure the device is powered on and in setup mode. If the join prompt was declined or the AP is password-protected, use Open Wi-Fi Settings instead.",
+  "pvDefaultName": "STEES Smart Device",
+  "pvLocalFallback": "Local HTTP control could not be enabled and verified on the device. Make sure this phone is on the same Wi-Fi as the device, then try again.",
+  "pvLocalUnknownIp": "The device address is not known to this phone yet — make sure it is on the same Wi-Fi network as the device, then retry.",
+  "@pvDiagBadIp": {
+    "placeholders": { "ip": { "type": "String" } }
+  },
+  "pvDiagBadIp": "The backend-reported LAN IP {ip} was invalid.",
+  "@pvDiagDiscovery": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagDiscovery": "Local discovery failed ({detail}). Make sure this phone is on the same Wi-Fi as the device.",
+  "pvDiagNoEndpoint": "No local HTTP endpoint was reachable for the device. Make sure this phone is on the same Wi-Fi as the device, then try again.",
+  "@pvDiagRejected": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagRejected": "The device rejected or did not confirm the SetOption128 enable ({detail}).",
+  "pvDiagHttpApi": "The device did not confirm its HTTP API is enabled (StatusNET.HTTP_API != 1). Restart the wizard or check the device console.",
+  "@pvDiagFinalCheck": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "pvDiagFinalCheck": "The final referer-less state check failed ({detail}).",
+  "pvBrokerFailed": "Could not load the MQTT broker address. Reopen Add Device while you have an internet connection.",
+  "pvBrokerLoadFailed": "Could not load the MQTT broker address from the backend. Make sure you are online, then reopen Add Device.",
+  "pvWifiSettingsFailed": "Could not open Wi-Fi settings.",
+  "pvNoIp": "The device connected to the network but did not receive an IP address. The Wi-Fi name and password are correct; check that the network allows new devices.",
+  "pvSsidNotFound": "The device could not find this Wi-Fi network. Check the Wi-Fi name and try again.",
+  "pvWrongPasswordMsg": "The device could not connect to this Wi-Fi network. The Wi-Fi password may be incorrect.",
+  "pvLocalError": "The device didn't respond to the Wi-Fi test. Make sure your phone is still connected to the device Wi-Fi and try again.",
+  "pvWifiVerified": "Wi-Fi connection verified.",
+  "pvWifiUnknown": "The device couldn't connect to this Wi-Fi network. Check the Wi-Fi name and password and try again.",
+  "pvGettingReady": "Getting ready…",
+  "pvConnecting": "Connecting to device",
+  "pvReconnecting": "Reconnecting to device",
+  "pvConfiguring": "Configuring device",
+  "pvTesting": "Testing Wi-Fi connection…",
+  "pvWifiFailedShort": "Wi-Fi connection failed",
+  "pvWifiVerifiedShort": "Wi-Fi verified",
+  "pvRestarting": "Connecting device to Wi-Fi…",
+  "pvRebooting": "Rebooting device…",
+  "pvConnectingMqtt": "Connecting device to MQTT…",
+  "pvRegistering": "Registering device…",
+  "pvEnablingLocal": "Enabling local control…",
+  "pvWaitingWifi": "Waiting for your Wi-Fi…",
+  "pvDeviceReady": "Device ready",
+  "pvProvisionFailed": "Provisioning failed",
+  "pvCancelled": "Cancelled",
+  "pvSweepWifiTest": "wifi-test",
+  "pvSweepBroker": "broker",
+  "pvSweepTopic": "topic",
+  "pvSweepModule": "module",
+  "pvSweepName": "name",
+  "pvSweepSsid": "ssid",
+  "pvSweepVerify": "verify",
+  "pvSweepRestart": "restart",
+  "pvTryDifferent": "Try a different network",
+  "pvShowPassword": "Show password",
+  "pvHidePassword": "Hide password",
+
+  "adWifiOff": "Wi-Fi is off",
+  "adWifiOffHint": "Your phone needs Wi-Fi turned on to find and join the device’s setup network.",
+  "adTurnOn": "Turn on Wi-Fi",
+  "adTitle": "Add Device",
+  "adHeading": "Add a device",
+  "adGuided": "GUIDED SETUP",
+  "adWizardHint": "Wi-Fi must be turned on on your phone — the wizard needs it to find and join the device’s setup network.",
+  "adProvision": "Provision New Device",
+
+  "asEnterNameId": "Enter a Sensor Name and Sensor ID",
+  "asSelectDevice": "Select the Sonoff device for this sensor",
+  "asAdded": "Sensor connected successfully.",
+  "asAddedHint": "Your sensor is now linked to the Sonoff device.",
+  "asCheckId": "Check the Sensor ID and make sure the ESP32 is connected.",
+  "asNotFound": "Sensor not found",
+  "asTitle": "Add Sensor",
+  "asLink": "LINK A SENSOR",
+  "asLinkHint": "The sensor will be verified on MQTT before it is added. Make sure your ESP32 is powered on so it can be found.",
+  "asDetails": "Sensor details",
+  "asDetailsHint": "Enter the Sensor ID exactly as configured on the device, then choose which Sonoff controller it belongs to.",
+  "asNameHint": "Sensor Name",
+  "asNameHelper": "e.g. Soil Moisture",
+  "asIdHint": "Sensor ID",
+  "asIdHelper": "e.g. soil_1",
+  "asSearching": "Searching for sensor...",
+  "asSearchingHint": "Waiting for the sensor to report on MQTT. This can take a few seconds.",
+  "asDeviceLbl": "Device",
+  "asNoDevices": "No Sonoff devices yet",
+  "asSelectHint": "Select the Sonoff device",
+  "asDeviceHelper": "e.g. Greenhouse Sonoff",
+
+  "apiTimeout": "The request timed out. Please try again.",
+  "apiUnreachable": "Could not reach the server. Check your connection.",
+  "apiSignup": "Signup failed",
+  "apiLogin": "Login failed",
+  "apiFetchDevices": "Failed to fetch devices",
+  "apiRegisterDevice": "Could not register the device",
+  "apiCheckDevice": "Could not check device",
+  "apiCheckDeviceStatus": "Could not check device status",
+  "apiFetchStatus": "Failed to fetch status",
+  "apiBrokerInfo": "Could not load broker info",
+  "apiBrokerHost": "Broker info missing a host",
+  "apiBrokerPort": "Broker info missing a port",
+  "apiControl": "Control failed",
+  "apiUnclaim": "Failed to unclaim device",
+  "apiDeleteDevice": "Failed to delete device",
+  "apiFetchSensors": "Failed to fetch sensors",
+  "apiAddSensor": "Failed to add sensor",
+  "apiDeleteSensor": "Failed to delete sensor",
+  "apiFetchRules": "Failed to fetch rules",
+  "apiCreateRule": "Failed to create rule",
+  "apiUpdateRule": "Failed to update rule",
+  "apiToggleRule": "Failed to toggle rule",
+  "apiDeleteRule": "Failed to delete rule",
+  "apiFetchSchedules": "Failed to fetch schedules",
+  "apiCreateSchedule": "Failed to create schedule",
+  "apiUpdateSchedule": "Failed to update schedule",
+  "apiToggleSchedule": "Failed to toggle schedule",
+  "apiDeleteSchedule": "Failed to delete schedule",
+  "apiSendMqtt": "Failed to send MQTT command",
+  "apiLoadWeather": "Failed to load weather",
+  "apiLoadAdvisories": "Failed to load advisories",
+  "apiUpdateLocation": "Failed to update location",
+  "apiRemoveLocation": "Failed to remove location",
+  "apiRegisterToken": "Failed to register push token",
+  "apiDeleteToken": "Failed to delete push token",
+
+  "ntChannel": "STEES Weather",
+  "ntChannelDesc": "Rain overlap advisories — alerts when irrigation overlaps forecast rain",
+  "ntRainExpected": "Rain expected",
+  "ntCheckSchedule": "Check your irrigation schedule",
+
+  "relayTypeOne": "1 Relay",
+  "relayTypeFour": "4 Relays"
+}

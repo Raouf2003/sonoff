@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../theme/app_theme.dart';
 import '../theme/stees_colors.dart';
 import '../services/api_service.dart';
@@ -39,9 +41,6 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   bool _saving = false;
 
   bool get _isEdit => widget.existing != null;
-
-  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  static const _dayShortLabels = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
 
   @override
   void initState() {
@@ -129,7 +128,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       final sMin = s.hour * 60 + s.minute;
       final eMin = e.hour * 60 + e.minute;
       if (eMin <= sMin) {
-        _err('Range ${i + 1}: end must be after start (no overnight)');
+        _err(AppLocalizations.of(context)!.schRangeInvalid(i + 1));
         return false;
       }
     }
@@ -219,14 +218,18 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       if (hitRanges.isEmpty) continue;
 
       final chans = (channelHit.toList()..sort()).map((c) => 'CH$c').join(', ');
+      final l10n = AppLocalizations.of(context)!;
       final dayText = dayHit.length == 7
-          ? 'every day'
-          : (dayHit.toList()..sort()).map((d) => _dayLabels[d]).join(', ');
+          ? l10n.sharedEveryDayWord
+          : (dayHit.toList()..sort())
+              .map((d) => weekdayLabel(d, l10n.localeName))
+              .join(', ');
       final name = (sibling['name'] as String? ?? '').trim();
       conflicts.add(
-        'Schedule conflict: $chans is already scheduled '
-        '${hitRanges.join(', ')} on $dayText'
-        '${name.isEmpty ? '' : ' ("$name")'}.',
+        name.isEmpty
+            ? l10n.schConflict(chans, hitRanges.join(', '), dayText)
+            : l10n.schConflictNamed(
+                chans, hitRanges.join(', '), dayText, name),
       );
       if (conflicts.length >= 3) break;
     }
@@ -235,9 +238,10 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   }
 
   Future<void> _save() async {
-    if (_channels.isEmpty) { _err('Select at least one channel'); return; }
+    final l10n = AppLocalizations.of(context)!;
+    if (_channels.isEmpty) { _err(l10n.sharedSelectChannel); return; }
     if (_recurrenceType == 'custom' && _daysOfWeek.isEmpty) {
-      _err('Pick at least one day for custom recurrence');
+      _err(l10n.schPickDay);
       return;
     }
     if (!_validateRanges()) return;
@@ -307,7 +311,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
       // on it; legacy `true` remains the fallback contract.
       if (mounted) Navigator.of(context).pop(saved);
     } catch (e) {
-      _err(e is ApiException ? e.message : 'Could not save the schedule');
+      _err(e is ApiException ? friendlyError(e, l10n) : l10n.schSaveFailed);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -334,9 +338,10 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEdit ? 'Edit Schedule' : 'New Schedule', style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
+        title: Text(_isEdit ? l10n.schEditTitle : l10n.schNewTitle, style: GoogleFonts.sora(fontSize: 18, fontWeight: FontWeight.w600, color: colors.foam)),
         backgroundColor: colors.well,
         iconTheme: IconThemeData(color: colors.mist),
       ),
@@ -357,8 +362,8 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 _DeviceBanner(deviceName: widget.deviceName, deviceId: widget.deviceId),
                 const SizedBox(height: 18),
                 _SectionCard(
-                  eyebrow: 'CHANNELS',
-                  description: 'Which outlets this schedule drives.',
+                  eyebrow: l10n.schChannelsSection,
+                  description: l10n.schChannelsDesc,
                   child: LayoutBuilder(
                     builder: (ctx, box) {
                       final count = widget.maxChannel;
@@ -389,8 +394,8 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 ),
                 const SizedBox(height: 14),
                 _SectionCard(
-                  eyebrow: 'REPEATS',
-                  description: 'When in the week this schedule runs.',
+                  eyebrow: l10n.schRepeatsSection,
+                  description: l10n.schRepeatsDesc,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -398,7 +403,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                         children: [
                           Expanded(
                             child: _ModeChip(
-                              label: 'Daily',
+                              label: l10n.schDaily,
                               icon: Icons.event_repeat,
                               selected: _recurrenceType == 'daily',
                               onTap: () => setState(() => _recurrenceType = 'daily'),
@@ -407,7 +412,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: _ModeChip(
-                              label: 'Custom days',
+                              label: l10n.schCustomMode,
                               icon: Icons.date_range,
                               selected: _recurrenceType == 'custom',
                               onTap: () => setState(() => _recurrenceType = 'custom'),
@@ -423,7 +428,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                               if (i > 0) const SizedBox(width: 6),
                               Expanded(
                                 child: _DayTile(
-                                  label: _dayShortLabels[i],
+                                  label: weekdayLabel(i, l10n.localeName),
                                   selected: _daysOfWeek.contains(i),
                                   onTap: () => setState(() {
                                     if (!_daysOfWeek.remove(i)) _daysOfWeek.add(i);
@@ -439,8 +444,8 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 ),
                 const SizedBox(height: 14),
                 _SectionCard(
-                  eyebrow: 'WINDOWS',
-                  description: 'Channels are ON inside each window, OFF otherwise.',
+                  eyebrow: l10n.schWindowsSection,
+                  description: l10n.schWindowsDesc,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -473,7 +478,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                               Icon(Icons.add, size: 14, color: colors.stream.withValues(alpha: 0.7)),
                               const SizedBox(width: 6),
                               Text(
-                                'Add window',
+                                l10n.schAddWindow,
                                 style: GoogleFonts.inter(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
@@ -527,7 +532,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                     icon: _saving
                         ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.well))
                         : Icon(_isEdit ? Icons.save_outlined : Icons.add, size: 18),
-                    label: Text(_isEdit ? 'Save Changes' : 'Create Schedule', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                    label: Text(_isEdit ? l10n.sharedSaveChanges : l10n.schCreate, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                     style: FilledButton.styleFrom(
                       backgroundColor: colors.stream,
                       foregroundColor: colors.well,
@@ -554,6 +559,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
   }
 
   Widget _buildRangeRow(int index, SteesColors colors) {
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
@@ -566,7 +572,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
           SizedBox(
             width: 26,
             child: Text(
-              'W${index + 1}',
+              l10n.schWindowLabel(index + 1),
               textAlign: TextAlign.center,
               style: GoogleFonts.jetBrainsMono(
                 fontSize: 9.5,
@@ -578,7 +584,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
           const SizedBox(width: 6),
           Expanded(
             child: _timeButton(
-              label: 'Starts',
+              label: l10n.schStarts,
               time: _rangeStarts[index],
               onTap: () => _pickTime(isStart: true, index: index),
               colors: colors,
@@ -592,7 +598,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
           ),
           Expanded(
             child: _timeButton(
-              label: 'Ends',
+              label: l10n.schEnds,
               time: _rangeEnds[index],
               onTap: () => _pickTime(isStart: false, index: index),
               colors: colors,
@@ -605,7 +611,7 @@ class _ScheduleFormScreenState extends State<ScheduleFormScreen> {
                 _rangeEnds.removeAt(index);
               }),
               icon: Icon(Icons.close, size: 16, color: colors.danger),
-              tooltip: 'Remove window',
+              tooltip: l10n.schRemoveWindow,
               visualDensity: VisualDensity.compact,
               constraints: const BoxConstraints(),
               padding: const EdgeInsets.all(4),
@@ -732,7 +738,7 @@ class _SectionCard extends StatelessWidget {
           if (description != null) ...[
             const SizedBox(height: 4),
             Padding(
-              padding: const EdgeInsets.only(left: 28),
+              padding: const EdgeInsetsDirectional.only(start: 28),
               child: Text(description!, style: GoogleFonts.inter(fontSize: 11, color: colors.mist.withValues(alpha: 0.7))),
             ),
           ],

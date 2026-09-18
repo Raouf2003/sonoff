@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:location/location.dart' as loc;
 import '../models/weather.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
 import '../services/api_service.dart';
 import '../services/weather_notification_service.dart';
 import 'weather_location_picker_page.dart';
@@ -34,7 +36,10 @@ class _WeatherPageState extends State<WeatherPage> {
   bool _loadingDevices = true;
   bool _loadingWeather = false;
   bool _loadError = false;
-  String? _errorMessage;
+  // Raw failure cause, resolved to a localized message in build() via
+  // friendlyError(). Never resolved here: loaders also run from initState,
+  // where Localizations cannot be read.
+  Object? _errorCause;
   DateTime? _retrievedAt;
   int _hourlyDay = 0;
 
@@ -48,7 +53,7 @@ class _WeatherPageState extends State<WeatherPage> {
     setState(() {
       _loadingDevices = true;
       _loadError = false;
-      _errorMessage = null;
+      _errorCause = null;
     });
     try {
       final devices = await _api.getDevices();
@@ -74,13 +79,14 @@ class _WeatherPageState extends State<WeatherPage> {
       setState(() {
         _loadingDevices = false;
         _loadError = _devices.isEmpty;
-        _errorMessage = e.message;
+        _errorCause = e;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loadingDevices = false;
         _loadError = _devices.isEmpty;
+        _errorCause = e;
       });
     }
   }
@@ -90,7 +96,7 @@ class _WeatherPageState extends State<WeatherPage> {
     if (deviceId == null) return;
     setState(() {
       _loadingWeather = true;
-      _errorMessage = null;
+      _errorCause = null;
     });
     try {
       final res = await _api.getWeatherToday(deviceId);
@@ -104,13 +110,13 @@ class _WeatherPageState extends State<WeatherPage> {
       if (!mounted) return;
       setState(() {
         _loadingWeather = false;
-        _errorMessage = e.message;
+        _errorCause = e;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loadingWeather = false;
-        _errorMessage = 'Could not load weather.';
+        _errorCause = e;
       });
     }
   }
@@ -165,19 +171,22 @@ class _WeatherPageState extends State<WeatherPage> {
   @override
   Widget build(BuildContext context) {
     final colors = context.steesColors;
+    final l10n = AppLocalizations.of(context)!;
     if (_loadingDevices) return const SteesLoading();
     if (_loadError && _devices.isEmpty) {
       return SteesError(
-        title: 'Could not load devices',
-        subtitle: _errorMessage ?? 'Check your connection and try again.',
+        title: l10n.devLoadFailed,
+        subtitle: _errorCause == null
+            ? l10n.sharedCheckConnection
+            : friendlyError(_errorCause!, l10n),
         onRetry: _loadDevices,
       );
     }
     if (_devices.isEmpty) {
-      return const SteesEmpty(
+      return SteesEmpty(
         icon: Icons.cloud_outlined,
-        title: 'No devices yet',
-        subtitle: 'Claim a device to enable weather forecasts.',
+        title: l10n.sharedNoDevices,
+        subtitle: l10n.wNoDevicesHint,
       );
     }
     return RefreshIndicator(
@@ -197,10 +206,10 @@ class _WeatherPageState extends State<WeatherPage> {
               padding: EdgeInsets.symmetric(vertical: 48),
               child: SteesLoading(),
             )
-          else if (_errorMessage != null && _weather == null)
+          else if (_errorCause != null && _weather == null)
             SteesError(
-              title: 'Could not load weather',
-              subtitle: _errorMessage!,
+              title: l10n.wLoadTitle,
+              subtitle: friendlyError(_errorCause!, l10n),
               onRetry: _loadWeather,
             )
           else if (_weather != null)
@@ -211,6 +220,7 @@ class _WeatherPageState extends State<WeatherPage> {
   }
 
   Widget _buildPageTitle(SteesColors colors) {
+    final l10n = AppLocalizations.of(context)!;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
           AppSpacing.xs, AppSpacing.sm, AppSpacing.xs, AppSpacing.md),
@@ -218,7 +228,7 @@ class _WeatherPageState extends State<WeatherPage> {
         children: [
           Expanded(
             child: Text(
-              'WEATHER',
+              l10n.wSection,
               style: GoogleFonts.sora(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
@@ -230,7 +240,7 @@ class _WeatherPageState extends State<WeatherPage> {
           IconButton(
             onPressed: _loadingWeather ? null : _loadWeather,
             icon: const Icon(Icons.refresh, size: 18),
-            tooltip: 'Refresh',
+            tooltip: l10n.wRefresh,
           ),
         ],
       ),
@@ -348,7 +358,7 @@ class _WeatherPageState extends State<WeatherPage> {
                     size: 30, color: colors.stream),
               ),
               const SizedBox(height: 16),
-              Text('Weather location not configured',
+              Text(AppLocalizations.of(context)!.wNoLocation,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.sora(
                       fontSize: 16,
@@ -357,7 +367,7 @@ class _WeatherPageState extends State<WeatherPage> {
                       color: colors.foam)),
               const SizedBox(height: 8),
               Text(
-                  'This device does not have a farm location yet. Select a location on the map to enable weather for this device.',
+                  AppLocalizations.of(context)!.wNoLocationHint,
                   textAlign: TextAlign.center,
                   style: GoogleFonts.inter(
                       fontSize: 13, height: 1.5, color: colors.mist)),
@@ -375,7 +385,7 @@ class _WeatherPageState extends State<WeatherPage> {
                   children: [
                     _WeatherEmptyFeature(
                         icon: Icons.cloud_outlined,
-                        label: 'Local\nforecast',
+                        label: AppLocalizations.of(context)!.wFeatForecast,
                         colors: colors),
                     Container(
                         width: 1,
@@ -383,7 +393,7 @@ class _WeatherPageState extends State<WeatherPage> {
                         color: colors.border.withValues(alpha: 0.7)),
                     _WeatherEmptyFeature(
                         icon: Icons.umbrella_outlined,
-                        label: 'Rain\nadvisories',
+                        label: AppLocalizations.of(context)!.wFeatAdvisories,
                         colors: colors),
                     Container(
                         width: 1,
@@ -391,7 +401,7 @@ class _WeatherPageState extends State<WeatherPage> {
                         color: colors.border.withValues(alpha: 0.7)),
                     _WeatherEmptyFeature(
                         icon: Icons.schedule_outlined,
-                        label: 'Schedules\nunaffected',
+                        label: AppLocalizations.of(context)!.wFeatUnaffected,
                         colors: colors),
                   ],
                 ),
@@ -403,7 +413,7 @@ class _WeatherPageState extends State<WeatherPage> {
                 child: FilledButton.icon(
                   onPressed: _openLocationPicker,
                   icon: const Icon(Icons.map_outlined, size: 18),
-                  label: Text('Set Location',
+                  label: Text(AppLocalizations.of(context)!.wSetLocation,
                       style: GoogleFonts.sora(
                           fontSize: 14, fontWeight: FontWeight.w700)),
                   style: FilledButton.styleFrom(
@@ -417,7 +427,7 @@ class _WeatherPageState extends State<WeatherPage> {
                 ),
               ),
               const SizedBox(height: 8),
-              Text('Pin defaults to your current location • Africa/Algiers',
+              Text(AppLocalizations.of(context)!.wPinDefaults(kWeatherTimezone),
                   textAlign: TextAlign.center,
                   style: GoogleFonts.jetBrainsMono(
                       fontSize: 9.5,
@@ -450,6 +460,7 @@ class _WeatherPageState extends State<WeatherPage> {
   /// Compact unavailable notice (the only verdict-style card kept): the
   /// forecast failed, schedules are unaffected, retry is one tap away.
   Widget _buildUnavailableCard(SteesColors colors) {
+    final l10n = AppLocalizations.of(context)!;
     return SteesCard(
       active: false,
       borderColor: colors.mist.withValues(alpha: 0.45),
@@ -465,14 +476,14 @@ class _WeatherPageState extends State<WeatherPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Forecast unavailable',
+                    Text(l10n.wForecastUnavailable,
                         style: GoogleFonts.sora(
                             fontSize: 14,
                             fontWeight: FontWeight.w700,
                             color: colors.foam)),
                     const SizedBox(height: 2),
                     Text(
-                        'Your irrigation schedules are unaffected and will run as programmed.',
+                        l10n.wForecastHint,
                         style: GoogleFonts.inter(
                             fontSize: 12.5,
                             height: 1.45,
@@ -484,11 +495,11 @@ class _WeatherPageState extends State<WeatherPage> {
           ),
           const SizedBox(height: AppSpacing.sm),
           Align(
-            alignment: Alignment.centerRight,
+            alignment: AlignmentDirectional.centerEnd,
             child: TextButton.icon(
               onPressed: _loadingWeather ? null : _loadWeather,
               icon: Icon(Icons.refresh, size: 15, color: colors.stream),
-              label: Text('Retry',
+              label: Text(l10n.sharedRetry,
                   style: GoogleFonts.inter(
                       fontSize: 12.5,
                       fontWeight: FontWeight.w600,
@@ -526,7 +537,7 @@ class _WeatherPageState extends State<WeatherPage> {
               children: [
                 Icon(Icons.edit_outlined, size: 13, color: colors.stream),
                 const SizedBox(width: 2),
-                Text('Edit',
+                Text(AppLocalizations.of(context)!.sharedEdit,
                     style: GoogleFonts.inter(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -547,20 +558,21 @@ class _WeatherPageState extends State<WeatherPage> {
   Widget _buildNowSection(SteesColors colors, WeatherToday w) {
     // Updated line uses the existing fetched/retrieved timestamps already on
     // the model — no new data source, just surfaced in-card as spec requests.
+    final l10n = AppLocalizations.of(context)!;
     final updated = _retrievedAt ?? (w.fetchedAt != null ? DateTime.tryParse(w.fetchedAt!) : null);
     String updatedLabel = w.timezone;
     if (updated != null) {
       String pad(int n) => n.toString().padLeft(2, '0');
-      updatedLabel = 'Updated ${pad(updated.hour)}:${pad(updated.minute)} · ${w.timezone}';
+      updatedLabel = l10n.wUpdated('${pad(updated.hour)}:${pad(updated.minute)}', w.timezone);
     }
-    final precipLabel = w.precipitationMm > 0 ? 'Precipitation' : 'Precipitation';
-    final precipSubtitle = 'Last hour';
+    final precipLabel = l10n.wPrecipitation;
+    final precipSubtitle = l10n.wLastHour;
     return SteesCard(
       active: false,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('CURRENT CONDITIONS',
+          Text(l10n.wCurrent,
               style: GoogleFonts.jetBrainsMono(
                   fontSize: 10.5,
                   fontWeight: FontWeight.w700,
@@ -582,7 +594,7 @@ class _WeatherPageState extends State<WeatherPage> {
                       height: 1,
                       color: colors.foam)),
               const SizedBox(width: AppSpacing.sm),
-              Text('Temperature',
+              Text(l10n.wTemperature,
                   style: GoogleFonts.inter(
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
@@ -608,7 +620,7 @@ class _WeatherPageState extends State<WeatherPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('${w.precipitationMm.toStringAsFixed(1)} mm',
+                    Text('${w.precipitationMm.toStringAsFixed(1)} ${l10n.unitMm}',
                         style: GoogleFonts.sora(
                             fontSize: 18,
                             fontWeight: FontWeight.w700,
@@ -647,7 +659,7 @@ class _WeatherPageState extends State<WeatherPage> {
           children: [
             _buildHourlyHeader(colors),
             const SizedBox(height: AppSpacing.sm),
-            Text('No hourly data for this day.',
+            Text(AppLocalizations.of(context)!.wNoHourly,
                 style: GoogleFonts.inter(fontSize: 12, color: colors.mist)),
           ],
         ),
@@ -671,7 +683,7 @@ class _WeatherPageState extends State<WeatherPage> {
             ),
           ),
           const SizedBox(height: AppSpacing.sm),
-          Text('Significant rain: ≥2 mm with ≥50% chance',
+          Text(AppLocalizations.of(context)!.wSignificantRain,
               style: GoogleFonts.jetBrainsMono(
                   fontSize: 9.5,
                   color: colors.mist.withValues(alpha: 0.7))),
@@ -683,7 +695,7 @@ class _WeatherPageState extends State<WeatherPage> {
   Widget _buildHourlyHeader(SteesColors colors) {
     return Row(
       children: [
-        Text('FORECAST',
+        Text(AppLocalizations.of(context)!.wForecast,
             style: GoogleFonts.jetBrainsMono(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w700,
@@ -713,22 +725,23 @@ class _WeatherPageState extends State<WeatherPage> {
     );
   }
 
-  static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
   String _dayLabel(String rainDate) {
+    final l10n = AppLocalizations.of(context)!;
     final now = DateTime.now();
     String fmt(DateTime d) =>
         '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
     final today = fmt(now);
     final tomorrow = fmt(now.add(const Duration(days: 1)));
-    if (rainDate == today) return 'Today';
-    if (rainDate == tomorrow) return 'Tomorrow';
+    if (rainDate == today) return l10n.sharedToday;
+    if (rainDate == tomorrow) return l10n.sharedTomorrow;
     try {
       final parts = rainDate.split('-');
       if (parts.length == 3) {
         final m = int.parse(parts[1]);
         final d = int.parse(parts[2]);
-        if (m >= 1 && m <= 12) return '${_months[m - 1]} $d';
+        if (m >= 1 && m <= 12) {
+          return '${monthLabel(m, l10n.localeName)} $d';
+        }
       }
     } catch (_) {}
     return rainDate;
@@ -736,10 +749,11 @@ class _WeatherPageState extends State<WeatherPage> {
 
   /// Day-pill labels: Today / Tomorrow / real date (never "Day +2").
   String _pillLabel(int index) {
-    if (index == 0) return 'Today';
-    if (index == 1) return 'Tomorrow';
+    final l10n = AppLocalizations.of(context)!;
+    if (index == 0) return l10n.sharedToday;
+    if (index == 1) return l10n.sharedTomorrow;
     final d = DateTime.now().add(const Duration(days: 2));
-    return '${_months[d.month - 1]} ${d.day}';
+    return '${monthLabel(d.month, l10n.localeName)} ${d.day}';
   }
 
   /// Per-conflict detail cards. Grouping/dedup logic is unchanged; only the
@@ -747,6 +761,7 @@ class _WeatherPageState extends State<WeatherPage> {
   /// always paired with its time range), and the overlap duration the API
   /// already provides. Advisory-only wording throughout.
   List<Widget> _buildAdvisoryCards(SteesColors colors, WeatherToday w) {
+    final l10n = AppLocalizations.of(context)!;
     // Always render ALL deduped advisories for all 3 days — never filter by _hourlyDay.
     final seen = <String, WeatherAdvisory>{};
     for (final a in w.advisories) {
@@ -796,8 +811,8 @@ class _WeatherPageState extends State<WeatherPage> {
                     Expanded(
                       child: Text(
                         primary.isOverlap
-                            ? 'Rain during irrigation'
-                            : 'Rain near irrigation',
+                            ? l10n.wRainDuring
+                            : l10n.wRainNear,
                         style: GoogleFonts.sora(
                             fontSize: 14,
                             fontWeight: FontWeight.w700,
@@ -820,7 +835,7 @@ class _WeatherPageState extends State<WeatherPage> {
                   ],
                 ),
                 const SizedBox(height: AppSpacing.md),
-                Text('Irrigation',
+                Text(l10n.wIrrigation,
                     style: GoogleFonts.jetBrainsMono(
                         fontSize: 9.5,
                         fontWeight: FontWeight.w700,
@@ -839,7 +854,7 @@ class _WeatherPageState extends State<WeatherPage> {
                           fontSize: 12, height: 1.4, color: colors.mist)),
                 ],
                 const SizedBox(height: AppSpacing.sm),
-                Text('Rain',
+                Text(l10n.wRain,
                     style: GoogleFonts.jetBrainsMono(
                         fontSize: 9.5,
                         fontWeight: FontWeight.w700,
@@ -847,7 +862,7 @@ class _WeatherPageState extends State<WeatherPage> {
                         color: colors.mist)),
                 const SizedBox(height: 2),
                 Text(
-                  '${primary.rainStart}–${primary.rainEnd} · ${primary.precipitationMm.toStringAsFixed(1)} mm · ${primary.probability}%',
+                  '${primary.rainStart}–${primary.rainEnd} · ${primary.precipitationMm.toStringAsFixed(1)} ${l10n.unitMm} · ${primary.probability}%',
                   style: GoogleFonts.sora(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
@@ -864,9 +879,10 @@ class _WeatherPageState extends State<WeatherPage> {
                   child: Text(
                     primary.isOverlap
                         ? (primary.overlapMinutes > 0
-                            ? 'Direct overlap · ${_overlapLabel(primary.overlapMinutes)}'
-                            : 'Direct overlap')
-                        : 'Close to irrigation window',
+                            ? l10n.wDirectOverlapWith(
+                                _overlapLabel(primary.overlapMinutes))
+                            : l10n.wDirectOverlap)
+                        : l10n.wCloseToWindow,
                     style: GoogleFonts.inter(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w700,
@@ -876,7 +892,7 @@ class _WeatherPageState extends State<WeatherPage> {
                 if (nears.isNotEmpty) ...[
                   const SizedBox(height: 6),
                   Text(
-                    'Also near: ${nears.map((n) => '${n.rainStart}–${n.rainEnd}').join(', ')}',
+                    l10n.wAlsoNear(nears.map((n) => '${n.rainStart}–${n.rainEnd}').join(', ')),
                     style: GoogleFonts.inter(
                         fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
                   ),
@@ -884,7 +900,7 @@ class _WeatherPageState extends State<WeatherPage> {
                 if (overlaps.length > 1) ...[
                   const SizedBox(height: 6),
                   Text(
-                    '+${overlaps.length - 1} more overlap${overlaps.length - 1 == 1 ? '' : 's'} same day',
+                    l10n.wMoreOverlaps(overlaps.length - 1),
                     style: GoogleFonts.inter(
                         fontSize: 11, color: colors.mist.withValues(alpha: 0.7)),
                   ),
@@ -892,12 +908,12 @@ class _WeatherPageState extends State<WeatherPage> {
                 if (widget.onNavigateToTab != null) ...[
                   const SizedBox(height: AppSpacing.sm),
                   Align(
-                    alignment: Alignment.centerRight,
+                    alignment: AlignmentDirectional.centerEnd,
                     child: TextButton.icon(
                       onPressed: () => widget.onNavigateToTab!(2),
                       icon: Icon(Icons.schedule_outlined,
                           size: 15, color: colors.stream),
-                      label: Text('Review Schedule',
+                      label: Text(l10n.wReviewSchedule,
                           style: GoogleFonts.inter(
                               fontSize: 12.5,
                               fontWeight: FontWeight.w600,
@@ -916,17 +932,19 @@ class _WeatherPageState extends State<WeatherPage> {
 
   /// Display form for the overlap duration the API already provides.
   String _overlapLabel(int minutes) {
-    if (minutes < 60) return '~$minutes min';
+    final l10n = AppLocalizations.of(context)!;
+    if (minutes < 60) return l10n.wDurationMin(minutes);
     final h = minutes ~/ 60;
     final m = minutes % 60;
-    return m == 0 ? '~$h h' : '~$h h $m min';
+    return m == 0 ? l10n.wDurationHour(h) : l10n.wDurationHourMin(h, m);
   }
 
   Widget _buildScheduleSection(SteesColors colors, WeatherToday w) {
+    final l10n = AppLocalizations.of(context)!;
     if (w.schedules.isEmpty) {
       return SteesCard(
         active: false,
-        child: Text('No irrigation schedules for this device.',
+        child: Text(l10n.wNoSchedules,
             style: GoogleFonts.inter(fontSize: 12.5, color: colors.mist)),
       );
     }
@@ -935,7 +953,7 @@ class _WeatherPageState extends State<WeatherPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('TODAY\u2019S IRRIGATION',
+          Text(l10n.wTodayIrrigation,
               style: GoogleFonts.jetBrainsMono(
                   fontSize: 10.5,
                   fontWeight: FontWeight.w700,
@@ -1001,6 +1019,10 @@ class _HourCell extends StatelessWidget {
   final WeatherHour hour;
   const _HourCell({required this.hour});
 
+  /// Localized "now" marker for the current-hour cell.
+  static String _nowLabel(BuildContext context) =>
+      AppLocalizations.of(context)!.hourNow;
+
   /// Backend significance rule, mirrored for display only (never redefined):
   /// precipitationMm >= 2 AND rainProbability >= 50.
   static bool isSignificant(WeatherHour h) =>
@@ -1055,7 +1077,7 @@ class _HourCell extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             if (now)
-              Text('NOW',
+              Text(_nowLabel(context),
                   style: GoogleFonts.jetBrainsMono(
                       fontSize: 7,
                       fontWeight: FontWeight.w700,
@@ -1087,7 +1109,7 @@ class _HourCell extends StatelessWidget {
             const SizedBox(height: 1),
             // Rain-first: mm is primary; probability is a forecast qualifier
             // shown only for future hours directly beneath it.
-            Text('${hour.precipitationMm.toStringAsFixed(1)} mm',
+            Text('${hour.precipitationMm.toStringAsFixed(1)} ${AppLocalizations.of(context)!.unitMm}',
                 style: GoogleFonts.sora(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,

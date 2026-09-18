@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
+import '../l10n/l10n_helpers.dart';
+import '../l10n/locale_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/theme_controller.dart';
 import '../services/auth_service.dart';
 import '../services/api_service.dart';
 import 'signup_screen.dart';
+import '../widgets/language_menu_button.dart';
 
 class LoginScreen extends StatefulWidget {
   final ThemeController? themeController;
-  const LoginScreen({super.key, this.themeController});
+  final LocaleController? localeController;
+  const LoginScreen({super.key, this.themeController, this.localeController});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -41,21 +46,20 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     if (_loading) return;
     final u = _usernameCtl.text.trim();
     final p = _passwordCtl.text;
-    if (u.isEmpty || p.isEmpty) { _err('Fill in all fields'); return; }
+    final l10n = AppLocalizations.of(context)!;
+    if (u.isEmpty || p.isEmpty) { _err(l10n.authFillAll); return; }
     setState(() => _loading = true);
     try {
       final data = await _api.login(u, p);
       await _auth.saveToken(data['token'] as String);
       await _auth.saveUsername(data['user']['username'] as String);
       if (mounted) Navigator.of(context).pushReplacementNamed('/home');
-    } catch (e) { _err(_friendly(e)); }
+    } catch (e) { if (mounted) _err(friendlyError(e, l10n)); }
     finally { if (mounted) setState(() => _loading = false); }
   }
 
   // ApiException already carries a user-safe message; anything else is a
   // programming/server edge case we never surface verbatim.
-  String _friendly(Object e) =>
-      e is ApiException ? e.message : 'Something went wrong. Please try again.';
 
   void _err(String m) {
     if (!mounted) return;
@@ -75,6 +79,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     final scheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       body: Container(
         decoration: BoxDecoration(
@@ -92,6 +97,13 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (widget.localeController != null)
+                      Align(
+                        alignment: AlignmentDirectional.centerEnd,
+                        child: LanguageMenuButton(
+                          controller: widget.localeController!,
+                        ),
+                      ),
                     Container(
                       width: 72, height: 72,
                       decoration: BoxDecoration(
@@ -106,20 +118,20 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                       child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
                     ),
                     const SizedBox(height: 20),
-                    Text('STEES', style: GoogleFonts.sora(fontSize: 28, fontWeight: FontWeight.w700, color: colors.foam, letterSpacing: 3)),
+                    Text(l10n.appTitle, style: GoogleFonts.sora(fontSize: 28, fontWeight: FontWeight.w700, color: colors.foam, letterSpacing: 3)),
                     const SizedBox(height: 6),
-                    Text('Smart Irrigation', style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
+                    Text(l10n.appTagline, style: GoogleFonts.inter(fontSize: 13, color: colors.mist)),
                     const SizedBox(height: 48),
                     _Field(
                       controller: _usernameCtl,
-                      hint: 'Username',
+                      hint: l10n.authUsername,
                       icon: Icons.person_outline,
                       next: true,
                     ),
                     const SizedBox(height: 14),
                     _Field(
                       controller: _passwordCtl,
-                      hint: 'Password',
+                      hint: l10n.authPassword,
                       icon: Icons.lock_outline,
                       obscure: _obscure,
                       suffix: IconButton(
@@ -135,17 +147,17 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                         onPressed: _loading ? null : _login,
                         child: _loading
                             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5))
-                            : Text('Sign In', style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
+                            : Text(l10n.authSignIn, style: GoogleFonts.sora(fontSize: 15, fontWeight: FontWeight.w700)),
                       ),
                     ),
                     const SizedBox(height: 24),
                     TextButton(
-                      onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SignupScreen())),
+                      onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SignupScreen(localeController: widget.localeController))),
                       child: RichText(
                         text: TextSpan(
-                          text: "Don't have an account?  ",
+                          text: l10n.authNoAccount,
                           style: GoogleFonts.inter(fontSize: 13, color: colors.mist),
-                          children: [TextSpan(text: 'Sign Up', style: TextStyle(color: colors.stream, fontWeight: FontWeight.w600))],
+                          children: [TextSpan(text: l10n.authSignUp, style: TextStyle(color: colors.stream, fontWeight: FontWeight.w600))],
                         ),
                       ),
                     ),

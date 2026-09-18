@@ -1,5 +1,6 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:smart_home_app/screens/provision_device_screen.dart';
 import 'package:smart_home_app/services/api_service.dart';
@@ -61,6 +62,8 @@ Future<void> _pumpWizard(
 }) async {
   await tester.pumpWidget(
     MaterialApp(
+      localizationsDelegates: testDelegates,
+      supportedLocales: testLocales,
       theme: AppTheme.light(),
       home: Builder(
         builder: (context) => Scaffold(
@@ -97,8 +100,7 @@ void main() {
   });
 
   group('terminal duplicate states', () {
-    testWidgets(
-        'existing device in YOUR account: already-exists message, no '
+    testWidgets('existing device in YOUR account: already-exists message, no '
         'delete/re-claim option', (tester) async {
       await _pumpWizard(tester, _FakeApi(), code: 'DEVICE_ALREADY_EXISTS');
 
@@ -115,8 +117,9 @@ void main() {
       expect(find.text('Remove device?'), findsNothing);
     });
 
-    testWidgets('registered to another account also shows no delete option',
-        (tester) async {
+    testWidgets('registered to another account also shows no delete option', (
+      tester,
+    ) async {
       await _pumpWizard(tester, _FakeApi(), code: 'DEVICE_ALREADY_REGISTERED');
 
       expect(find.text('Remove Device'), findsNothing);
@@ -125,8 +128,9 @@ void main() {
       expect(find.textContaining('another account'), findsWidgets);
     });
 
-    testWidgets('duplicate terminal state survives repeated rebuilds',
-        (tester) async {
+    testWidgets('duplicate terminal state survives repeated rebuilds', (
+      tester,
+    ) async {
       final api = _FakeApi();
       await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
 
@@ -141,8 +145,9 @@ void main() {
   });
 
   group('terminal freeze blocks async mutators', () {
-    testWidgets('no polling and no provisioning while duplicate is terminal',
-        (tester) async {
+    testWidgets('no polling and no provisioning while duplicate is terminal', (
+      tester,
+    ) async {
       final api = _FakeApi();
       await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
 
@@ -152,15 +157,22 @@ void main() {
       await tester.pump(const Duration(seconds: 30));
       await tester.pumpAndSettle();
 
-      expect(api.deviceSeenCalls, 0,
-          reason: 'polling must stop once the duplicate state is terminal');
-      expect(api.provisionCalls, 0,
-          reason: 'no automatic provisioning retry in a terminal state');
+      expect(
+        api.deviceSeenCalls,
+        0,
+        reason: 'polling must stop once the duplicate state is terminal',
+      );
+      expect(
+        api.provisionCalls,
+        0,
+        reason: 'no automatic provisioning retry in a terminal state',
+      );
       expect(find.textContaining('already exists'), findsOneWidget);
     });
 
-    testWidgets('lifecycle resume cannot restart polling in terminal state',
-        (tester) async {
+    testWidgets('lifecycle resume cannot restart polling in terminal state', (
+      tester,
+    ) async {
       final api = _FakeApi();
       await _pumpWizard(tester, api, code: 'DEVICE_ALREADY_EXISTS');
       expect(api.deviceSeenCalls, 0);
@@ -168,13 +180,17 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pump();
 
-      expect(api.deviceSeenCalls, 0,
-          reason: 'resume must not re-poll once the state is terminal');
+      expect(
+        api.deviceSeenCalls,
+        0,
+        reason: 'resume must not re-poll once the state is terminal',
+      );
       expect(find.textContaining('already exists'), findsOneWidget);
     });
 
-    testWidgets('polling / retry timers cannot clear the terminal state',
-        (tester) async {
+    testWidgets('polling / retry timers cannot clear the terminal state', (
+      tester,
+    ) async {
       final api = _FakeApi()
         ..deviceSeen = true
         ..provisionSucceeds = false;
@@ -191,28 +207,37 @@ void main() {
   });
 
   group('pure decision logic', () {
-    test('classifyDeleteOutcome clears on success and 404, keeps otherwise', () {
-      expect(classifyDeleteOutcome(succeeded: true), DeleteOutcome.cleared);
-      expect(classifyDeleteOutcome(statusCode: 200), DeleteOutcome.cleared);
-      expect(classifyDeleteOutcome(statusCode: 404), DeleteOutcome.cleared);
-      expect(classifyDeleteOutcome(statusCode: 401), DeleteOutcome.kept);
-      expect(classifyDeleteOutcome(statusCode: 500), DeleteOutcome.kept);
-      expect(classifyDeleteOutcome(), DeleteOutcome.kept);
-    });
+    test(
+      'classifyDeleteOutcome clears on success and 404, keeps otherwise',
+      () {
+        expect(classifyDeleteOutcome(succeeded: true), DeleteOutcome.cleared);
+        expect(classifyDeleteOutcome(statusCode: 200), DeleteOutcome.cleared);
+        expect(classifyDeleteOutcome(statusCode: 404), DeleteOutcome.cleared);
+        expect(classifyDeleteOutcome(statusCode: 401), DeleteOutcome.kept);
+        expect(classifyDeleteOutcome(statusCode: 500), DeleteOutcome.kept);
+        expect(classifyDeleteOutcome(), DeleteOutcome.kept);
+      },
+    );
 
     test('decidePreflight: same-account duplicate stops the claim', () {
-      expect(decidePreflight(DeviceDuplicateStatus.mine),
-          PreflightDecision.stopMine);
+      expect(
+        decidePreflight(DeviceDuplicateStatus.mine),
+        PreflightDecision.stopMine,
+      );
     });
 
     test('decidePreflight: other-account duplicate stops without removal', () {
-      expect(decidePreflight(DeviceDuplicateStatus.others),
-          PreflightDecision.stopOthers);
+      expect(
+        decidePreflight(DeviceDuplicateStatus.others),
+        PreflightDecision.stopOthers,
+      );
     });
 
     test('decidePreflight: not found continues provisioning', () {
-      expect(decidePreflight(DeviceDuplicateStatus.notFound),
-          PreflightDecision.continueProvisioning);
+      expect(
+        decidePreflight(DeviceDuplicateStatus.notFound),
+        PreflightDecision.continueProvisioning,
+      );
     });
 
     test('decidePreflight: unreachable/timeout never blocks provisioning', () {

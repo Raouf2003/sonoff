@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../l10n/gen/app_localizations.dart';
 import '../theme/app_theme.dart';
 
 // ──────────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ class SteesError extends StatelessWidget {
                 onPressed: onRetry,
                 icon: const Icon(Icons.refresh, size: 18),
                 label: Text(
-                  'Retry',
+                  AppLocalizations.of(context)!.sharedRetry,
                   style: GoogleFonts.sora(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
                 style: FilledButton.styleFrom(
@@ -285,6 +286,7 @@ class SteesActiveTag extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.steesColors;
     final color = active ? colors.leaf : colors.mist;
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -297,7 +299,7 @@ class SteesActiveTag extends StatelessWidget {
           Container(width: 5, height: 5, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
           const SizedBox(width: 4),
           Text(
-            active ? 'Active' : 'Off',
+            active ? l10n.sharedActive : l10n.sharedOff,
             style: GoogleFonts.sora(fontSize: 10, fontWeight: FontWeight.w600, color: color),
           ),
         ],

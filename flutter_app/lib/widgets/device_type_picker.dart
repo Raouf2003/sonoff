@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../l10n/gen/app_localizations.dart';
 import '../models/device_type.dart';
 import '../theme/app_theme.dart';
 
@@ -19,6 +20,7 @@ class DeviceTypePicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     return Row(
       children: [
         for (final type in DeviceType.values) ...[
@@ -27,7 +29,9 @@ class DeviceTypePicker extends StatelessWidget {
               icon: type == DeviceType.oneRelay
                   ? Icons.power_settings_new
                   : Icons.grid_view,
-              label: type.label,
+              label: type == DeviceType.oneRelay
+                  ? l10n.relayTypeOne
+                  : l10n.relayTypeFour,
               selected: type == value,
               onTap: () => onChanged(type),
             ),

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'test_helpers.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:smart_home_app/models/weather.dart';
@@ -80,17 +81,19 @@ Map<String, dynamic> _today({
         'scheduleId': 's1',
         'channels': [1, 2],
         'timeRanges': [
-          {'start': '06:00', 'end': '10:00'}
+          {'start': '06:00', 'end': '10:00'},
         ],
       },
     ],
-    'advisories': advisories ??
+    'advisories':
+        advisories ??
         (advisory
             ? [
                 _advisory(
-                    type: advisoryType,
-                    scheduleName: scheduleName,
-                    overlapMinutes: overlapMinutes),
+                  type: advisoryType,
+                  scheduleName: scheduleName,
+                  overlapMinutes: overlapMinutes,
+                ),
               ]
             : []),
   };
@@ -110,20 +113,24 @@ Map<String, http.Response> _routes({
   int todayStatus = 200,
 }) {
   http.Response json(Object body, [int status = 200]) => http.Response.bytes(
-      utf8.encode(jsonEncode(body)), status,
-      headers: {'content-type': 'application/json'});
+    utf8.encode(jsonEncode(body)),
+    status,
+    headers: {'content-type': 'application/json'},
+  );
   return {
-    'GET /api/devices': json(devices ??
-        [
-          {
-            'deviceId': 'D1',
-            'name': 'Field North',
-            'farmName': 'Field North',
-            'channels': 4,
-            'lat': 36.1,
-            'lon': 3.5,
-          },
-        ]),
+    'GET /api/devices': json(
+      devices ??
+          [
+            {
+              'deviceId': 'D1',
+              'name': 'Field North',
+              'farmName': 'Field North',
+              'channels': 4,
+              'lat': 36.1,
+              'lon': 3.5,
+            },
+          ],
+    ),
     'GET /api/weather/D1/today': todayStatus == 200
         ? json(today ?? _today())
         : http.Response('error', todayStatus),
@@ -131,20 +138,25 @@ Map<String, http.Response> _routes({
   };
 }
 
-  Future<void> _pump(WidgetTester tester, ApiService api) async {
-    await tester.pumpWidget(
-        MaterialApp(home: Scaffold(body: WeatherPage(api: api))));
+Future<void> _pump(WidgetTester tester, ApiService api) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      localizationsDelegates: testDelegates,
+      supportedLocales: testLocales,
+      home: Scaffold(body: WeatherPage(api: api)),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// Drags the page list until [target] is built, then settles.
+Future<void> scrollPageTo(WidgetTester tester, Finder target) async {
+  final list = find.byType(ListView).at(0);
+  for (var i = 0; i < 8 && target.evaluate().isEmpty; i++) {
+    await tester.drag(list, const Offset(0, -400));
     await tester.pumpAndSettle();
   }
-
-  /// Drags the page list until [target] is built, then settles.
-  Future<void> scrollPageTo(WidgetTester tester, Finder target) async {
-    final list = find.byType(ListView).at(0);
-    for (var i = 0; i < 8 && target.evaluate().isEmpty; i++) {
-      await tester.drag(list, const Offset(0, -400));
-      await tester.pumpAndSettle();
-    }
-  }
+}
 
 void main() {
   setUpAll(() {
@@ -163,8 +175,9 @@ void main() {
     expect(w.schedules.first.window, contains('06:00'));
   });
 
-  testWidgets('weather available shows forecast, hourly and advisory',
-      (tester) async {
+  testWidgets('weather available shows forecast, hourly and advisory', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes()));
     expect(find.textContaining('Field North'), findsWidgets);
     expect(find.textContaining('12.0 mm'), findsWidgets);
@@ -173,30 +186,34 @@ void main() {
     expect(find.textContaining('08:00'), findsWidgets);
   });
 
-  testWidgets('CURRENT CONDITIONS card comes first, before forecast and irrigation',
-      (tester) async {
-    tester.view.physicalSize = const Size(400, 2000);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    await _pump(tester, _api(_routes()));
-    final texts = tester
-        .widgetList<Text>(find.byType(Text))
-        .map((t) => t.data ?? '')
-        .toList();
-    final currentIdx = texts.indexOf('CURRENT CONDITIONS');
-    final forecastIdx = texts.indexOf('FORECAST');
-    final conflictIdx = texts.indexOf('Rain during irrigation');
-    final irrigationIdx = texts.indexOf('TODAY\u2019S IRRIGATION');
-    expect(currentIdx, isNot(-1));
-    expect(forecastIdx, isNot(-1));
-    expect(conflictIdx, isNot(-1));
-    expect(irrigationIdx, isNot(-1));
-    expect(currentIdx, lessThan(forecastIdx));
-    expect(forecastIdx, lessThan(conflictIdx));
-    expect(conflictIdx, lessThan(irrigationIdx));
-  });
+  testWidgets(
+    'CURRENT CONDITIONS card comes first, before forecast and irrigation',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 2000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      await _pump(tester, _api(_routes()));
+      final texts = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data ?? '')
+          .toList();
+      final currentIdx = texts.indexOf('CURRENT CONDITIONS');
+      final forecastIdx = texts.indexOf('FORECAST');
+      final conflictIdx = texts.indexOf('Rain during irrigation');
+      final irrigationIdx = texts.indexOf('TODAY\u2019S IRRIGATION');
+      expect(currentIdx, isNot(-1));
+      expect(forecastIdx, isNot(-1));
+      expect(conflictIdx, isNot(-1));
+      expect(irrigationIdx, isNot(-1));
+      expect(currentIdx, lessThan(forecastIdx));
+      expect(forecastIdx, lessThan(conflictIdx));
+      expect(conflictIdx, lessThan(irrigationIdx));
+    },
+  );
 
-  testWidgets('current card does NOT show precipitation probability', (tester) async {
+  testWidgets('current card does NOT show precipitation probability', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes()));
     expect(find.textContaining('% chance'), findsWidgets); // hourly does
     // The current card must not contain probability text.
@@ -213,7 +230,9 @@ void main() {
     expect(find.text('No significant rain right now'), findsNothing);
   });
 
-  testWidgets('future hourly forecast DOES show precipitation probability', (tester) async {
+  testWidgets('future hourly forecast DOES show precipitation probability', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes()));
     await scrollPageTo(tester, find.text('FORECAST'));
     // Future cells show rain probability as forecast qualifier.
@@ -223,52 +242,71 @@ void main() {
     expect(find.text('80%'), findsOneWidget);
   });
 
-  testWidgets('current precipitation is displayed with semantically correct wording',
-      (tester) async {
-    await _pump(tester, _api(_routes(today: _today(precipMm: 2.4, advisory: false))));
-    expect(find.text('CURRENT CONDITIONS'), findsOneWidget);
-    expect(find.text('2.4 mm'), findsOneWidget);
-    expect(find.textContaining('Last hour'), findsOneWidget);
-    // Temperature is dominant and present inside the current card.
-    final currentCards = find.ancestor(
-      of: find.text('CURRENT CONDITIONS'),
-      matching: find.byType(SteesCard),
-    );
-    expect(find.descendant(of: currentCards, matching: find.text('22°')), findsOneWidget);
-    expect(find.text('Temperature'), findsOneWidget);
-    // No probability inside current card.
-    expect(
-      find.descendant(of: currentCards, matching: find.textContaining('chance')),
-      findsNothing,
-    );
-  });
+  testWidgets(
+    'current precipitation is displayed with semantically correct wording',
+    (tester) async {
+      await _pump(
+        tester,
+        _api(_routes(today: _today(precipMm: 2.4, advisory: false))),
+      );
+      expect(find.text('CURRENT CONDITIONS'), findsOneWidget);
+      expect(find.text('2.4 mm'), findsOneWidget);
+      expect(find.textContaining('Last hour'), findsOneWidget);
+      // Temperature is dominant and present inside the current card.
+      final currentCards = find.ancestor(
+        of: find.text('CURRENT CONDITIONS'),
+        matching: find.byType(SteesCard),
+      );
+      expect(
+        find.descendant(of: currentCards, matching: find.text('22°')),
+        findsOneWidget,
+      );
+      expect(find.text('Temperature'), findsOneWidget);
+      // No probability inside current card.
+      expect(
+        find.descendant(
+          of: currentCards,
+          matching: find.textContaining('chance'),
+        ),
+        findsNothing,
+      );
+    },
+  );
 
-  testWidgets('no advisory shows current card and no conflict cards',
-      (tester) async {
+  testWidgets('no advisory shows current card and no conflict cards', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes(today: _today(advisory: false))));
     expect(find.text('CURRENT CONDITIONS'), findsOneWidget);
     expect(find.text('Rain during irrigation'), findsNothing);
     expect(find.text('Rain near irrigation'), findsNothing);
   });
 
-  testWidgets('MEDIUM conflict renders without overlap wording',
-      (tester) async {
-    await _pump(tester,
-        _api(_routes(today: _today(advisoryType: 'adjacent'))));
+  testWidgets('MEDIUM conflict renders without overlap wording', (
+    tester,
+  ) async {
+    await _pump(tester, _api(_routes(today: _today(advisoryType: 'adjacent'))));
     expect(find.text('Rain near irrigation'), findsOneWidget);
     expect(find.text('Rain during irrigation'), findsNothing);
     expect(find.text('Close to irrigation window'), findsOneWidget);
   });
 
-  testWidgets('overlap and adjacent groups render their own cards',
-      (tester) async {
+  testWidgets('overlap and adjacent groups render their own cards', (
+    tester,
+  ) async {
     await _pump(
-        tester,
-        _api(_routes(
-            today: _today(advisories: [
-          _advisory(type: 'adjacent', scheduleId: 's2'),
-          _advisory(type: 'overlap'),
-        ]))));
+      tester,
+      _api(
+        _routes(
+          today: _today(
+            advisories: [
+              _advisory(type: 'adjacent', scheduleId: 's2'),
+              _advisory(type: 'overlap'),
+            ],
+          ),
+        ),
+      ),
+    );
     expect(find.text('Rain during irrigation'), findsOneWidget);
     expect(find.text('Rain near irrigation'), findsOneWidget);
   });
@@ -279,7 +317,9 @@ void main() {
     expect(find.textContaining('Direct overlap'), findsOneWidget);
   });
 
-  testWidgets('SAFE state remains correct (no advisories, no impact cards)', (tester) async {
+  testWidgets('SAFE state remains correct (no advisories, no impact cards)', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes(today: _today(advisory: false))));
     expect(find.text('CURRENT CONDITIONS'), findsOneWidget);
     expect(find.text('FORECAST'), findsOneWidget);
@@ -290,14 +330,22 @@ void main() {
     expect(find.textContaining('Last hour'), findsOneWidget);
   });
 
-  testWidgets('Review Schedule action navigates to Schedules tab',
-      (tester) async {
+  testWidgets('Review Schedule action navigates to Schedules tab', (
+    tester,
+  ) async {
     var navigatedTo = -1;
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: testDelegates,
+        supportedLocales: testLocales,
         home: Scaffold(
-            body: WeatherPage(
-                api: _api(_routes()),
-                onNavigateToTab: (i) => navigatedTo = i))));
+          body: WeatherPage(
+            api: _api(_routes()),
+            onNavigateToTab: (i) => navigatedTo = i,
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Review Schedule'), findsWidgets);
     await tester.tap(find.text('Review Schedule').first);
@@ -307,9 +355,9 @@ void main() {
 
   testWidgets('duplicate schedule name is hidden', (tester) async {
     await _pump(
-        tester,
-        _api(_routes(
-            today: _today(scheduleName: '06:00–10:00'))));
+      tester,
+      _api(_routes(today: _today(scheduleName: '06:00–10:00'))),
+    );
     // Advisory card should show window+channels but not duplicate name.
     expect(find.text('06:00–10:00 · CH1 · CH2'), findsOneWidget);
     expect(find.textContaining('06:00–10:00 · 06:00–10:00'), findsNothing);
@@ -323,9 +371,22 @@ void main() {
   testWidgets('overlap duration is displayed when available', (tester) async {
     Future<void> repump(Map<String, dynamic> today) async {
       // Force a fresh State (same-type pumpWidget would preserve it).
-      await tester.pumpWidget(const MaterialApp(home: Scaffold()));
       await tester.pumpWidget(
-          MaterialApp(home: Scaffold(body: WeatherPage(api: _api(_routes(today: today))))));
+        const MaterialApp(
+          localizationsDelegates: testDelegates,
+          supportedLocales: testLocales,
+          home: Scaffold(),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: testDelegates,
+          supportedLocales: testLocales,
+          home: Scaffold(
+            body: WeatherPage(api: _api(_routes(today: today))),
+          ),
+        ),
+      );
       await tester.pumpAndSettle();
     }
 
@@ -341,24 +402,39 @@ void main() {
     expect(find.text('Today'), findsOneWidget);
     expect(find.text('Tomorrow'), findsOneWidget);
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     final d = DateTime.now().add(const Duration(days: 2));
     expect(find.text('${months[d.month - 1]} ${d.day}'), findsOneWidget);
     expect(find.text('Day +2'), findsNothing);
     expect(
-        find.text('Significant rain: ≥2 mm with ≥50% chance'), findsOneWidget);
+      find.text('Significant rain: ≥2 mm with ≥50% chance'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('current hour cell is marked NOW and without probability', (tester) async {
+  testWidgets('current hour cell is marked NOW and without probability', (
+    tester,
+  ) async {
     final now = DateTime.now();
     String pad(int n) => n.toString().padLeft(2, '0');
     final prefix = '${now.year}-${pad(now.month)}-${pad(now.day)}';
     final today = _today(advisory: false);
     today['hourly'] = [
       {
-        'localTime': '${prefix}T${pad(now.hour)}:00',        'temperature': 20,
+        'localTime': '${prefix}T${pad(now.hour)}:00',
+        'temperature': 20,
         'precipitationMm': 3.0,
         'precipitationProbability': 70,
       },
@@ -384,16 +460,23 @@ void main() {
 
   testWidgets('weather disabled shows location prompt', (tester) async {
     await _pump(
-        tester,
-        _api(_routes(devices: [
-          {'deviceId': 'D2', 'name': 'Field South', 'channels': 4},
-        ], today: _today(disabled: true))));
+      tester,
+      _api(
+        _routes(
+          devices: [
+            {'deviceId': 'D2', 'name': 'Field South', 'channels': 4},
+          ],
+          today: _today(disabled: true),
+        ),
+      ),
+    );
     expect(find.text('Weather location not configured'), findsOneWidget);
     expect(find.text('Set Location'), findsOneWidget);
   });
 
-  testWidgets('weather unavailable shows irrigation-safe message',
-      (tester) async {
+  testWidgets('weather unavailable shows irrigation-safe message', (
+    tester,
+  ) async {
     await _pump(tester, _api(_routes(today: _today(unavailable: true))));
     expect(find.text('Forecast unavailable'), findsOneWidget);
     expect(find.textContaining('unaffected'), findsOneWidget);
@@ -413,29 +496,28 @@ void main() {
     d2Today['advisories'] = [];
     final api = _api({
       'GET /api/devices': http.Response(
-          jsonEncode([
-            {
-              'deviceId': 'D1',
-              'name': 'North',
-              'farmName': 'Field North',
-              'channels': 4,
-              'lat': 36.1,
-              'lon': 3.5,
-            },
-            {
-              'deviceId': 'D2',
-              'name': 'South',
-              'farmName': 'Field South',
-              'channels': 4,
-              'lat': 35.0,
-              'lon': 4.0,
-            },
-          ]),
-          200),
-      'GET /api/weather/D1/today':
-          http.Response(jsonEncode(_today()), 200),
-      'GET /api/weather/D2/today':
-          http.Response(jsonEncode(d2Today), 200),
+        jsonEncode([
+          {
+            'deviceId': 'D1',
+            'name': 'North',
+            'farmName': 'Field North',
+            'channels': 4,
+            'lat': 36.1,
+            'lon': 3.5,
+          },
+          {
+            'deviceId': 'D2',
+            'name': 'South',
+            'farmName': 'Field South',
+            'channels': 4,
+            'lat': 35.0,
+            'lon': 4.0,
+          },
+        ]),
+        200,
+      ),
+      'GET /api/weather/D1/today': http.Response(jsonEncode(_today()), 200),
+      'GET /api/weather/D2/today': http.Response(jsonEncode(d2Today), 200),
     });
     await _pump(tester, api);
     expect(find.text('Rain during irrigation'), findsOneWidget);
