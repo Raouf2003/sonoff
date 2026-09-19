@@ -15,7 +15,7 @@ import '../services/device_transport.dart';
 import '../services/local_device_cache.dart';
 import '../services/provisioning_service.dart';
 import '../services/reachability_monitor.dart';
-import '../main.dart' show kServerIp, kProtocol, ChannelConfig, localizedChannels;
+import '../main.dart' show kServerIp, kProtocol, ChannelConfig;
 import '../widgets/stees_widgets.dart';
 import 'add_device_screen.dart';
 
@@ -1461,15 +1461,15 @@ class _DevicesPageState extends State<DevicesPage>
     widget.onNavigateToTab(2);
   }
 
-  // Channel label/icon for any channel count. The 4-entry default palette
-  // covers the common case; additional relays fall back to a generated entry so
-  // a device claimed with more channels never indexes past the list.
+  // General pump/valve label for every relay channel. The title is
+  // intentionally uniform: the app defines no per-channel pump/valve mapping,
+  // so no channel is arbitrarily assigned a type. The physical relay is
+  // always identified by the CHANNEL n subtitle. Control, schedules, rules
+  // and MQTT payloads all keep using the 1-based channel index.
   ChannelConfig _configFor(int index) {
     final l10n = AppLocalizations.of(context)!;
-    final localized = localizedChannels(l10n, _deviceChannels);
-    if (index < localized.length) return localized[index];
     return ChannelConfig(
-      l10n.zoneName(index + 1),
+      l10n.channelPumpValve,
       Icons.water_drop,
       const Color(0xFF0F766E),
       l10n.channelCode(index + 1),
@@ -2139,16 +2139,19 @@ class _WaterCardBodyState extends State<_WaterCardBody>
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                // Top row: physical channel code + toggle. The pump/valve
+                // label sits below on its own full-width line at a bigger
+                // size, scaled down only if needed so the full type stays
+                // visible with no ellipsis and no overflow.
+                Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
                             c.subtitle,
                             style: GoogleFonts.jetBrainsMono(
                               fontSize: 8.5,
@@ -2159,29 +2162,31 @@ class _WaterCardBodyState extends State<_WaterCardBody>
                                   : colors.mist,
                             ),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            c.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: GoogleFonts.sora(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: widget.offline
-                                  ? colors.mist
-                                  : colors.foam,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                        _DropletToggle(
+                          isOn: isOn,
+                          loading: showLoading,
+                          disabled: widget.offline,
+                          activeColor: colors.leaf,
+                          onTap:
+                              disabled ? null : () => widget.onToggle(!isOn),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: AppSpacing.xs),
-                    _DropletToggle(
-                      isOn: isOn,
-                      loading: showLoading,
-                      disabled: widget.offline,
-                      activeColor: colors.leaf,
-                      onTap: disabled ? null : () => widget.onToggle(!isOn),
+                    const SizedBox(height: 4),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Text(
+                        c.name,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: GoogleFonts.sora(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: widget.offline ? colors.mist : colors.foam,
+                        ),
+                      ),
                     ),
                   ],
                 ),

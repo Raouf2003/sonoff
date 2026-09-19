@@ -79,6 +79,7 @@
     "placeholders": { "index": { "type": "int" } }
   },
   "channelCode": "CHANNEL {index}",
+  "channelPumpValve": "Pump / Solenoid Valve",
 
   "authFillAll": "Fill in all fields",
   "authUsername": "Username",

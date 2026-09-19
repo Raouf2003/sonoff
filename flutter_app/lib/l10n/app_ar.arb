@@ -79,6 +79,7 @@
     "placeholders": { "index": { "type": "int" } }
   },
   "channelCode": "القناة {index}",
+  "channelPumpValve": "مضخة / صمام كهربائي",
 
   "authFillAll": "املأ جميع الحقول",
   "authUsername": "اسم المستخدم",

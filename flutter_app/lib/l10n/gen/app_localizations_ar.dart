@@ -174,6 +174,9 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get channelPumpValve => 'مضخة / صمام كهربائي';
+
+  @override
   String get authFillAll => 'املأ جميع الحقول';
 
   @override

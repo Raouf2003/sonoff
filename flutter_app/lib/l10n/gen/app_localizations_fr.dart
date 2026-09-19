@@ -174,6 +174,9 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
+  String get channelPumpValve => 'Pompe / Électrovanne';
+
+  @override
   String get authFillAll => 'Remplissez tous les champs';
 
   @override

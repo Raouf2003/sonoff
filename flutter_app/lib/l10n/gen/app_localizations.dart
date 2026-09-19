@@ -382,6 +382,12 @@ abstract class AppLocalizations {
   /// **'CHANNEL {index}'**
   String channelCode(int index);
 
+  /// No description provided for @channelPumpValve.
+  ///
+  /// In en, this message translates to:
+  /// **'Pump / Solenoid Valve'**
+  String get channelPumpValve;
+
   /// No description provided for @authFillAll.
   ///
   /// In en, this message translates to:

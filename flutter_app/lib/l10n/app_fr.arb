@@ -79,6 +79,7 @@
     "placeholders": { "index": { "type": "int" } }
   },
   "channelCode": "CANAL {index}",
+  "channelPumpValve": "Pompe / Électrovanne",
 
   "authFillAll": "Remplissez tous les champs",
   "authUsername": "Nom d'utilisateur",

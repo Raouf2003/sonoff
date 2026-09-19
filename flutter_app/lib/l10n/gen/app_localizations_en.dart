@@ -173,6 +173,9 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get channelPumpValve => 'Pump / Solenoid Valve';
+
+  @override
   String get authFillAll => 'Fill in all fields';
 
   @override

@@ -439,6 +439,12 @@ class _ProvisionDeviceScreenState extends State<ProvisionDeviceScreen>
   // a specific error and stay put (no Restart, no identity change).
   WifiTestResult _wifiTestResult = WifiTestResult.unknown;
 
+  /// True once WifiTest3 succeeded in the CURRENT sweep run. Used to tell a
+  /// post-test AP disappearance (device joined home Wi-Fi and dropped its
+  /// setup AP — plain power-cycle, no factory reset) apart from a generic
+  /// unreachable device at sweep-failure time.
+  bool _wifiTestSucceededThisRun = false;
+
 /// Names the exact sweep step that failed last, surfaced in the user-facing
 /// error and in logs ("failed step: ssid1-write") instead of an anonymous
 /// "did not accept all settings".
@@ -1586,6 +1592,7 @@ String get _sweepProgressLabel {
 //     comes online under the expected topic.
 Future<_ConfigOutcome> _sendTasmotaConfig() async {
   await _ensureBoundToWifi();
+  _wifiTestSucceededThisRun = false;
   _trace.enter(ProvisionPhase.config, 'WIFI_TEST_GATE');
 
   // ── STEP 1/8: Wi-Fi credential gate (fail-fast) ─────────────────────────
@@ -1609,6 +1616,7 @@ Future<_ConfigOutcome> _sendTasmotaConfig() async {
     return _ConfigOutcome.wifiTestFailed;
   }
   debugPrint('[PROVISION][WIFI_TEST] SUCCESS - persisting credentials');
+  _wifiTestSucceededThisRun = true;
   _trace.debugTrace(ProvisionPhase.wifi, label: 'WIFI_TEST_OK');
   if (mounted) {
     setState(() => _state = ProvisionState.wifiTestSucceeded);
