@@ -14,6 +14,7 @@ import 'rules_page.dart';
 import 'weather_page.dart';
 import 'login_screen.dart';
 import '../widgets/stees_nav_bar.dart';
+import '../widgets/stees_header_logo.dart';
 
 
 class MainShell extends StatefulWidget {
@@ -204,23 +205,10 @@ class _MainShellState extends State<MainShell> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [colors.stream, colors.leaf],
-              ),
-              boxShadow: [BoxShadow(color: colors.border, blurRadius: 8)],
-            ),
-            padding: const EdgeInsets.all(6),
-            child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
-          ),
-          const SizedBox(width: AppSpacing.md),
+          const SteesHeaderLogo(),
+          const SizedBox(width: 1),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

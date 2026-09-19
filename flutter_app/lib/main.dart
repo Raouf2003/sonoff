@@ -185,19 +185,14 @@ class _SteesLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.steesColors;
-    return Container(
-      width: size, height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft, end: Alignment.bottomRight,
-          colors: [colors.stream, colors.leaf],
-        ),
-        boxShadow: [BoxShadow(color: colors.border, blurRadius: 12, spreadRadius: 0)],
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Image.asset(
+        'assets/logo.png',
+        fit: BoxFit.contain,
+        semanticLabel: 'STEES logo',
       ),
-      padding: EdgeInsets.all(size * 0.18),
-      child: Center(child: Image.asset('assets/logo.png', fit: BoxFit.contain)),
     );
   }
 }
